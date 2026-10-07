@@ -737,9 +737,9 @@ fn automatic_offer_selection_uses_rating_price_freshness_and_stable_key_order() 
     assert_eq!(
         store
             .select_automatic_offer(now_unix)
-            .expect("price precedes imported rating")
+            .expect("trusted rating precedes price within the safety cap")
             .offer_key,
-        expected[3].0
+        expected[0].0
     );
 
     store
@@ -752,9 +752,9 @@ fn automatic_offer_selection_uses_rating_price_freshness_and_stable_key_order() 
     assert_eq!(
         store
             .select_automatic_offer(now_unix)
-            .expect("fresh unrated exploration candidate")
+            .expect("trusted rating precedes announcement recency")
             .offer_key,
-        expected[2].0
+        expected[0].0
     );
 }
 
@@ -813,8 +813,8 @@ fn automatic_offer_selection_reuses_a_funded_channel_when_wallet_balance_is_lock
         channel_id: opened.channel_id.clone(),
         balance: 1,
         signature: "signed-balance".to_string(),
-        params: None,
-        funding_proofs: None,
+        params: Some(json!({"channel": opened.channel_id, "unit": "sat"})),
+        funding_proofs: Some(json!({"proofs": []})),
     };
     store
         .sessions
@@ -837,6 +837,10 @@ fn automatic_offer_selection_reuses_a_funded_channel_when_wallet_balance_is_lock
     assert_eq!(selected.offer_key, offer_key);
     assert_eq!(selected.mint_url, mint);
     assert_eq!(selected.channel_capacity_sat, 20);
+    assert!(
+        selected.funded,
+        "zero wallet balance does not invalidate channel credit"
+    );
 }
 
 fn automatic_offer_config() -> PaidExitConfig {

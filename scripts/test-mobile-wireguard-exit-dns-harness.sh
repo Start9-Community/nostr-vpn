@@ -141,6 +141,9 @@ grep -Fq 'NVPN_ANDROID_RELEASE_DNS_ONLY_CYCLE="$((1 - first))"' \
 grep -Fq 'if ! truthy "$ANDROID_RELEASE_DNS_ONLY_CYCLE"; then' \
   "$ROOT/scripts/lib-mobile-android-release-gate.sh" \
   || fail "Android Release gate lacks its focused follow-up DNS path"
+grep -Fq 'ANDROID_UI_WAIT_SECS="${NVPN_ANDROID_UI_WAIT_SECS:-30}"' \
+  "$ROOT/scripts/mobile-android-smoke.sh" \
+  || fail "Android Release UI readiness still uses the flaky 15-second default"
 
 MOCK_ROOT="$HARNESS_ROOT/root"
 MOCK_BIN="$HARNESS_ROOT/bin"
@@ -167,7 +170,7 @@ cat >"$MOCK_ROOT/scripts/mobile_env.sh" <<'SH'
 #!/usr/bin/env bash
 load_mobile_env() { :; }
 select_physical_android_serial() { printf '%s\n' "${2:-android-physical}"; }
-select_physical_ios_device() { printf '%s\n' "$1"; }
+ios_release_network_resolve_device() { printf '%s\n' "$1"; }
 SH
 
 cat >"$MOCK_ROOT/scripts/lib-mobile-underlay-change.sh" <<'SH'
@@ -258,7 +261,9 @@ ios_release_network_prepare() {
   printf 'ios-prepare %s\n' "$1" >>"$NVPN_CONTRACT_EVENTS"
 }
 ios_release_network_disconnect_cleanup() {
-  printf 'ios-disconnect-cleanup %s\n' "${1:-0}" >>"$NVPN_CONTRACT_EVENTS"
+  printf 'ios-disconnect-cleanup %s armed=%s\n' \
+    "${1:-0}" "$IOS_CLEANUP_ARMED" >>"$NVPN_CONTRACT_EVENTS"
+  [[ "${NVPN_CONTRACT_IOS_DISCONNECT_CLEANUP_FAIL:-0}" != 1 ]]
 }
 ios_release_network_cleanup_private_artifacts() {
   printf 'ios-private-cleanup\n' >>"$NVPN_CONTRACT_EVENTS"
@@ -352,6 +357,9 @@ case "$label" in
   encrypted-custom) label=custom-doh ;;
   through_exit-cloudflare) label=through-exit ;;
 esac
+mkdir -p "$NVPN_ANDROID_RESULT_DIR"
+printf '{"case":"%s"}\n' "$label" \
+  >"$NVPN_ANDROID_RESULT_DIR/mobile-android-exit-dns-state-$label.json"
 [[ "${NVPN_CONTRACT_FAIL_ANDROID_LABEL:-}" != "$label" ]]
 SH
 chmod +x "$MOCK_ROOT/scripts/mobile-android-smoke.sh"
@@ -370,16 +378,22 @@ def value(flag):
     return args[args.index(flag) + 1]
 
 artifact = pathlib.Path(value("--artifact-receipt"))
+artifact_dir = pathlib.Path(value("--artifact-dir"))
 ledger = pathlib.Path(value("--counter-ledger"))
 output = pathlib.Path(value("--output"))
 if not artifact.is_file():
     raise SystemExit("exact artifact receipt is missing")
 if not ledger.is_file() or not ledger.read_text(encoding="utf-8").strip():
     raise SystemExit("durable counter ledger is missing")
+if value("--platform") == "android" and value("--mode") == "wireguard-dns":
+    states = list(artifact_dir.glob("mobile-android-exit-dns-state-*.json"))
+    if len(states) != 5:
+        raise SystemExit(f"expected five attempt-local Android states, got {len(states)}")
 record = {
     "platform": value("--platform"),
     "mode": value("--mode"),
     "artifactReceipt": str(artifact),
+    "artifactDir": str(artifact_dir),
     "counterLedger": str(ledger),
     "output": str(output),
     "includeUnderlay": "--include-underlay-lifecycle" in args,
@@ -415,7 +429,7 @@ run_gate() {
   local name="$1" platform="$2" selected_cases="$3" underlay="$4"
   local fail_android="$5" fail_ios="$6" cleanup_fail="$7"
   local android_receipt="$8" ios_receipt="$9" expected_status="${10}"
-  local status
+  local ios_cleanup_fail="${11:-0}" status
   RUN_DIR="$HARNESS_ROOT/$name"
   mkdir -p \
     "$RUN_DIR/state" "$RUN_DIR/android-artifacts" "$RUN_DIR/ios-artifacts"
@@ -442,6 +456,7 @@ run_gate() {
     NVPN_CONTRACT_FAIL_ANDROID_LABEL="$fail_android" \
     NVPN_CONTRACT_FAIL_IOS_LABEL="$fail_ios" \
     NVPN_CONTRACT_CLEANUP_FAIL="$cleanup_fail" \
+    NVPN_CONTRACT_IOS_DISCONNECT_CLEANUP_FAIL="$ios_cleanup_fail" \
     NVPN_MOBILE_WG_EXIT_HOST_IP=192.0.2.10 \
     NVPN_MOBILE_WG_EXIT_EXPECTED_SOURCE_IP=203.0.113.8 \
     NVPN_MOBILE_WG_EXIT_IMAGE_READY=1 \
@@ -542,6 +557,32 @@ assert_count 1 'ios-prepare ' "$RUN_DIR/events.log"
 assert_count 2 'ios-disconnect-cleanup ' "$RUN_DIR/events.log"
 assert_count 1 'ios-private-cleanup' "$RUN_DIR/events.log"
 
+first_android_attempt="$(
+  python3 -c \
+    'import json,sys; print(next(json.loads(line)["artifactDir"] for line in open(sys.argv[1]) if json.loads(line)["platform"] == "android"))' \
+    "$RUN_DIR/evidence.jsonl"
+)"
+run_gate full android "" 0 "" "" 0 1 0 0
+second_android_attempt="$(
+  python3 -c \
+    'import json,sys; print(json.loads(open(sys.argv[1]).readline())["artifactDir"])' \
+    "$RUN_DIR/evidence.jsonl"
+)"
+python3 - "$first_android_attempt" "$second_android_attempt" \
+  "$RUN_DIR/android-artifacts" <<'PY'
+import pathlib
+import sys
+
+first, second, root = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:])
+assert first != second
+assert first.parent == root
+assert second.parent == root
+PY
+[[ "$(find "$RUN_DIR/android-artifacts" -mindepth 1 -maxdepth 1 \
+  -type d -name 'mobile-wireguard-exit-attempt.*' | wc -l | tr -d ' ')" -eq 2 ]] \
+  || fail "Android retry evidence directories were not retained per attempt"
+assert_fixture_cleaned "$RUN_DIR"
+
 run_gate underlay all automatic-profile 1 "" "" 0 1 1 0
 python3 - "$RUN_DIR" <<'PY'
 import json
@@ -557,13 +598,28 @@ assert android["NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED"] == "0"
 assert ios["spec"]["exerciseUnderlay"] is True
 assert ios["spec"]["exerciseLifecycle"] is True
 assert ios["spec"]["switchToDirect"] is True
-assert (root / "android-artifacts/mobile-android-underlay-fresh-dns-fixture.json").is_file()
+assert len(list((root / "android-artifacts").glob(
+    "mobile-wireguard-exit-attempt.*/mobile-android-underlay-fresh-dns-fixture.json"
+))) == 1
 assert (root / "ios-artifacts/mobile-ios-underlay-fresh-dns-fixture.json").is_file()
 evidence = [json.loads(line) for line in (root / "evidence.jsonl").read_text().splitlines()]
 assert {(item["platform"], item["mode"]) for item in evidence} == {
     ("android", "underlay-lifecycle"), ("ios", "underlay-lifecycle")
 }
 assert all(item["includeUnderlay"] is False for item in evidence)
+PY
+assert_fixture_cleaned "$RUN_DIR"
+
+run_gate focused-rapid-retry android automatic-profile 0 "" "" 0 1 0 0
+python3 - "$RUN_DIR" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+android = json.loads((root / "android-cases.jsonl").read_text())
+assert android["NVPN_ANDROID_RAPID_START_STOP_GATE"] == "1"
+assert android["NVPN_ANDROID_SWITCH_TO_DIRECT_WHILE_CONNECTED"] == "0"
 PY
 assert_fixture_cleaned "$RUN_DIR"
 
@@ -597,6 +653,13 @@ retained_ledger="$(
 [[ -f "$retained_ledger" && "$(wc -l <"$retained_ledger")" -eq 1 ]] \
   || fail "iOS failure did not retain its one completed-case ledger"
 rm -f "$retained_ledger"
+
+run_gate ios-baseline-cleanup-failure ios automatic-profile 0 "" "" 0 0 1 1 1
+assert_fixture_cleaned "$RUN_DIR"
+assert_count 1 'ios-disconnect-cleanup ' "$RUN_DIR/events.log"
+grep -Fq 'ios-disconnect-cleanup 1 armed=0' "$RUN_DIR/events.log" \
+  || fail "explicit iOS baseline cleanup remained armed for duplicate EXIT cleanup"
+assert_count 1 'ios-private-cleanup' "$RUN_DIR/events.log"
 
 run_gate missing-artifact android automatic-profile 1 "" "" 0 0 0 1
 grep -Fq 'exact artifact receipt is missing' "$RUN_DIR/stderr.log" \

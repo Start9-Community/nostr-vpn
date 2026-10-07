@@ -52,7 +52,7 @@
     }
 
     #[cfg(feature = "paid-exit")]
-    fn assert_paid_route_activation_requires_admission_and_reachability(
+    fn assert_paid_route_activation_requires_fresh_end_to_end_probe(
         runtime: &mut NativeAppRuntime,
         store_path: &Path,
         seller: &Keys,
@@ -90,9 +90,26 @@
         })
         .expect("acknowledge seller admission");
         let state = runtime.state();
-        assert!(!state.exit_node_active, "an admitted but offline seller is pending");
+        assert!(
+            !state.exit_node_active,
+            "admission without an end-to-end probe is pending"
+        );
         assert!(state.exit_node_status_text.ends_with("Pending"));
 
+        update_paid_route_store(store_path, |store| {
+            store.update_session_probe(
+                nostr_vpn_core::paid_route_store::UpdatePaidRouteSessionProbeRequest {
+                    session_id: session_id.clone(),
+                    realized_exit_ip: Some("198.51.100.42".to_string()),
+                    observed_country_code: None,
+                    observed_asn: None,
+                    quality: None,
+                    now_unix: unix_timestamp(),
+                },
+            )?;
+            Ok(())
+        })
+        .expect("record fresh end-to-end health probe");
         runtime.daemon_state = Some(DaemonRuntimeState {
             vpn_enabled: true,
             vpn_active: true,
@@ -104,10 +121,15 @@
             ..DaemonRuntimeState::default()
         });
         let state = runtime.state();
-        assert!(state.exit_node_active);
+        assert!(
+            state.exit_node_active,
+            "a public paid seller does not need to be in the private peer roster"
+        );
         assert!(!state.exit_node_blocked);
         assert!(
-            state.exit_node_status_text.starts_with("Manual paid exit · "),
+            state
+                .exit_node_status_text
+                .ends_with("198.51.100.42 · Connected"),
             "{}",
             state.exit_node_status_text
         );
@@ -225,6 +247,17 @@
         assert_eq!(store.offers.len(), 2, "only signed offers are retained");
         assert_eq!(store.sessions.len(), 1);
         let session = store.sessions.values().next().expect("manual buyer session");
+        assert_eq!(
+            store.selected_buyer_session_id,
+            session.session.session_id,
+            "the GUI must persist the exact selected session, not only its seller"
+        );
+        assert!(
+            store
+                .buyer_session_open_attempts
+                .contains_key(&session.session.session_id),
+            "the daemon needs a bounded acknowledgment deadline"
+        );
         let channel = &store.channels[&session.session.payment.channel_id];
         let terms = channel.accepted_terms.as_ref().expect("accepted seller terms");
         assert_eq!(terms.pricing.price_msat_per_gb, 2_000_000);
@@ -353,6 +386,7 @@
         })
         .expect("persist store");
 
+        runtime.config.internet_source = InternetSource::PaidAutomatic;
         runtime.dispatch(NativeAppAction::BuyPaidRouteOffer {
             offer_key,
             mint_url: None,
@@ -371,15 +405,60 @@
         let saved = AppConfig::load(&runtime.config_path).expect("load saved config");
         assert_eq!(saved.internet_source, InternetSource::PaidManual);
         assert_eq!(saved.exit_node, seller.public_key().to_hex());
-        assert_paid_route_activation_requires_admission_and_reachability(
+        assert!(runtime.state().paid_route_market.offers.iter().all(|offer| !offer.can_rate));
+        assert!(runtime.state().paid_route_market.sessions.iter().all(|session| !session.can_rate));
+        runtime.dispatch(NativeAppAction::RatePaidExit { seller_npub: seller_npub.clone(), rating: -1 });
+        assert!(runtime.last_error.contains("connect through this provider"));
+        assert!(nostr_vpn_core::paid_route_store::load_paid_route_store(&store_path).unwrap().pending_exit_ratings().is_empty());
+        assert_eq!(runtime.config.exit_node, seller.public_key().to_hex());
+        assert_paid_route_activation_requires_fresh_end_to_end_probe(
             &mut runtime,
             &store_path,
             &seller,
             &seller_npub,
         );
+        assert!(runtime.state().paid_route_market.offers.iter().any(|offer| offer.can_rate));
+        assert!(runtime.state().paid_route_market.sessions.iter().any(|session| session.can_rate));
+
+        runtime.config.internet_source = InternetSource::PaidAutomatic;
+        runtime.dispatch(NativeAppAction::UpdateSettings { patch: SettingsPatch {
+            internet_source: Some("paid_manual".into()), ..SettingsPatch::default()
+        }});
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        assert_eq!(runtime.config.exit_node, seller.public_key().to_hex());
+        assert!(runtime.config.exit_node_public_paid_exit);
+        assert!(runtime.state().paid_route_market.visible_offers[0].status_text.starts_with("Selected"));
+        assert_eq!(runtime.state().paid_route_market.sessions[0].seller_npub, seller_npub);
+        assert_paid_exit_feedback_preserves_funds(&mut runtime, &store_path, &seller_npub);
 
         let _ = fs::remove_dir_all(&dir);
     }
+    #[cfg(feature = "paid-exit")]
+    fn assert_paid_exit_feedback_preserves_funds(
+        runtime: &mut NativeAppRuntime,
+        store_path: &Path,
+        seller_npub: &str,
+    ) {
+        let before = nostr_vpn_core::paid_route_store::load_paid_route_store(store_path).unwrap();
+        runtime.config.exit_node_leak_protection = false;
+        runtime.dispatch(NativeAppAction::RatePaidExit { seller_npub: seller_npub.to_owned(), rating: -1 });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        assert_eq!(runtime.config.internet_source, InternetSource::PaidManual);
+        assert!(runtime.config.exit_node.is_empty());
+        assert!(runtime.config.exit_node_leak_protection, "downvote must not expose direct traffic");
+        assert!(runtime.vpn_enabled);
+        let after = nostr_vpn_core::paid_route_store::load_paid_route_store(store_path).unwrap();
+        assert!(after.exit_provider_is_avoided(seller_npub));
+        assert_eq!(after.channels, before.channels, "feedback cannot discard channel funds");
+        assert_eq!(after.pending_exit_ratings().len(), 1);
+        assert!(runtime.state().paid_route_market.sessions.iter().all(|s| !s.allow_routing));
+        runtime.dispatch(NativeAppAction::RatePaidExit { seller_npub: seller_npub.to_owned(), rating: 0 });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        assert!(runtime.config.exit_node.is_empty(), "clearing a vote does not reconnect");
+        assert_eq!(runtime.config.internet_source, InternetSource::PaidManual);
+
+    }
+
     #[cfg(feature = "paid-exit")]
     #[test]
     fn gui_buy_paid_route_offer_failure_reaches_the_ui_error_state() {

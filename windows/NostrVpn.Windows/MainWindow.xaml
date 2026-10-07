@@ -448,6 +448,15 @@
                     <TextBlock Text="Paid · Automatic · Experimental" FontWeight="SemiBold" />
                   </DockPanel>
                 </Button>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8" Visibility="{Binding AutomaticProviderSelected, Converter={StaticResource BoolToVisibility}}">
+                  <ItemsControl ItemsSource="{Binding ActiveAutomaticPaidSessions}">
+                    <ItemsControl.ItemTemplate><DataTemplate><StackPanel Orientation="Horizontal">
+                      <Button x:Name="ExitThumbUp" Content="{Binding RatingUpText}" Tag="{Binding}" Click="RatePaidExit_Click" ToolTip="Publish or clear your positive rating" Margin="0,0,6,0" />
+                      <Button x:Name="ExitThumbDown" Content="{Binding RatingDownText}" Tag="{Binding}" Click="RatePaidExit_Click" ToolTip="Publish a negative rating and find another provider" Margin="0,0,6,0" />
+                    </StackPanel></DataTemplate></ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <Button Content="Try another" Click="ReselectPaidExit_Click" />
+                </StackPanel>
                 <Button Click="PaidManualExit_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Margin="0,0,0,8" Visibility="{Binding PaidRouteMarketVisible, Converter={StaticResource BoolToVisibility}}">
                   <DockPanel LastChildFill="False">
                     <TextBlock DockPanel.Dock="Right" Text="Experimental · browse internet sellers" Foreground="{StaticResource TextSecondary}" Margin="12,0,0,0" />
@@ -539,6 +548,7 @@
                     </TextBlock>
                   </StackPanel>
                 </DockPanel>
+                <TextBlock Text="{Binding State.ExitNodeStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" />
                 <TextBlock Text="{Binding PaidRouteMarketStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" />
                 <DockPanel LastChildFill="True" Margin="0,0,0,8">
                   <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="8,0,0,0">
@@ -548,18 +558,46 @@
                   <TextBox Text="{Binding ManualPaidExitProvider, UpdateSourceTrigger=PropertyChanged}" ToolTip="Provider npub or paid exit link" AutomationProperties.AutomationId="ManualPaidExitProvider" />
                 </DockPanel>
                 <TextBlock Text="{Binding State.PaidRouteMarket.ManualProviderStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,8" Visibility="{Binding State.PaidRouteMarket.ManualProviderStatusText, Converter={StaticResource NonEmptyStringToVisibility}}" />
+                <Grid Margin="0,0,0,8">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="80" />
+                    <ColumnDefinition Width="140" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <TextBox Grid.Column="0" Text="{Binding PaidRouteFilterCountryCode, UpdateSourceTrigger=PropertyChanged}" ToolTip="Two-letter country" Margin="0,0,8,0" MaxLength="2" AutomationProperties.AutomationId="PaidRouteFilterCountry" />
+                  <ComboBox Grid.Column="1" SelectedValue="{Binding PaidRouteFilterSort, UpdateSourceTrigger=PropertyChanged}" SelectedValuePath="Tag" Margin="0,0,8,0" AutomationProperties.AutomationId="PaidRouteFilterSort">
+                    <ComboBoxItem Tag="quality" Content="Quality" />
+                    <ComboBoxItem Tag="price" Content="Price" />
+                    <ComboBoxItem Tag="newest" Content="Newest" />
+                  </ComboBox>
+                  <CheckBox Grid.Column="2" Content="IPv4" IsChecked="{Binding PaidRouteFilterRequireIpv4}" VerticalAlignment="Center" Margin="0,0,8,0" />
+                  <CheckBox Grid.Column="3" Content="IPv6" IsChecked="{Binding PaidRouteFilterRequireIpv6}" VerticalAlignment="Center" Margin="0,0,8,0" />
+                  <StackPanel Grid.Column="5" Orientation="Horizontal">
+                    <Button Content="Clear filters" Click="ClearPaidRouteFilter_Click" Margin="0,0,8,0" />
+                    <Button Content="Apply" Click="ApplyPaidRouteFilter_Click" />
+                  </StackPanel>
+                </Grid>
+                <TextBlock Text="{Binding PaidRouteHiddenOffersText}" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8" Visibility="{Binding PaidRouteHiddenOffersText, Converter={StaticResource NonEmptyStringToVisibility}}" />
                 <TextBlock Text="{Binding State.PaidRouteMarket.LastPaymentAction.DisplayStatusText}" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Visibility="{Binding State.PaidRouteMarket.LastPaymentAction.DisplayStatusText, Converter={StaticResource NonEmptyStringToVisibility}}" />
                 <Button Content="Send payment" Click="SendPaidRoutePaymentEnvelope_Click" HorizontalAlignment="Left" Margin="0,6,0,10" Visibility="{Binding State.PaidRouteMarket.LastPaymentAction.EnvelopeJson, Converter={StaticResource NonEmptyStringToVisibility}}" />
                 <TextBlock Text="Available" FontWeight="SemiBold" Margin="0,8,0,6" />
-                <ItemsControl ItemsSource="{Binding State.PaidRouteMarket.Offers}">
+                <ItemsControl ItemsSource="{Binding PaidRouteVisibleOffers}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate>
                       <DockPanel Margin="0,0,0,8" LastChildFill="True">
-                        <Button DockPanel.Dock="Right" Content="Connect" Tag="{Binding}" Click="BuyPaidRouteOffer_Click" Margin="8,0,0,0" />
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                          <Button x:Name="ExitThumbUp" Content="{Binding RatingUpText}" Tag="{Binding}" Click="RatePaidExit_Click" Visibility="{Binding CanRate, Converter={StaticResource BoolToVisibility}}" ToolTip="Publish or clear your positive rating" Margin="0,0,6,0" />
+                          <Button x:Name="ExitThumbDown" Content="{Binding RatingDownText}" Tag="{Binding}" Click="RatePaidExit_Click" Visibility="{Binding CanRate, Converter={StaticResource BoolToVisibility}}" ToolTip="Publish or clear your negative rating; stops this provider" Margin="0,0,6,0" />
+                        </StackPanel>
+                        <Button DockPanel.Dock="Right" Content="Connect" Tag="{Binding}" Click="BuyPaidRouteOffer_Click" IsEnabled="{Binding CanUseProvider}" Margin="8,0,0,0" />
                         <StackPanel>
                           <WrapPanel>
                             <TextBlock Text="{Binding DisplayCountry}" FontWeight="SemiBold" Margin="0,0,8,0" />
                             <TextBlock Text="{Binding DisplayPrice}" Foreground="{StaticResource TextSecondary}" />
+                            <TextBlock Text="{Binding DisplayRating}" Foreground="{StaticResource TextSecondary}" Margin="8,0,0,0" />
                           </WrapPanel>
                           <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource TextSecondary}" TextTrimming="CharacterEllipsis" />
                           <TextBlock Text="{Binding DisplayMetricText}" Foreground="{StaticResource TextSecondary}" TextTrimming="CharacterEllipsis" Visibility="{Binding DisplayMetricText, Converter={StaticResource NonEmptyStringToVisibility}}" />
@@ -574,7 +612,11 @@
                     <DataTemplate>
                       <DockPanel Margin="0,0,0,10" LastChildFill="True">
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                          <Button Content="Connect" Tag="{Binding}" Click="UsePaidRouteSession_Click" Margin="0,0,6,0" />
+                          <Button x:Name="ExitThumbUp" Content="{Binding RatingUpText}" Tag="{Binding}" Click="RatePaidExit_Click" Visibility="{Binding CanRate, Converter={StaticResource BoolToVisibility}}" ToolTip="Publish or clear your positive rating" Margin="0,0,6,0" />
+                          <Button x:Name="ExitThumbDown" Content="{Binding RatingDownText}" Tag="{Binding}" Click="RatePaidExit_Click" Visibility="{Binding CanRate, Converter={StaticResource BoolToVisibility}}" ToolTip="Publish or clear your negative rating; stops this provider" Margin="0,0,6,0" />
+                        </StackPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                          <Button Content="Connect" Tag="{Binding}" Click="UsePaidRouteSession_Click" IsEnabled="{Binding CanUseProvider}" Margin="0,0,6,0" />
                           <Button Content="Probe" Tag="{Binding}" Click="ProbePaidRouteSession_Click" Margin="0,0,6,0" />
                           <Button Content="Fund" Tag="{Binding}" Click="OpenPaidRouteChannel_Click" IsEnabled="{Binding CanOpenChannel}" Margin="0,0,6,0" />
                           <Button Content="Pay" Tag="{Binding}" Click="SignPaidRoutePayment_Click" IsEnabled="{Binding CanPay}" Margin="0,0,6,0" />

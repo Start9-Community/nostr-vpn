@@ -19,18 +19,43 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         XCTAssertEqual(environment["NVPN_RELEASE_JOIN_BLACKBOX"], "1")
         XCTAssertTrue(app.launchArguments.isEmpty, "Release join gate must not pass app arguments")
         XCTAssertTrue(app.launchEnvironment.isEmpty, "Release join gate must not pass app environment")
-        app.launch()
+        // XCTest launch terminates the existing app and its PacketTunnel.
+        // Keep the carrier established by the preceding join phase alive;
+        // durability checks explicitly terminate and relaunch after delivery.
+        app.activate()
         try dismissSystemPromptsIfPresent()
     }
 
     func testCreateAdminNetworkAndReportPublicValues() throws {
         try createNetwork(named: required("NVPN_RELEASE_JOIN_NETWORK_NAME"))
+        try normalizeAndRequireJoinCarrier()
+        let vpnToggle = app.buttons
+            .matching(identifier: "vpn-toggle")
+            .firstMatch
+        XCTAssertTrue(
+            waitUntil(timeout: setupTimeout) {
+                vpnToggle.exists && vpnToggle.isEnabled && vpnToggle.label == "Turn VPN off"
+            },
+            "New iPhone admin network did not start its production VPN carrier"
+        )
+        emit("NVPN_RELEASE_JOIN_ADMIN_CARRIER_READY=1")
         openLinkDevice()
         let admin = try publicValue("admin-device-id-value", kind: .npub)
         let network = try publicValue("admin-network-id-value", kind: .network)
         emit("NVPN_RELEASE_JOIN_ADMIN_ID=\(admin)")
         emit("NVPN_RELEASE_JOIN_NETWORK_ID=\(network)")
         emit("NVPN_RELEASE_JOIN_ADMIN_READY=1")
+    }
+
+    func testNormalizeRetainedJoinCarrierSettings() throws {
+        let settings = app.tabBars.buttons["Settings"]
+        guard settings.waitForExistence(timeout: 3) else {
+            // A fresh container has generated defaults and no tunnel to probe.
+            emit("NVPN_RELEASE_JOIN_CARRIER_DEFAULTS_FRESH=1")
+            return
+        }
+        try normalizeAndRequireJoinCarrier()
+        emit("NVPN_RELEASE_JOIN_CARRIER_PREFLIGHT_READY=1")
     }
 
     func testShowPhysicalJoinQrAndRequireRosterCompletion() throws {
@@ -88,6 +113,8 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let imageFilename = try required("NVPN_RELEASE_JOIN_IMAGE_FILENAME")
         let expectedImageSHA = try required("NVPN_RELEASE_JOIN_IMAGE_SHA256")
         XCTAssertTrue(app.launchEnvironment.isEmpty)
+        // Require the existing carrier before approval.
+        try normalizeAndRequireJoinCarrier()
         openLinkDevice()
         let scan = element("join-request-scan-open")
         XCTAssertTrue(scan.waitForExistence(timeout: 10))
@@ -138,6 +165,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
                 .waitForExistence(timeout: deliveryTimeout),
             "Admin roster did not show the scanned joining identity"
         )
+        try waitForPeerAcceptance(expectedJoiner)
         emit("NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=\(expectedJoiner)")
     }
 
@@ -172,14 +200,26 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             XCTFail("Manual join did not dismiss Add Network with the expected pending admin")
             return
         }
+        // Configuring the pending roster precedes the asynchronous VPN start.
+        // Let the host approve only after the real carrier is authenticated.
+        try normalizeAndRequireJoinCarrier()
         emit("NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1")
 
         openDevicesTab()
         try requireAcceptedRoster(
             admin,
-            relaunch: true,
+            relaunch: false,
             initialTimeout: setupTimeout,
             failureMessage: "Manual join did not receive and retain the admin's signed roster"
+        )
+        // A received roster precedes the administrator's durable receipt.
+        // Keep PacketTunnel alive until the host verifies that acknowledgment.
+        if let signal = environment["NVPN_RELEASE_JOIN_PEER_ACCEPTED_FILENAME"], !signal.isEmpty {
+            try waitForPeerAcceptance(admin)
+        }
+        try relaunchAndRequireAcceptedRoster(
+            admin,
+            failureMessage: "Manual join did not retain the admin's signed roster"
         )
         emit("NVPN_RELEASE_JOIN_MANUAL_COMPLETE=\(admin)")
         emit("NVPN_RELEASE_JOIN_RELAUNCH_DURABLE=\(admin)")
@@ -187,27 +227,51 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
     func testManualAdminAddRequiresRosterProgress() throws {
         let joiner = try requiredNpub("NVPN_RELEASE_JOIN_JOINER_ID")
+        // Require the existing carrier before approval.
+        try normalizeAndRequireJoinCarrier()
         openLinkDevice()
         replaceText(scrollTo("manual-admin-joiner-id"), with: joiner)
         let alias = element("manual-admin-alias")
         if alias.exists {
             replaceText(alias, with: "Release gate phone")
         }
+        let submit = scrollTo("manual-admin-submit")
         emit("NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=\(millisecondsSinceEpoch())")
-        scrollTo("manual-admin-submit").tap()
+        submit.tap()
         openDevicesTab()
-        XCTAssertTrue(
-            element("roster-participant-accepted-\(joiner)")
-                .waitForExistence(timeout: deliveryTimeout),
-            "Manual admin add did not produce an exact roster row"
-        )
         try requireAcceptedRoster(
             joiner,
-            relaunch: true,
+            relaunch: false,
+            failureMessage: "Manual admin add did not produce an exact roster row"
+        )
+        // XCTest's bundle-wide terminate also kills PacketTunnel. The host
+        // first verifies delivery on the other device, then permits the
+        // independent durability check to interrupt this carrier.
+        try waitForPeerAcceptance(joiner)
+        try relaunchAndRequireAcceptedRoster(
+            joiner,
             failureMessage: "Manual admin add did not retain the joining device's signed roster"
         )
         emit("NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE=\(joiner)")
         emit("NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=\(joiner)")
+    }
+
+    private func waitForPeerAcceptance(_ joiner: String) throws {
+        let filename = try required("NVPN_RELEASE_JOIN_PEER_ACCEPTED_FILENAME")
+        XCTAssertTrue(filename.hasPrefix("nvpn-peer-accepted-") && filename.hasSuffix(".txt"))
+        XCTAssertEqual(URL(fileURLWithPath: filename).lastPathComponent, filename)
+        let documents = try XCTUnwrap(
+            FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        )
+        let signal = documents.appendingPathComponent(filename)
+        XCTAssertTrue(
+            waitUntil(timeout: setupTimeout) {
+                (try? String(contentsOf: signal, encoding: .utf8)) == joiner
+            },
+            "Peer acceptance was not verified before relaunch"
+        )
+        try FileManager.default.removeItem(at: signal)
+        emit("NVPN_RELEASE_JOIN_PEER_ACCEPTED_BEFORE_RELAUNCH=\(joiner)")
     }
 
     func testReportJoinerPublicIdentity() throws {
@@ -318,6 +382,67 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         XCTAssertTrue(app.tabBars.buttons["Devices"].waitForExistence(timeout: 10))
     }
 
+    private func normalizeAndRequireJoinCarrier() throws {
+        // Activating the retained app also retains its last presented sheet.
+        let linkDevice = app.navigationBars["Link Device"]
+        if linkDevice.exists {
+            linkDevice.buttons["Done"].tap()
+            XCTAssertTrue(waitUntil(timeout: 5) { !linkDevice.exists })
+        }
+        let settings = app.tabBars.buttons["Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), "Settings tab was unavailable")
+        settings.tap()
+
+        setSwitchOn("fips-connect-non-roster")
+        setSwitchOn("fips-nostr-discovery")
+        setSwitchOn("fips-bootstrap")
+
+        let vpnToggle = app.buttons.matching(identifier: "vpn-toggle").firstMatch
+        XCTAssertTrue(vpnToggle.waitForExistence(timeout: 5), "VPN control was unavailable")
+        if vpnToggle.label == "Turn VPN on" {
+            vpnToggle.tap()
+            try dismissSystemPromptsIfPresent()
+        }
+        XCTAssertTrue(
+            waitUntil(timeout: setupTimeout) {
+                vpnToggle.exists && vpnToggle.isEnabled && vpnToggle.label == "Turn VPN off"
+            },
+            "Join carrier did not start after restoring its public settings"
+        )
+
+        let carrier = scrollTo("diagnostics-other-fips")
+        XCTAssertTrue(
+            waitUntil(timeout: setupTimeout) {
+                self.nonNegativeIntegerValue(carrier) > 0
+            },
+            "Join carrier never authenticated a public bootstrap peer"
+        )
+        emit("NVPN_RELEASE_JOIN_BOOTSTRAP_CONNECTED=\(nonNegativeIntegerValue(carrier))")
+        app.tabBars.buttons["Devices"].tap()
+    }
+
+    private func setSwitchOn(_ identifier: String) {
+        let control = scrollTo(identifier)
+        XCTAssertTrue(
+            waitUntil(timeout: setupTimeout) { control.exists && control.isEnabled },
+            "\(identifier) stayed unavailable while restoring VPN state"
+        )
+        if (control.value as? String) != "On" {
+            // iOS 26 can report a successful accessibility tap on the row
+            // without invoking the SwiftUI Toggle. Hit the switch itself.
+            control.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        }
+        XCTAssertTrue(
+            waitUntil(timeout: 5) { (control.value as? String) == "On" },
+            "\(identifier) did not retain its enabled state"
+        )
+    }
+
+    private func nonNegativeIntegerValue(_ element: XCUIElement) -> Int {
+        let raw = (element.value as? String) ?? element.label
+        return Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+    }
+
     private func openJoinNetwork() {
         if !element("network-setup-join").waitForExistence(timeout: 3) {
             let switcher = element("network-switcher-open")
@@ -366,8 +491,7 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         let retained = ShippedUIInteraction.replaceText(
             field,
             with: value,
-            in: app,
-            incrementally: value.hasPrefix("npub1")
+            in: app
         )
         XCTAssertTrue(
             retained,
@@ -437,12 +561,20 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         guard relaunch else {
             return
         }
+        try relaunchAndRequireAcceptedRoster(participant, failureMessage: failureMessage)
+    }
+
+    private func relaunchAndRequireAcceptedRoster(
+        _ participant: String,
+        failureMessage: String
+    ) throws {
         app.terminate()
         app.launch()
         try dismissSystemPromptsIfPresent()
         openDevicesTab()
         XCTAssertTrue(
-            element(identifier).waitForExistence(timeout: deliveryTimeout),
+            element("roster-participant-accepted-\(participant)")
+                .waitForExistence(timeout: deliveryTimeout),
             "\(failureMessage) after a real app relaunch"
         )
     }

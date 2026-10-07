@@ -64,6 +64,7 @@ IDLE_CPU_GATE="${NVPN_IOS_IDLE_CPU_GATE:-${NVPN_IDLE_CPU_GATE:-1}}"
 IDLE_CPU_MAX_PERCENT="${NVPN_IOS_IDLE_CPU_MAX_PERCENT:-${NVPN_IDLE_CPU_MAX_PERCENT:-5}}"
 IDLE_CPU_SAMPLE_SECONDS="${NVPN_IOS_IDLE_CPU_SAMPLE_SECONDS:-${NVPN_IDLE_CPU_SAMPLE_SECONDS:-10}}"
 IDLE_CPU_SETTLE_SECONDS="${NVPN_IOS_IDLE_CPU_SETTLE_SECONDS:-${NVPN_IDLE_CPU_SETTLE_SECONDS:-3}}"
+IDLE_CPU_ISOLATE_NETWORK="${NVPN_IOS_IDLE_CPU_ISOLATE_NETWORK:-0}"
 IOS_SIM_PROCESS_NAME="${NVPN_IOS_SIM_PROCESS_NAME:-Nostr VPN}"
 IOS_SIMULATOR_UI_GATE="${NVPN_IOS_SIMULATOR_UI_GATE:-1}"
 IOS_LIFECYCLE_GATE="${NVPN_IOS_LIFECYCLE_GATE:-1}"
@@ -80,8 +81,8 @@ usage: scripts/mobile-ios-smoke.sh [simulator|device] [--install] [--disconnect]
 simulator  Builds, clean-installs, launches, screenshots, samples idle CPU,
            and drives QR, DNS-settings, and lifecycle controls through XCTest.
 device     Launches an already installed physical test build.
-           By default, backgrounds and foregrounds it three times and proves
-           the shared native core closes and reopens on every transition,
+           By default, switches to a system app and back three times and proves
+           the shared native core closes and reopens on every real transition,
            including a ten-second suspended interval per cycle.
 --install  Builds and installs the current iphoneos test app
            before launching device mode.
@@ -133,9 +134,10 @@ without injecting them. NVPN_IOS_SWITCH_TO_DIRECT_WHILE_CONNECTED=1 runs a
 physical XCTest that taps This device in the shipped Internet-source picker,
 verifies the installed tunnel config has neither a default route nor WireGuard
 exit, and proves DNS and HTTPS while the OS VPN stays connected.
-With a VPN cycle, the lifecycle gate uses physical XCTest Home/activate events
-for three ten-second background cycles by default and requires a fresh real
-TUN/DNS/HTTPS/endpoint receipt after every foreground before continuing.
+With a VPN cycle, the lifecycle gate uses direct CoreDevice app activation for
+three ten-second background cycles by default and requires a fresh real
+TUN/DNS/HTTPS/endpoint receipt after every foreground before continuing. It
+does not depend on the device's UI Automation mode.
 EOF
 }
 
@@ -472,6 +474,40 @@ PY
   rm -f "$process_json"
 }
 
+ios_packet_tunnel_process_is_stopped() {
+  local device="$1"
+  local process_json status=0
+  process_json="$(mktemp "${TMPDIR:-/tmp}/nvpn-ios-processes.XXXXXX")"
+  if ! xcrun devicectl device info processes \
+    --device "$device" \
+    --json-output "$process_json" \
+    --quiet
+  then
+    rm -f "$process_json"
+    return 1
+  fi
+  python3 - "$process_json" <<'PY' || status=$?
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+suffix = "/Nostr VPN.app/PlugIns/Nostr VPN Tunnel.appex/Nostr VPN Tunnel"
+processes = payload.get("result", {}).get("runningProcesses")
+if not isinstance(processes, list):
+    raise SystemExit(2)
+running = [
+    process for process in processes
+    if isinstance(process, dict)
+    and str(process.get("executable", "")).replace("%20", " ").endswith(suffix)
+]
+raise SystemExit(0 if not running else 1)
+PY
+  rm -f "$process_json" || status=1
+  return "$status"
+}
+
 terminate_ios_app_processes_before_install() {
   local device="$1"
   local process_ids process_id ignored
@@ -546,10 +582,13 @@ disconnect_ios_vpn_confirmed() {
 
 disconnect_ios_vpn_before_install() {
   local device="$1"
+  local process_only_confirmation=0
   if ! device_app_is_installed "$device"; then
     return 0
   fi
-  if ! disconnect_ios_vpn_confirmed "$device"; then
+  if ios_packet_tunnel_process_is_stopped "$device"; then
+    process_only_confirmation=1
+  elif ! disconnect_ios_vpn_confirmed "$device"; then
     echo "Refusing to replace $BUNDLE_ID while its existing packet tunnel may still be active." >&2
     echo "Disconnect it in iOS Settings or trust/launch the installed development app, then retry." >&2
     return 1
@@ -557,6 +596,13 @@ disconnect_ios_vpn_before_install() {
   if ! terminate_ios_app_processes_before_install "$device"; then
     echo "Refusing to replace $BUNDLE_ID while an old app process is still running." >&2
     return 1
+  fi
+  if [[ "$process_only_confirmation" -eq 1 ]]; then
+    if ! ios_packet_tunnel_process_is_stopped "$device"; then
+      echo "Refusing to replace $BUNDLE_ID because its packet tunnel started during cleanup." >&2
+      return 1
+    fi
+    echo "iOS VPN cleanup verified: packet tunnel process is stopped"
   fi
 }
 
@@ -688,15 +734,89 @@ run_ios_device_idle_cpu_gate() {
       return
       ;;
   esac
+  local process result_path timeout_seconds
+  case "$process_pattern" in
+    '^Nostr VPN Tunnel$') process="packet-tunnel" ;;
+    '^Nostr VPN$') process="app" ;;
+    *)
+      echo "Unsupported iOS idle CPU process pattern: $process_pattern" >&2
+      return 2
+      ;;
+  esac
   mkdir -p "$VPN_RESULT_DIR"
-  "$ROOT/scripts/idle-cpu-gate.py" ios-process \
-    --device "$device" \
-    --process-pattern "$process_pattern" \
-    --label "$label" \
-    --artifact "$VPN_RESULT_DIR/$IOS_IDLE_CPU_RESULT_NAME" \
-    --max-percent "$IDLE_CPU_MAX_PERCENT" \
-    --sample-seconds "$IDLE_CPU_SAMPLE_SECONDS" \
-    --settle-seconds "$IDLE_CPU_SETTLE_SECONDS"
+  result_path="$VPN_RESULT_DIR/$IOS_IDLE_CPU_RESULT_NAME"
+  timeout_seconds="$(python3 - "$IDLE_CPU_SETTLE_SECONDS" "$IDLE_CPU_SAMPLE_SECONDS" <<'PY'
+import math
+import sys
+
+print(math.ceil(float(sys.argv[1]) + float(sys.argv[2]) + 20))
+PY
+)"
+  launch_device "$device" \
+    --nvpn-debug-idle-cpu-probe \
+    --nvpn-debug-idle-cpu-result "$IOS_IDLE_CPU_RESULT_NAME" \
+    --nvpn-debug-idle-cpu-process "$process" \
+    --nvpn-debug-idle-cpu-max-percent "$IDLE_CPU_MAX_PERCENT" \
+    --nvpn-debug-idle-cpu-sample-seconds "$IDLE_CPU_SAMPLE_SECONDS" \
+    --nvpn-debug-idle-cpu-settle-seconds "$IDLE_CPU_SETTLE_SECONDS" >/dev/null
+
+  local ignored
+  for ignored in $(seq 1 $((timeout_seconds * 2))); do
+    sleep 0.5
+    if ! copy_ios_disconnect_result \
+      "$device" "$IOS_IDLE_CPU_RESULT_NAME" "$result_path" 2>/dev/null
+    then
+      continue
+    fi
+    if python3 - "$result_path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    result = json.load(handle)
+raise SystemExit(0 if result.get("phase") == "finished" else 1)
+PY
+    then
+      break
+    fi
+  done
+
+  python3 - \
+    "$result_path" "$process" "$label" "$IDLE_CPU_MAX_PERCENT" \
+    "$IDLE_CPU_SAMPLE_SECONDS" "$NVPN_BUILD_GIT_SHA" <<'PY'
+import json
+import math
+import sys
+
+path, process, label, maximum, sample_seconds, git_sha = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    result = json.load(handle)
+maximum = float(maximum)
+sample_seconds = float(sample_seconds)
+errors = []
+for key, expected in (
+    ("phase", "finished"),
+    ("process", process),
+    ("label", label),
+    ("appBuildGitSha", git_sha),
+):
+    if result.get(key) != expected:
+        errors.append(f"{key}={result.get(key)!r}, expected {expected!r}")
+cpu = result.get("cpuPercent")
+elapsed = result.get("elapsedSeconds")
+if result.get("ok") is not True:
+    errors.append(f"ok={result.get('ok')!r} error={result.get('error')!r}")
+if not isinstance(result.get("pid"), int) or result["pid"] <= 0:
+    errors.append(f"pid={result.get('pid')!r}")
+if not isinstance(cpu, (int, float)) or not math.isfinite(cpu) or cpu < 0 or cpu > maximum:
+    errors.append(f"cpuPercent={cpu!r}, maximum={maximum!r}")
+if not isinstance(elapsed, (int, float)) or elapsed < sample_seconds * 0.95:
+    errors.append(f"elapsedSeconds={elapsed!r}, sampleSeconds={sample_seconds!r}")
+if errors:
+    raise SystemExit("iOS idle CPU receipt failed: " + "; ".join(errors))
+print(f"{label} idle CPU ok: {cpu:.3f}% <= {maximum:.3f}%")
+print(f"Result: {path}")
+PY
 }
 
 run_ios_connected_direct_ui_driver() {
@@ -841,6 +961,9 @@ run_vpn_cycle() {
   fi
   if bool_is_true "$CREATE_NETWORK"; then
     args+=(--nvpn-debug-add-network "$DEBUG_NETWORK_NAME")
+    if bool_is_true "$IDLE_CPU_ISOLATE_NETWORK"; then
+      args+=(--nvpn-debug-isolate-idle-network)
+    fi
   fi
   if bool_is_true "$cleanup_after_vpn_cycle"; then
     vpn_cleanup_armed=1
@@ -864,6 +987,24 @@ run_vpn_cycle() {
   if ! validate_vpn_probe_result "$result_path"; then
     copy_ios_debug_logs "$device" || true
     return 1
+  fi
+  if bool_is_true "$IDLE_CPU_ISOLATE_NETWORK"; then
+    python3 - "$result_path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    receipt = json.load(handle)
+runtime = json.loads(receipt.get("packetTunnelRuntimeStateJson", ""))
+errors = []
+if runtime.get("fipsOtherPeerCount") != 0:
+    errors.append(f"fipsOtherPeerCount={runtime.get('fipsOtherPeerCount')!r}")
+if runtime.get("relays") != []:
+    errors.append(f"relays={runtime.get('relays')!r}")
+if errors:
+    raise SystemExit("iOS idle network isolation failed: " + "; ".join(errors))
+print("iOS idle network isolation verified: no bootstrap peers or public relays")
+PY
   fi
   echo "iOS device VPN probe passed: $result_path"
   if ! bool_is_true "$VERIFY_DIRECT_RESTORATION"; then

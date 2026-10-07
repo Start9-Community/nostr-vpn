@@ -390,6 +390,15 @@ pub(crate) fn daemon_control_result_timeout(request: DaemonControlRequest) -> Du
         return Duration::from_secs(45);
     }
 
+    if matches!(request, DaemonControlRequest::Reload) {
+        // Reload completion includes tunnel, route, DNS, and paid-exit
+        // upstream transitions. A live Direct-to-WireGuard seller handoff can
+        // legitimately take more than 15s while the old path is removed and
+        // the replacement handshake is proven. Keep the deadline bounded,
+        // but do not roll a successfully applying configuration back early.
+        return Duration::from_secs(30);
+    }
+
     if matches!(
         request,
         DaemonControlRequest::Pause | DaemonControlRequest::Resume
@@ -467,9 +476,9 @@ fn control_daemon(args: ControlArgs, request: DaemonControlRequest) -> Result<()
     Ok(())
 }
 
-fn daemon_status(config_path: &Path) -> Result<DaemonStatus> {
+pub(crate) fn daemon_status(config_path: &Path) -> Result<DaemonStatus> {
     let pid_file = daemon_pid_file_path(config_path);
-    let log_file = daemon_log_file_path(config_path);
+    let log_file = daemon_log_file_path(config_path)?;
     let state_file = daemon_state_file_path(config_path);
     let pid_record = read_daemon_pid_record(&pid_file)?;
     let pid_from_record = pid_record.as_ref().map(|record| record.pid);

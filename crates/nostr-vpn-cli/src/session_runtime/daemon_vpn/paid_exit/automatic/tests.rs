@@ -3,8 +3,11 @@ use nostr_sdk::prelude::{Keys, ToBech32};
 use nostr_vpn_core::config::InternetSource;
 use nostr_vpn_core::paid_routes::{PaidRouteChannelTerms, PaidRouteIpSupport, PaidRoutePricing};
 
+#[path = "mint_failover_tests.rs"]
+mod mint_failover_tests;
+
 #[test]
-fn automatic_selection_activates_a_routable_unfunded_probe_session() {
+fn automatic_selection_uses_signed_seller_endpoint_for_a_routable_probe_session() {
     let seller = Keys::generate();
     let seller_pubkey = seller.public_key().to_hex();
     let now = unix_timestamp();
@@ -32,19 +35,30 @@ fn automatic_selection_activates_a_routable_unfunded_probe_session() {
         },
         ..PaidExitConfig::default()
     };
-    let signed = nostr_vpn_core::paid_routes::signed_paid_exit_offer_from_config(
+    let seller_endpoint = "1.1.1.1:2122".to_string();
+    let signed = nostr_vpn_core::paid_routes::signed_paid_exit_offer_from_config_with_receiver_and_fips_endpoints(
         "automatic",
         &seller,
         &offer_config,
+        None,
+        std::slice::from_ref(&seller_endpoint),
         None,
         now,
     )
     .expect("signed offer");
     let mut store = PaidRouteStore::default();
     store.upsert_wallet_mint(mint, "approved", Some(100_000), now);
-    store
-        .upsert_signed_offer(signed, Vec::new(), now)
-        .expect("stored offer");
+    // The daemon receives the advert through pubsub. Opening the marketplace
+    // or running `paid-exit discover` must not be required for Automatic.
+    let cache_path = crate::control_pubsub_runtime::control_pubsub_store_file_path(&config_path);
+    std::fs::write(
+        cache_path,
+        serde_json::to_vec(&json!({
+            "version": 1, "events": [signed.event]
+        }))
+        .expect("encode received advert"),
+    )
+    .expect("persist received advert");
     update_paid_route_store(&store_path, |target| {
         *target = store;
         Ok(())
@@ -53,6 +67,9 @@ fn automatic_selection_activates_a_routable_unfunded_probe_session() {
 
     let mut app = AppConfig::generated();
     app.set_internet_source(InternetSource::PaidAutomatic);
+    app.fips_nostr_discovery_enabled = false;
+    app.connect_to_non_roster_fips_peers = false;
+    assert!(app.fips_peer_endpoints.is_empty());
     let mut automatic = PaidExitAutomaticBuyer::default();
     assert!(
         reconcile_automatic_paid_exit_selection(&mut automatic, &mut app, &config_path, now,)
@@ -76,6 +93,11 @@ fn automatic_selection_activates_a_routable_unfunded_probe_session() {
     );
     let saved = AppConfig::load(&config_path).expect("saved automatic route config");
     assert_eq!(saved.internet_source, InternetSource::PaidAutomatic);
+    assert_eq!(
+        saved.fips_peer_endpoint_hints(&seller_pubkey),
+        vec![seller_endpoint.clone()],
+        "automatic selection must dial the endpoint from the signed offer"
+    );
     assert_eq!(
         saved.public_paid_exit_node_pubkey_hex().as_deref(),
         Some(seller_pubkey.as_str())
@@ -118,6 +140,80 @@ fn automatic_selection_activates_a_routable_unfunded_probe_session() {
         "the automatic seller connection must activate the exit route"
     );
     assert!(!automatic.payments_allowed(&app, now));
+    // A restarted buyer may already have selected this seller, but still need
+    // to restore its signed endpoint before the tunnel can reconnect.
+    app.set_fips_peer_endpoint_hints(&seller_pubkey, &[])
+        .expect("clear seller endpoint");
+    app.save(&config_path)
+        .expect("save selection without endpoint");
+    let mut recovered = PaidExitAutomaticBuyer::default();
+    assert!(
+        reconcile_automatic_paid_exit_selection(&mut recovered, &mut app, &config_path, now + 1,)
+            .expect("recover automatic session")
+    );
+    assert_eq!(
+        recovered
+            .candidate
+            .as_ref()
+            .expect("recovered candidate")
+            .session_id,
+        session.session.session_id,
+    );
+    let saved = AppConfig::load(&config_path).expect("saved recovered endpoint");
+    assert_eq!(
+        saved.fips_peer_endpoint_hints(&seller_pubkey),
+        vec![seller_endpoint]
+    );
+    assert_eq!(
+        load_paid_route_store(&store_path).unwrap().sessions.len(),
+        1
+    );
+    // An explicit reselection preserves the old channel and never creates a rating.
+    assert!(
+        update_paid_route_store(&store_path, |store| store
+            .request_exit_reselection(&app, now + 2))
+        .is_err()
+    );
+    let alternative = Keys::generate();
+    let alternate_offer = nostr_vpn_core::paid_routes::signed_paid_exit_offer_from_config_with_receiver_and_fips_endpoints(
+        "alternative", &alternative, &offer_config, None, &["8.8.8.8:2122".to_string()], None, now,
+    ).unwrap();
+    update_paid_route_store(&store_path, |store| {
+        store.upsert_signed_offer(alternate_offer, vec![], now)?;
+        store.request_exit_reselection(&app, now + 2)
+    })
+    .unwrap();
+    let channels_before = load_paid_route_store(&store_path).unwrap().channels;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    recovered.funding = Some(runtime.spawn(std::future::pending::<Result<()>>()));
+    assert!(
+        !reconcile_automatic_paid_exit_selection(&mut recovered, &mut app, &config_path, now + 2)
+            .unwrap()
+    );
+    assert_eq!(
+        app.public_paid_exit_node_pubkey_hex(),
+        Some(seller_pubkey.clone()),
+        "wallet operation must finish before switching"
+    );
+    recovered.funding.take().unwrap().abort();
+    assert!(
+        reconcile_automatic_paid_exit_selection(&mut recovered, &mut app, &config_path, now + 3)
+            .unwrap()
+    );
+    assert_eq!(
+        app.public_paid_exit_node_pubkey_hex(),
+        Some(alternative.public_key().to_hex())
+    );
+    let after = load_paid_route_store(&store_path).unwrap();
+    assert!(after.automatic_reselect_from.is_empty());
+    assert!(after.exit_ratings.is_empty());
+    for (key, channel) in channels_before {
+        assert_eq!(after.channels[&key], channel);
+    }
+    assert_eq!(after.sessions.len(), 2);
     let _ = fs::remove_dir_all(directory);
 }
 
@@ -169,6 +265,106 @@ fn automatic_buyer_requires_probe_authenticated_seller_and_both_counter_directio
 }
 
 #[test]
+fn automatic_probe_waits_for_authenticated_seller_admission() {
+    let seller = Keys::generate();
+    let seller_pubkey = seller.public_key().to_hex();
+    let mut candidate = test_candidate(&seller_pubkey);
+    candidate.probe_started_at = None;
+    let now = 100;
+
+    candidate.observe_presence(&[test_peer_status(&seller_pubkey, now)], now);
+
+    assert!(!candidate.ready_to_probe(false, now));
+    assert!(candidate.ready_to_probe(true, now));
+}
+
+#[test]
+fn funded_idle_provider_stays_selected_and_unanswered_traffic_gets_rechecked() {
+    let seller = Keys::generate().public_key().to_hex();
+    let mut candidate = test_candidate(&seller);
+    candidate.funded = true;
+    candidate.probe_succeeded = true;
+    candidate.observe_presence(&[test_peer_status(&seller, 100)], 100);
+    candidate.observe_usage(
+        &PaidRouteUsage {
+            tx_bytes: 10,
+            rx_bytes: 20,
+            ..Default::default()
+        },
+        100,
+    );
+    candidate.observe_presence(&[test_peer_status(&seller, 200)], 200);
+    assert!(
+        !candidate.should_failover(200),
+        "healthy idle connection must stay selected"
+    );
+    assert!(!candidate.ready_to_probe(true, 200));
+    candidate.observe_usage(
+        &PaidRouteUsage {
+            tx_bytes: 10,
+            ..Default::default()
+        },
+        200,
+    );
+    candidate.observe_presence(&[test_peer_status(&seller, 261)], 261);
+    assert!(
+        candidate.ready_to_probe(true, 261),
+        "check actual Internet delivery before switching provider"
+    );
+    assert!(!candidate.should_failover(261));
+    candidate.observe_usage(
+        &PaidRouteUsage {
+            rx_bytes: 20,
+            ..Default::default()
+        },
+        262,
+    );
+    assert!(!candidate.ready_to_probe(true, 262));
+    assert!(
+        candidate.should_failover(322),
+        "a lost authenticated peer still needs recovery"
+    );
+}
+
+#[test]
+fn returning_provider_can_fund_before_probe_but_needs_fresh_health_to_stream_payments() {
+    let seller = Keys::generate();
+    let pubkey = seller.public_key().to_hex();
+    let mut candidate = test_candidate(&pubkey);
+    candidate.selection.previously_verified = true;
+    candidate.probe_started_at = None;
+    assert!(!candidate.ready_to_fund(100));
+    candidate.observe_presence(&[test_peer_status(&pubkey, 100)], 100);
+    assert!(candidate.ready_to_fund(100));
+    assert!(!candidate.ready_to_probe(false, 100));
+    assert!(!candidate.health_evidence_fresh(100));
+    candidate.funding_attempted = true;
+    candidate.funded = true;
+    assert!(
+        !candidate.ready_to_fund(100),
+        "retry must reuse the funded channel"
+    );
+    assert!(candidate.ready_to_probe(true, 100));
+    assert!(!candidate.health_evidence_fresh(100));
+    candidate.probe_succeeded = true;
+    candidate.observe_usage(
+        &PaidRouteUsage {
+            tx_bytes: 200,
+            rx_bytes: 400,
+            ..Default::default()
+        },
+        101,
+    );
+    assert!(candidate.health_evidence_fresh(101));
+    let mut stranger = test_candidate(&pubkey);
+    stranger.observe_presence(&[test_peer_status(&pubkey, 100)], 100);
+    assert!(
+        !stranger.ready_to_fund(100),
+        "an unknown provider still needs a successful trial"
+    );
+}
+
+#[test]
 fn automatic_cancellation_never_overwrites_another_internet_mode() {
     let seller = Keys::generate();
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
@@ -182,6 +378,20 @@ fn automatic_cancellation_never_overwrites_another_internet_mode() {
         ..PaidExitAutomaticBuyer::default()
     };
     let generation = automatic.generation;
+    assert!(automatic.continues_with_manual_provider(&app));
+    let mut different = app.clone();
+    different
+        .select_public_paid_exit_node(&Keys::generate().public_key().to_hex())
+        .unwrap();
+    assert!(!automatic.continues_with_manual_provider(&different));
+    for mode in [
+        InternetSource::Direct,
+        InternetSource::PrivateVpn,
+        InternetSource::WireGuard,
+    ] {
+        different.set_internet_source(mode);
+        assert!(!automatic.continues_with_manual_provider(&different));
+    }
 
     automatic.cancel_if_disabled(&app);
 
@@ -214,6 +424,42 @@ fn automatic_failed_offer_is_retried_after_cooldown() {
     assert!(automatic.rejected_offers.contains_key("offer"));
     automatic.expire_rejected_offers(120 + PAID_EXIT_AUTO_RETRY_COOLDOWN_SECS);
     assert!(!automatic.rejected_offers.contains_key("offer"));
+}
+
+#[test]
+fn automatic_candidate_keeps_same_offer_when_funded_capacity_becomes_authoritative() {
+    let seller = Keys::generate();
+    let mut candidate = test_candidate(&seller.public_key().to_hex());
+    let funded = serde_json::from_value(json!({
+        "offer_key": "offer",
+        "mint_url": "https://mint.example",
+        "channel_capacity_sat": 7,
+    }))
+    .expect("funded selection");
+
+    candidate.reconcile_selection(funded);
+
+    assert!(!candidate.failed);
+    assert_eq!(candidate.selection.channel_capacity_sat, 7);
+
+    let replacement = serde_json::from_value(json!({
+        "offer_key": "replacement",
+        "mint_url": "https://mint.example",
+        "channel_capacity_sat": 7,
+    }))
+    .expect("replacement selection");
+    candidate.reconcile_selection(replacement);
+    assert!(candidate.failed);
+
+    let mut candidate = test_candidate(&seller.public_key().to_hex());
+    let changed_mint = serde_json::from_value(json!({
+        "offer_key": "offer",
+        "mint_url": "https://other-mint.example",
+        "channel_capacity_sat": 7,
+    }))
+    .expect("changed mint selection");
+    candidate.reconcile_selection(changed_mint);
+    assert!(candidate.failed);
 }
 
 #[test]
@@ -252,9 +498,38 @@ fn test_candidate(seller_pubkey: &str) -> PaidExitAutomaticCandidate {
         last_authenticated_at: None,
         last_tx_at: None,
         last_rx_at: None,
-        last_healthy_at: None,
+        unanswered_since: None,
         failed: false,
     }
+}
+
+#[test]
+fn mint_outage_keeps_authenticated_provider_and_allows_payment_retry() {
+    let seller = Keys::generate();
+    let pubkey = seller.public_key().to_hex();
+    let mut candidate = test_candidate(&pubkey);
+    candidate.selection.previously_verified = true;
+    candidate.probe_started_at = None;
+    candidate.funding_attempted = true;
+    for now in [131, 200, 500] {
+        candidate.observe_presence(&[test_peer_status(&pubkey, now)], now);
+        assert!(
+            !candidate.should_failover(now),
+            "mint outage is not a provider failure"
+        );
+        assert!(
+            candidate.ready_to_fund(now),
+            "retry the same session without another trial"
+        );
+        assert!(
+            !candidate.ready_to_probe(true, now),
+            "funding must not reuse trial admission"
+        );
+    }
+    assert!(
+        candidate.should_failover(561),
+        "an unreachable provider must still fail over"
+    );
 }
 
 fn test_peer_status(pubkey: &str, now: u64) -> MeshPeerStatus {

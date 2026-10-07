@@ -74,6 +74,14 @@ pub(crate) fn macos_selected_default_route_from_system() -> Result<Option<MacosR
     Ok(macos_selected_default_route_from_route_get(&output))
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn macos_selected_underlay_changed(
+    route: Option<&MacosRouteSpec>,
+    expected_interface: &str,
+) -> bool {
+    route.is_some_and(|route| route.interface != expected_interface)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn spawn_macos_route_change_monitor() -> Option<mpsc::Receiver<()>> {
     let fd = unsafe { libc::socket(libc::AF_ROUTE, libc::SOCK_RAW, libc::AF_UNSPEC) };
@@ -191,9 +199,25 @@ pub(crate) fn macos_underlay_default_route_needs_restore(routes: &[MacosRouteSpe
 }
 
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn macos_endpoint_bypass_targets_for_hosts(hosts: &[Ipv4Addr]) -> Vec<String> {
+pub(crate) fn macos_endpoint_bypass_targets_for_hosts(
+    hosts: &[Ipv4Addr],
+    underlay: Option<&MacosRouteSpec>,
+    interfaces: &[netdev::Interface],
+) -> Vec<String> {
+    let interface = underlay.and_then(|underlay| {
+        interfaces
+            .iter()
+            .find(|interface| interface.name == underlay.interface)
+    });
     let mut targets = hosts
         .iter()
+        // Connected prefixes already beat the tunnel's split defaults. A
+        // gateway /32 would override ARP and divert all traffic to a LAN peer.
+        .filter(|host| {
+            !interface.is_some_and(|interface| {
+                interface.ipv4.iter().any(|network| network.contains(*host))
+            })
+        })
         .map(|host| format!("{host}/32"))
         .collect::<Vec<_>>();
     targets.sort();
@@ -493,6 +517,39 @@ fn macos_managed_route_present(
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_global_managed_route_present(
+    output: &str,
+    target: &str,
+    gateway: Option<&str>,
+    interface: Option<&str>,
+) -> bool {
+    output.lines().map(str::trim).any(|line| {
+        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        tokens.len() >= 4
+            && macos_route_destination_matches(tokens[0], target)
+            && gateway.is_none_or(|expected| tokens[1] == expected)
+            && interface.is_none_or(|expected| tokens.get(3).copied() == Some(expected))
+            && !tokens[2].contains('I')
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_global_managed_routes_present(
+    output: &str,
+    targets: &[String],
+    owner: &MacosRouteSpec,
+) -> bool {
+    targets.iter().all(|target| {
+        macos_global_managed_route_present(
+            output,
+            target,
+            owner.gateway.as_deref(),
+            Some(owner.interface.as_str()),
+        )
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn macos_ipv4_route_table() -> Result<String> {
     command_stdout_checked(
@@ -501,6 +558,15 @@ fn macos_ipv4_route_table() -> Result<String> {
             .arg("-f")
             .arg("inet"),
     )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_managed_routes_present_in_system(
+    targets: &[String],
+    owner: &MacosRouteSpec,
+) -> Result<bool> {
+    let routes = macos_ipv4_route_table().context("inspect managed macOS IPv4 routes")?;
+    Ok(macos_global_managed_routes_present(&routes, targets, owner))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -530,6 +596,8 @@ fn macos_gateway_route_args(
     }
     args
 }
+
+include!("macos_network/global_gateway_routes.rs");
 
 #[cfg(target_os = "macos")]
 pub(super) fn apply_macos_default_route(
@@ -619,10 +687,21 @@ pub(super) fn macos_ifconfig_has_ipv4(output: &str, needle: Ipv4Addr) -> bool {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn macos_ifconfig_error_is_absent(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("does not exist")
+        || lower.contains("no such interface")
+        || lower.contains("bad interface name")
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn macos_iface_has_ipv4_address(iface: &str, needle: Ipv4Addr) -> Result<bool> {
-    let output = command_stdout_checked(ProcessCommand::new("ifconfig").arg(iface))?;
-    Ok(macos_ifconfig_has_ipv4(&output, needle))
+    match command_stdout_checked(ProcessCommand::new("ifconfig").arg(iface)) {
+        Ok(output) => Ok(macos_ifconfig_has_ipv4(&output, needle)),
+        Err(error) if macos_ifconfig_error_is_absent(&error.to_string()) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -635,8 +714,23 @@ pub(super) fn apply_macos_route_spec(
         return Err(anyhow!("missing owner for macOS route {target}"));
     }
     let existing = macos_ipv4_route_table().context("inspect managed route before install")?;
-    if macos_managed_route_present(&existing, target, gateway, ifscope) {
+    let already_present = if gateway.is_some() {
+        macos_global_managed_route_present(&existing, target, gateway, ifscope)
+    } else {
+        macos_managed_route_present(&existing, target, gateway, ifscope)
+    };
+    if already_present {
         return Ok(());
+    }
+
+    // Older nvpn builds installed gateway bypasses with `-ifscope`, which
+    // does not protect an ordinary transport socket from a global split
+    // default. Remove that exact legacy route before installing the global
+    // /32 owned by the same gateway and resolved interface.
+    if let (Some(gateway), Some(ifscope)) = (gateway, ifscope)
+        && macos_managed_route_present(&existing, target, Some(gateway), Some(ifscope))
+    {
+        delete_macos_scoped_gateway_route(target, gateway, ifscope)?;
     }
 
     let target_ip = strip_cidr(target);
@@ -644,7 +738,9 @@ pub(super) fn apply_macos_route_spec(
 
     let mut add = ProcessCommand::new("route");
     if let Some(gateway) = gateway {
-        add.args(macos_gateway_route_args("add", target, gateway, ifscope));
+        add.args(macos_global_gateway_route_args(
+            "add", target, gateway, ifscope,
+        ));
     } else {
         add.arg("-n").arg("add");
         if is_host {
@@ -660,7 +756,12 @@ pub(super) fn apply_macos_route_spec(
 
     run_checked(&mut add)?;
     let installed = macos_ipv4_route_table().context("verify managed route after install")?;
-    if !macos_managed_route_present(&installed, target, gateway, ifscope) {
+    let installed_matches = if gateway.is_some() {
+        macos_global_managed_route_present(&installed, target, gateway, ifscope)
+    } else {
+        macos_managed_route_present(&installed, target, gateway, ifscope)
+    };
+    if !installed_matches {
         return Err(anyhow!(
             "macOS route {target} did not match its requested owner after install"
         ));
@@ -670,9 +771,31 @@ pub(super) fn apply_macos_route_spec(
 
 #[cfg(target_os = "macos")]
 fn delete_macos_gateway_route(target: &str, gateway: &str, interface: Option<&str>) -> Result<()> {
+    let mut global = ProcessCommand::new("route");
+    global.args(macos_global_gateway_route_args(
+        "delete", target, gateway, interface,
+    ));
+    let global_result = run_checked(&mut global);
+    let Some(interface) = interface else {
+        return global_result;
+    };
+    let scoped_result = delete_macos_scoped_gateway_route(target, gateway, interface);
+    match (global_result, scoped_result) {
+        (Ok(()), _) | (_, Ok(())) => Ok(()),
+        (Err(global_error), Err(scoped_error)) => Err(global_error.context(format!(
+            "global and interface-scoped route deletion failed; scoped: {scoped_error:#}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn delete_macos_scoped_gateway_route(target: &str, gateway: &str, interface: &str) -> Result<()> {
     let mut delete = ProcessCommand::new("route");
     delete.args(macos_gateway_route_args(
-        "delete", target, gateway, interface,
+        "delete",
+        target,
+        gateway,
+        Some(interface),
     ));
     run_checked(&mut delete)
 }

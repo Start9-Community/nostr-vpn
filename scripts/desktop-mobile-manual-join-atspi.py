@@ -91,19 +91,21 @@ def matching_nodes(name: str) -> list[Any]:
     desktop = pyatspi.Registry.getDesktop(0)
     for node in walk(desktop):
         try:
-            if name.startswith("nvpn-exit-dns-"):
-                selector_matches = node.get_accessible_id() == name
-            else:
-                selector_matches = node.name == name
             if (
                 node.get_process_id() == TARGET_PID
-                and selector_matches
+                and node_matches_name(node, name)
                 and visible(node)
             ):
                 matches.append(node)
         except Exception:
             continue
     return matches
+
+
+def node_matches_name(node: Any, name: str) -> bool:
+    if name.startswith("nvpn-exit-dns-"):
+        return node.get_accessible_id() == name
+    return node.name == name
 
 
 def ancestor_with_accessible_id(node: Any, accessible_id: str) -> Any | None:
@@ -120,11 +122,47 @@ def ancestor_with_accessible_id(node: Any, accessible_id: str) -> Any | None:
     return None
 
 
+def focused_target(node: Any, name: str) -> Any | None:
+    if name.startswith("nvpn-exit-dns-"):
+        return ancestor_with_accessible_id(node, name)
+    return node if node_matches_name(node, name) else None
+
+
 def has_action(node: Any) -> bool:
     try:
         return node.queryAction().nActions > 0
     except Exception:
         return False
+
+
+def focused_actionable_nodes() -> list[Any]:
+    focused = []
+    for node in walk(pyatspi.Registry.getDesktop(0)):
+        try:
+            if (
+                node.get_process_id() == TARGET_PID
+                and visible(node)
+                and has_action(node)
+                and node.getState().contains(pyatspi.STATE_FOCUSED)
+            ):
+                focused.append(node)
+        except Exception:
+            continue
+    return focused
+
+
+def sole_focused_target(name: str) -> Any | None:
+    focused = focused_actionable_nodes()
+    if len(focused) != 1:
+        return None
+    return focused_target(focused[0], name)
+
+
+def accessible_description(node: Any) -> str:
+    try:
+        return f"{node.getRoleName()}:{node.name}"
+    except Exception:
+        return "stale"
 
 
 def find_named(
@@ -176,6 +214,7 @@ def focus_named_with_keyboard(name: str, max_tabs: int = 100) -> Any:
         check=True,
     )
     focused_names = []
+    saw_non_target_focus = False
     for _ in range(max_tabs):
         if not target_window_has_focus():
             subprocess.run(
@@ -183,51 +222,21 @@ def focus_named_with_keyboard(name: str, max_tabs: int = 100) -> Any:
                 check=True,
             )
             time.sleep(0.1)
-        pyatspi.Registry.pumpQueuedEvents()
-        if name.startswith("nvpn-exit-dns-"):
-            for candidate in walk(pyatspi.Registry.getDesktop(0)):
-                try:
-                    if (
-                        candidate.get_process_id() == TARGET_PID
-                        and candidate.getState().contains(pyatspi.STATE_FOCUSED)
-                    ):
-                        target = ancestor_with_accessible_id(candidate, name)
-                        if target is not None and visible(target):
-                            time.sleep(0.1)
-                            pyatspi.Registry.pumpQueuedEvents()
-                            if (
-                                target_window_has_focus()
-                                and candidate.getState().contains(
-                                    pyatspi.STATE_FOCUSED
-                                )
-                            ):
-                                return target
-                except Exception:
-                    continue
-        else:
-            for node in matching_nodes(name):
-                try:
-                    if node.getState().contains(pyatspi.STATE_FOCUSED):
-                        return node
-                except Exception:
-                    continue
         subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "Tab"],
             check=True,
         )
         time.sleep(0.05)
-        for candidate in walk(pyatspi.Registry.getDesktop(0)):
-            try:
-                if (
-                    candidate.get_process_id() == TARGET_PID
-                    and candidate.getState().contains(pyatspi.STATE_FOCUSED)
-                ):
-                    focused_names.append(
-                        f"{candidate.getRoleName()}:{candidate.name}"
-                    )
-                    break
-            except Exception:
-                continue
+        pyatspi.Registry.pumpQueuedEvents()
+        focused = focused_actionable_nodes()
+        target = sole_focused_target(name)
+        if target is not None and saw_non_target_focus:
+            return target
+        if focused and not any(focused_target(node, name) for node in focused):
+            saw_non_target_focus = True
+        focused_names.append(
+            ",".join(accessible_description(node) for node in focused) or "none"
+        )
     raise RuntimeError(
         f"keyboard focus did not reach {name}; focused sequence: "
         + ", ".join(focused_names)
@@ -252,18 +261,9 @@ def invoke(name: str, *, stable_focus: float = 0) -> None:
         stable_since: float | None = None
         while time.monotonic() < deadline:
             pyatspi.Registry.pumpQueuedEvents()
-            focused = False
-            if target_window_has_focus():
-                for node in matching_nodes(name):
-                    try:
-                        if (
-                            has_action(node)
-                            and node.getState().contains(pyatspi.STATE_FOCUSED)
-                        ):
-                            focused = True
-                            break
-                    except Exception:
-                        continue
+            focused = (
+                target_window_has_focus() and sole_focused_target(name) is not None
+            )
             if focused:
                 if stable_since is None:
                     stable_since = time.monotonic()
@@ -280,6 +280,36 @@ def invoke(name: str, *, stable_focus: float = 0) -> None:
         check=True,
     )
     time.sleep(0.25)
+
+
+def wait_named_visible(name: str, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if matching_nodes(name):
+            return True
+        pyatspi.Registry.pumpQueuedEvents()
+        time.sleep(0.1)
+    return False
+
+
+def invoke_until_visible(name: str, expected: str, attempts: int = 4) -> None:
+    last_error: RuntimeError | None = None
+    for _ in range(attempts):
+        last_error = None
+        try:
+            invoke(name)
+        except RuntimeError as error:
+            last_error = error
+            continue
+        if wait_named_visible(expected, 2):
+            return
+        if target_window_has_focus():
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "Escape"], check=True)
+            time.sleep(0.25)
+    if last_error is not None:
+        raise RuntimeError(f"invoking {name} did not reveal {expected}") from last_error
+    find_named(expected, timeout=0.1)
+    raise RuntimeError(f"invoking {name} did not reveal {expected}")
 
 
 def set_text(name: str, value: str) -> None:
@@ -328,6 +358,11 @@ def read_text(name: str) -> str:
     if not read_succeeded and last_error is not None:
         raise RuntimeError(f"AT-SPI could not read public text from {name}") from last_error
     raise RuntimeError(f"public GTK value is empty: {name}")
+
+
+def checked(name: str) -> bool:
+    node = find_named(name)
+    return node.getState().contains(pyatspi.STATE_CHECKED)
 
 
 def read_npub(name: str) -> str:
@@ -767,8 +802,7 @@ class Driver:
 
         def open_dns() -> None:
             self.launch()
-            invoke("Internet", stable_focus=0.5)
-            find_named("nvpn-exit-dns-mode")
+            invoke_until_visible("Internet", "nvpn-exit-dns-mode")
 
         open_dns()
         select_dns_index(
@@ -857,6 +891,82 @@ class Driver:
         )
         self.write_evidence()
 
+    def paid_exit_seller(self) -> None:
+        if self.args.cli is None:
+            raise RuntimeError("PaidExitSeller requires the exact release CLI")
+        cli = self.args.cli.resolve()
+        if not cli.is_file() or cli.is_symlink():
+            raise RuntimeError("exact release CLI is missing")
+        if not self.args.seller_price.isdigit():
+            raise RuntimeError("seller price must be an unsigned integer")
+        if not re.fullmatch(r"[A-Z]{2}", self.args.seller_country):
+            raise RuntimeError("seller country must be a two-letter uppercase code")
+        if not self.args.seller_mint.startswith(("http://", "https://")):
+            raise RuntimeError("seller mint must be an HTTP(S) URL")
+
+        def open_seller() -> None:
+            self.launch()
+            invoke_until_visible("Internet", "nvpn-paid-exit-seller-open")
+            invoke_until_visible(
+                "nvpn-paid-exit-seller-open",
+                "nvpn-paid-exit-seller-enabled",
+            )
+
+        open_seller()
+        set_text("nvpn-paid-exit-price-msat-per-gb", self.args.seller_price)
+        set_text("nvpn-paid-exit-country-code", self.args.seller_country)
+        set_text("nvpn-paid-exit-accepted-mints", self.args.seller_mint)
+        invoke("nvpn-paid-exit-seller-save")
+        time.sleep(0.75)
+        if not checked("nvpn-paid-exit-seller-enabled"):
+            invoke("nvpn-paid-exit-seller-enabled")
+            time.sleep(0.75)
+        if not checked("nvpn-paid-exit-seller-enabled"):
+            raise RuntimeError("seller enable switch did not remain on")
+        screenshot(self.artifact_root, "paid-exit-seller-saved")
+        self.stop()
+
+        open_seller()
+        observed_price = read_text("nvpn-paid-exit-price-msat-per-gb")
+        observed_country = read_text("nvpn-paid-exit-country-code")
+        observed_mint = read_text("nvpn-paid-exit-accepted-mints")
+        observed_enabled = checked("nvpn-paid-exit-seller-enabled")
+        if (
+            observed_price != self.args.seller_price
+            or observed_country != self.args.seller_country
+            or observed_mint != self.args.seller_mint
+            or not observed_enabled
+        ):
+            raise RuntimeError(
+                "relaunch changed seller UI values: "
+                f"enabled={observed_enabled}, price={observed_price!r}, "
+                f"country={observed_country!r}, mint={observed_mint!r}"
+            )
+        screenshot(self.artifact_root, "paid-exit-seller-readback")
+        self.evidence.update(
+            {
+                "receiptSchema": 1,
+                "platform": "linux",
+                "case": "paid-exit-seller",
+                "evidenceSource": "shipped-ui-restart-readback",
+                "savedViaShippedUi": True,
+                "enabledViaShippedUi": True,
+                "uiRestartReadback": True,
+                "releaseBlackbox": True,
+                "publicUiOnly": True,
+                "privateStateRead": False,
+                "paidExitEnabled": True,
+                "paidExitPriceMsatPerGb": int(self.args.seller_price),
+                "paidExitCountryCode": self.args.seller_country,
+                "paidExitAcceptedMints": [self.args.seller_mint],
+                "appGitSha": self.args.app_git_sha,
+                "appGitTree": self.args.app_git_tree,
+                "appExecutableSha256": sha256(self.app),
+                "cliExecutableSha256": sha256(cli),
+            }
+        )
+        self.write_evidence()
+
     def run(self) -> None:
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         if self.args.mode == "Reset":
@@ -871,6 +981,8 @@ class Driver:
             self.manual_join()
         elif self.args.mode == "DnsPolicy":
             self.dns_policy()
+        elif self.args.mode == "PaidExitSeller":
+            self.paid_exit_seller()
         else:
             self.verify()
 
@@ -886,6 +998,7 @@ def parser() -> argparse.ArgumentParser:
             "AdminAdd",
             "ManualJoin",
             "DnsPolicy",
+            "PaidExitSeller",
             "Verify",
         ),
     )
@@ -905,6 +1018,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--dns-custom-url", default="")
     result.add_argument("--dns-bootstrap-ips", default="")
     result.add_argument("--dns-through-servers", default="")
+    result.add_argument("--seller-price", default="1000000")
+    result.add_argument("--seller-country", default="FI")
+    result.add_argument("--seller-mint", default="")
     result.add_argument("--app-git-sha", default="")
     result.add_argument("--app-git-tree", default="")
     result.add_argument("--ui-timeout", type=int, default=15)

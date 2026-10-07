@@ -35,7 +35,8 @@ function fixture() {
   delete env.NODE_TEST_CONTEXT
   const generated = spawnSync(
     process.execPath,
-    ['--test', join(process.cwd(), 'scripts/release-artifact-provenance-lib.test.mjs')],
+    ['--test', '--test-name-pattern=^release receipt collection requires exact source and strict public UI gates$',
+      join(process.cwd(), 'scripts/release-artifact-provenance-lib.test.mjs')],
     {
       encoding: 'utf8',
       env,
@@ -157,6 +158,29 @@ test('resumed completion leaves no summary when a concrete receipt is missing', 
         platformReceiptPaths: value.platforms,
       }),
       /Windows desktop network receipt is missing/i,
+    )
+    assert.equal(existsSync(value.releaseGateSummary), false)
+  } finally {
+    rmSync(value.root, { recursive: true, force: true })
+  }
+})
+
+test('a pending iOS seal does not hide invalid completed desktop evidence', () => {
+  const value = fixture()
+  try {
+    unlinkSync(value.platforms.ios.frozen_archive)
+    const path = value.platforms.windows.installer
+    const receipt = JSON.parse(readFileSync(path, 'utf8'))
+    receipt.installerInstalledAndLaunched = false
+    writeFileSync(path, JSON.stringify(receipt))
+    assert.throws(
+      () => completeReleaseGateFromReceipts({
+        commit,
+        tree,
+        releaseGateSummaryPath: value.releaseGateSummary,
+        platformReceiptPaths: value.platforms,
+      }),
+      /Windows exact installer gate receipt is incomplete/i,
     )
     assert.equal(existsSync(value.releaseGateSummary), false)
   } finally {

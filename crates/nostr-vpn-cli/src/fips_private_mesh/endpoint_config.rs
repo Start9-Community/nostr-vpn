@@ -58,6 +58,7 @@ impl FipsEthernetUnderlayConfig {
 const FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY: u8 = 10;
 const FIPS_DYNAMIC_PEER_ENDPOINT_PRIORITY: u8 = 100;
 const FIPS_PRIVATE_DYNAMIC_PEER_ENDPOINT_PRIORITY: u8 = 200;
+const FIPS_WEBSOCKET_FALLBACK_ENDPOINT_PRIORITY: u8 = 200;
 const FIPS_UDP_IPV4_TRANSPORT: &str = "ipv4";
 const FIPS_UDP_IPV6_TRANSPORT: &str = "ipv6";
 
@@ -75,6 +76,22 @@ pub(crate) struct FipsEndpointPeerTransportConfig {
     pub(crate) connect_on_start: bool,
     pub(crate) auto_reconnect: bool,
     pub(crate) discovery_fallback_transit: bool,
+}
+
+#[cfg(any(unix, test))]
+fn endpoint_peers_with_changed_addresses(
+    previous: &[FipsEndpointPeerTransportConfig],
+    next: &[FipsEndpointPeerTransportConfig],
+) -> Vec<FipsEndpointPeerTransportConfig> {
+    next.iter()
+        .filter(|peer| {
+            previous
+                .iter()
+                .find(|candidate| candidate.npub == peer.npub)
+                .is_none_or(|candidate| candidate.addresses != peer.addresses)
+        })
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn prioritize_fips_control_recipient(
@@ -108,13 +125,45 @@ fn prioritize_fips_control_peer(
     peers
 }
 
+#[cfg(test)]
 fn fips_peer_address_from_hint(hint: &FipsPeerAddressHint) -> PeerAddress {
     let (transport, addr) = split_peer_transport_addr(&hint.addr);
+    fips_peer_address_from_parts(hint, transport, addr)
+}
+
+fn fips_peer_address_from_parts(
+    hint: &FipsPeerAddressHint,
+    transport: String,
+    addr: String,
+) -> PeerAddress {
     let mut peer_address = PeerAddress::with_priority(transport, addr, hint.priority);
     if let Some(seen_at_ms) = hint.seen_at_ms {
         peer_address = peer_address.learned().with_seen_at_ms(seen_at_ms);
     }
     peer_address
+}
+
+fn fips_peer_addresses_from_hint(hint: &FipsPeerAddressHint) -> Vec<PeerAddress> {
+    let (transport, addr) = split_peer_transport_addr(&hint.addr);
+    if transport != "udp" || addr.parse::<SocketAddr>().is_ok() {
+        return vec![fips_peer_address_from_parts(hint, transport, addr)];
+    }
+
+    let Ok(resolved) = addr.to_socket_addrs() else {
+        return vec![fips_peer_address_from_parts(hint, transport, addr)];
+    };
+    let mut seen = HashSet::new();
+    let addresses = resolved
+        .filter(|socket_addr| seen.insert(*socket_addr))
+        .map(|socket_addr| {
+            fips_peer_address_from_parts(hint, transport.clone(), socket_addr.to_string())
+        })
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        vec![fips_peer_address_from_parts(hint, transport, addr)]
+    } else {
+        addresses
+    }
 }
 
 fn retain_enabled_peer_transport_addresses(
@@ -285,8 +334,14 @@ fn fips_endpoint_config_with_open_discovery_limit(
                 mesh_mtu.underlay_udp,
             );
         }
+        let has_configured_websocket_fallback = peers.iter().any(|peer| {
+            peer.addresses
+                .iter()
+                .any(|hint| split_peer_transport_addr(&hint.addr).0 == "websocket")
+        });
         if !transport.websocket.seed_urls.is_empty()
             || transport.websocket.bind_addr.is_some()
+            || has_configured_websocket_fallback
         {
             config.transports.websocket =
                 TransportInstances::Single(transport.websocket.clone());
@@ -352,7 +407,7 @@ fn fips_endpoint_config_with_open_discovery_limit(
             addresses: peer
                 .addresses
                 .iter()
-                .map(fips_peer_address_from_hint)
+                .flat_map(fips_peer_addresses_from_hint)
                 .collect(),
             connect_policy: if peer.connect_on_start {
                 ConnectPolicy::AutoConnect
@@ -431,7 +486,13 @@ fn fips_endpoint_peers_from_mesh(
             if trimmed.is_empty() {
                 continue;
             }
-            let priority = FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY;
+            // Native carriers, including the public bootstrap seeds, precede
+            // WebSocket fallback. Both addresses remain pinned to one identity.
+            let priority = if split_peer_transport_addr(trimmed).0 == "websocket" {
+                FIPS_WEBSOCKET_FALLBACK_ENDPOINT_PRIORITY
+            } else {
+                FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY
+            };
             if let Some(existing) = peer.addresses.iter_mut().find(|hint| hint.addr == trimmed) {
                 existing.seen_at_ms = None;
                 existing.priority = existing.priority.min(priority);
@@ -504,6 +565,7 @@ pub(crate) fn apply_canonical_websocket_dial_direction(
     peers: &mut [FipsEndpointPeerTransportConfig],
     local_npub: &str,
     public_websocket_listener: bool,
+    bootstrap_peer_npubs: &HashSet<String>,
 ) {
     if !public_websocket_listener {
         return;
@@ -532,7 +594,10 @@ pub(crate) fn apply_canonical_websocket_dial_direction(
                 has_other_configured_transport = true;
             }
         }
-        if !has_configured_websocket || has_other_configured_transport {
+        let configured_bootstrap_peer = bootstrap_peer_npubs.contains(&peer_npub);
+        if !has_configured_websocket
+            || (has_other_configured_transport && !configured_bootstrap_peer)
+        {
             continue;
         }
 
@@ -700,6 +765,8 @@ pub(crate) struct FipsPrivateTunnelConfig {
     /// route is pending. This keeps roster MagicDNS alive during exit setup.
     secure_dns_requested: bool,
     public_paid_exit_waiting_for_admission: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) magic_dns_suffix: String,
     pub(crate) magic_dns_records: HashMap<String, Ipv4Addr>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fips_host: Option<FipsHostTunnelConfig>,
@@ -725,9 +792,13 @@ pub(crate) struct FipsPrivateTunnelConfig {
     advertise_on_nostr: bool,
     webrtc_enabled: bool,
     nostr_discovery_policy: NostrDiscoveryPolicy,
+    /// Admission budget derived from durable settings and static transit
+    /// seeds, before authenticated recent-peer cache entries are deducted.
+    /// Only this stable value participates in endpoint restart decisions.
+    open_discovery_restart_max_pending: usize,
     open_discovery_max_pending: usize,
     mesh_mtu: MeshMtu,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) control_plane_bypass_hosts: Vec<Ipv4Addr>,
 }
 

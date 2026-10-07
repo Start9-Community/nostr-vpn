@@ -290,22 +290,15 @@ impl DaemonWgUpstream {
         let rebind_result = if let Some(runtime) = self.runtime.as_mut() {
             let live_budget =
                 std::cmp::min(handshake_timeout / 2, Duration::from_millis(1_500));
-            match tokio::time::timeout(live_budget, async {
-                let receiver_index = runtime
-                    .rebind_interface(interface_index)
-                    .await
-                    .context("rebind live WG UDP socket")?;
-                runtime
-                    .wait_for_handshake_response(receiver_index, live_budget)
-                    .await
-                    .then_some(())
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "WG upstream did not complete the exact forced handshake on \
-                             {underlay_interface}"
-                        )
-                    })
-            })
+            match tokio::time::timeout(
+                live_budget,
+                rebind_live_macos_wg_runtime(
+                    runtime,
+                    interface_index,
+                    underlay_interface,
+                    live_budget,
+                ),
+            )
             .await
             {
                 Ok(result) => result,
@@ -319,6 +312,23 @@ impl DaemonWgUpstream {
         };
 
         if let Err(rebind_error) = rebind_result {
+            // A route notification can arrive while macOS still reports the
+            // disappearing interface. If the selected default moved during
+            // the live retry, let the outer sampler retarget immediately
+            // instead of restarting the runtime on the stale interface.
+            if macos_route_is_still_settling(&rebind_error)
+                && crate::macos_network::macos_selected_default_route_from_system()
+                    .is_ok_and(|route| {
+                        crate::macos_network::macos_selected_underlay_changed(
+                            route.as_ref(),
+                            underlay_interface,
+                        )
+                    })
+            {
+                return Err(rebind_error).context(
+                    "physical underlay changed while rebinding the live WG socket",
+                );
+            }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Err(anyhow!(
@@ -426,6 +436,51 @@ impl DaemonWgUpstream {
             .as_ref()
             .map_or_else(Vec::new, FullDefaultRoute::macos_managed_routes)
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn rebind_live_macos_wg_runtime(
+    runtime: &mut WgUpstreamRuntime,
+    interface_index: u32,
+    underlay_interface: &str,
+    budget: Duration,
+) -> Result<()> {
+    const ROUTE_SETTLE_RETRY: Duration = Duration::from_millis(25);
+
+    let deadline = tokio::time::Instant::now() + budget;
+    let receiver_index = loop {
+        match runtime.rebind_interface(interface_index).await {
+            Ok(receiver_index) => break receiver_index,
+            Err(error) if macos_route_is_still_settling(&error) => {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining <= ROUTE_SETTLE_RETRY {
+                    return Err(error).context("rebind live WG UDP socket after route settled");
+                }
+                tokio::time::sleep(ROUTE_SETTLE_RETRY).await;
+            }
+            Err(error) => return Err(error).context("rebind live WG UDP socket"),
+        }
+    };
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    runtime
+        .wait_for_handshake_response(receiver_index, remaining)
+        .await
+        .then_some(())
+        .ok_or_else(|| {
+            anyhow!(
+                "WG upstream did not complete the exact forced handshake on \
+                 {underlay_interface}"
+            )
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_route_is_still_settling(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NetworkUnreachable)
+    })
 }
 
 #[cfg(target_os = "macos")]

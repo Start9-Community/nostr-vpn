@@ -6,6 +6,130 @@
             .port()
     }
 
+    #[test]
+    fn mobile_discovers_private_exit_before_selection_over_fips() {
+        let runtime = RuntimeBuilder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_stack_size(4 * 1024 * 1024)
+            .build()
+            .expect("mobile exit discovery runtime");
+        runtime.block_on(Box::pin(async {
+            let client_keys = Keys::generate();
+            let exit_keys = Keys::generate();
+            let client_pubkey = client_keys.public_key().to_hex();
+            let exit_pubkey = exit_keys.public_key().to_hex();
+            let network_id = "mobile-private-exit-discovery";
+            let exit_port = available_udp_port();
+            let mut app = fips_exit_client_app(
+                &client_keys.secret_key().to_bech32().expect("client nsec"),
+                &client_pubkey,
+                &exit_pubkey,
+                network_id,
+            );
+            app.set_internet_source(nostr_vpn_core::config::InternetSource::Direct);
+            let mut config = MobileTunnelConfig::from_app(&app).expect("mobile config");
+            config.listen_port = available_udp_port();
+            config.nostr_discovery_enabled = true;
+            add_direct_mobile_peer_hint(&mut config, &exit_pubkey, exit_port);
+            let desktop = bind_direct_desktop_endpoint(
+                exit_keys.secret_key().to_bech32().expect("exit nsec"),
+                exit_port,
+                &client_pubkey,
+                config.listen_port,
+            ).await;
+            let mobile = Box::pin(MobileTunnel::start_async(config.clone(), app))
+                .await
+                .expect("start mobile tunnel without an exit selected");
+            let desktop_control = FipsControlTcpRuntime::start(Arc::clone(&desktop))
+                .await
+                .expect("start desktop control");
+            let destination = PeerIdentity::from_npub(mobile.endpoint.npub())
+                .expect("mobile identity");
+            let now = unix_timestamp();
+
+            // Advertise, withdraw, then reject an older advertisement. Exercise
+            // the same authenticated control path as a desktop sharing internet.
+            for (signed_at, routes, expected_routes) in [
+                (now, vec!["0.0.0.0/0", "::/0"], vec!["0.0.0.0/0", "::/0"]),
+                (now + 1, vec![], vec![]),
+                (now, vec!["0.0.0.0/0"], vec![]),
+            ] {
+                let frame = FipsControlFrame::Capabilities {
+                    network_id: network_id.to_string(),
+                    capabilities: PeerCapabilities {
+                        advertised_routes: routes.into_iter().map(str::to_string).collect(),
+                        signed_at,
+                        ..PeerCapabilities::default()
+                    },
+                };
+                let before_rx = mobile.presence.read().expect("presence")
+                    .get(&exit_pubkey).map_or(0, |peer| peer.rx_bytes);
+                let expected_rx = before_rx + u64::try_from(encode_fips_control_frame(&frame)
+                    .expect("encode capabilities").len()).expect("frame length");
+                tokio::time::timeout(Duration::from_secs(5), desktop_control.send(destination, &frame))
+                    .await.expect("capabilities send timeout").expect("send capabilities");
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if mobile.presence.read().expect("presence")
+                            .get(&exit_pubkey).is_some_and(|peer| {
+                                peer.rx_bytes >= expected_rx && peer.advertised_routes == expected_routes
+                            }) {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("mobile receives capabilities");
+                let state = mobile_runtime_state_with_tun_counters(
+                    &config,
+                    &mobile.mesh.read().expect("mesh"),
+                    &mobile.presence.read().expect("presence"),
+                    Vec::new(), Vec::new(), MobileTunCounters::default(), now,
+                );
+                let peer = state.peers.iter().find(|peer| peer.participant_pubkey == exit_pubkey)
+                    .expect("private peer");
+                assert_eq!(peer.advertised_routes, expected_routes,
+                    "exit discovery must reflect advertisements before selection and after withdrawal");
+                assert_eq!(peer.tunnel_ip, strip_cidr(&derive_mesh_tunnel_ip(network_id, &exit_pubkey)
+                    .expect("exit mesh address")));
+                assert!(!mobile.config.read().expect("config").route_targets.contains(&"0.0.0.0/0".to_string()),
+                    "discovering an exit must not select it or change default routing");
+                let received_at = mobile.presence.read().expect("presence")
+                    .get(&exit_pubkey).expect("exit presence")
+                    .capabilities_received_at.expect("received capabilities");
+                let expired = mobile_runtime_state_with_tun_counters(
+                    &config,
+                    &mobile.mesh.read().expect("mesh"),
+                    &mobile.presence.read().expect("presence"),
+                    Vec::new(), Vec::new(), MobileTunCounters::default(), received_at + 601,
+                );
+                assert!(expired.peers.iter().find(|peer| peer.participant_pubkey == exit_pubkey)
+                    .expect("expired exit peer").advertised_routes.is_empty(),
+                    "expired advertisements must stop offering an exit");
+            }
+            shutdown_started_mobile_tunnel(mobile).await;
+            desktop_control.stop().await;
+            desktop.shutdown().await.expect("shutdown desktop");
+        }));
+    }
+
+    #[test]
+    fn mobile_join_restart_waits_during_apply_before_receipt_is_queued() {
+        let pending = PendingJoinRosterReceiptQueue::default();
+        assert!(!pending.has_pending_receipts());
+        {
+            let _applying = pending.applying.lock().expect("begin roster apply");
+            assert!(
+                pending.has_pending_receipts(),
+                "a config observer must not restart between persistence and receipt enqueue"
+            );
+        }
+        assert!(
+            !pending.has_pending_receipts(),
+            "an ignored or failed apply must not leave a restart permanently deferred"
+        );
+    }
+
     fn available_tcp_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0")
             .expect("bind test TCP port")

@@ -15,15 +15,20 @@ source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 load_release_env "$ROOT"
 load_env_file_defaults "${NVPN_ZAPSTORE_ENV_FILE:-$ROOT/.env.zapstore.local}"
 load_mobile_env "$ROOT"
+RELEASE_JOIN_ANDROID_APK="${NVPN_RELEASE_JOIN_ANDROID_APK:-${RELEASE_JOIN_ANDROID_APK:-}}"
+release_join_configure_install_modes
+android_install_binding_args=()
+if [[ "$RELEASE_JOIN_INSTALL_ANDROID" -eq 0 ]]; then
+  android_install_binding_args+=(--allow-verified-no-install)
+fi
 
 [[ "$(uname -s)" == Darwin ]] || {
   echo "Windows/Pixel Release join gate must be controlled by macOS" >&2
   exit 2
 }
-[[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] || {
-  echo "Windows/Pixel Release join gate requires a clean committed candidate" >&2
-  exit 2
-}
+assert_release_checkout_state \
+  "$ROOT" "$(git -C "$ROOT" rev-parse HEAD)" "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+  "Windows/Pixel Release join" || exit 2
 APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 APP_GIT_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 [[ "${NVPN_EXPECTED_APP_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ \
@@ -38,13 +43,20 @@ then
   exit 2
 fi
 
+DESKTOP_ROOT="${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}"
+DESKTOP_APP_GIT_SHA="$(git -C "$DESKTOP_ROOT" rev-parse HEAD)"
+DESKTOP_APP_GIT_TREE="$(git -C "$DESKTOP_ROOT" rev-parse 'HEAD^{tree}')"
+assert_release_checkout_state \
+  "$DESKTOP_ROOT" "$DESKTOP_APP_GIT_SHA" "$DESKTOP_APP_GIT_TREE" \
+  'Windows Release product' || exit 1
+
 SSH_HOST="${NVPN_WINDOWS_SSH_HOST:-${1:-}}"
 SSH_JUMP="${NVPN_WINDOWS_SSH_JUMP:-}"
 SSH_PROXY_COMMAND="${NVPN_WINDOWS_SSH_PROXY_COMMAND:-}"
 GUEST_REPO="${NVPN_WINDOWS_GUEST_REPO_PATH:-C:\\src\\nostr-vpn}"
 GUEST_FIPS_REPO="${NVPN_WINDOWS_GUEST_FIPS_REPO_PATH:-C:\\src\\fips}"
 GUEST_ARTIFACT_ROOT="${NVPN_WINDOWS_RELEASE_JOIN_ARTIFACT_ROOT:-C:\\src\\nostr-vpn\\artifacts\\windows-release-mobile-join}"
-GUEST_APP="${NVPN_WINDOWS_RELEASE_APP_PATH:-C:\\src\\nostr-vpn\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\NostrVpn.Windows.exe}"
+GUEST_APP="${NVPN_WINDOWS_RELEASE_APP_PATH:-$GUEST_REPO\\windows\\NostrVpn.Windows\\bin\\Release\\net8.0-windows\\win-x64\\publish\\NostrVpn.Windows.exe}"
 REMOTE_SCRIPT="$GUEST_REPO\\scripts\\windows-release-mobile-join-remote.ps1"
 [[ -n "$SSH_HOST" ]] || {
   echo "Set NVPN_WINDOWS_SSH_HOST for Windows/Pixel Release join coverage" >&2
@@ -60,7 +72,7 @@ ANDROID_FIPS_METADATA_RECEIPT="${NVPN_RELEASE_JOIN_ANDROID_FIPS_METADATA_RECEIPT
 DESKTOP_RECEIPT="$PLATFORM_RESULT/windows-release-artifact.json"
 PHASE_EVIDENCE="$PLATFORM_RESULT/phase-evidence.json"
 SUMMARY="$PLATFORM_RESULT/summary.json"
-RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
+RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-30}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 mkdir -p "$PRIVATE_DIR" "$PLATFORM_RESULT"
 chmod 700 "$PRIVATE_DIR"
@@ -93,6 +105,7 @@ ANDROID_FIPS_VERSION="$(jq -er '.fipsCoreVersion' "$ANDROID_ARTIFACT_RECEIPT")"
 ANDROID_APK_SHA="$(
   python3 "$ROOT/scripts/desktop_mobile_manual_join_receipt.py" \
     validate-android \
+    ${android_install_binding_args[@]+"${android_install_binding_args[@]}"} \
     --receipt "$ANDROID_INSTALL_RECEIPT" \
     --android-artifact-receipt "$ANDROID_ARTIFACT_RECEIPT" \
     --android-fips-metadata-receipt "$ANDROID_FIPS_METADATA_RECEIPT" \
@@ -114,6 +127,8 @@ if [[ -n "${RELEASE_JOIN_ANDROID_APK_SHA:-}" \
 then
   fail "inherited Android APK hash differs from its install receipt"
 fi
+RELEASE_JOIN_ARTIFACTS_VALIDATED=1
+export RELEASE_JOIN_ARTIFACTS_VALIDATED
 
 ANDROID_REQUESTED="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
 [[ -n "$ANDROID_REQUESTED" ]] \
@@ -176,8 +191,8 @@ remote() {
     "$(ps_quote "$GUEST_ARTIFACT_ROOT")" \
     "$(ps_quote "$GUEST_APP")" \
     "$(ps_quote "$GUEST_FIPS_REPO")" \
-    "$(ps_quote "$APP_GIT_SHA")" \
-    "$(ps_quote "$APP_GIT_TREE")" \
+    "$(ps_quote "$DESKTOP_APP_GIT_SHA")" \
+    "$(ps_quote "$DESKTOP_APP_GIT_TREE")" \
     "$(ps_quote "$RELEASE_JOIN_FIPS_SHA")" \
     "$(ps_quote "$RELEASE_JOIN_FIPS_TREE")" \
     "$(ps_quote "$RELEASE_JOIN_FIPS_VERSION")" \
@@ -194,6 +209,9 @@ acceptance_observer_pids=()
 cleanup() {
   local status=$?
   trap - EXIT
+  if ((status != 0)); then
+    release_join_android_capture_failure_log "$PLATFORM_RESULT/android-service-failure.log"
+  fi
   local observer_pid cleanup_status=0
   for observer_pid in "${acceptance_observer_pids[@]-}"; do
     kill "$observer_pid" >/dev/null 2>&1 || true
@@ -205,8 +223,13 @@ cleanup() {
     remote Stop >/dev/null 2>&1 || true
     wait "$REMOTE_ACTION_PID" >/dev/null 2>&1 || true
   fi
+  if [[ "$status" -ne 0 ]]; then
+    remote ReadDaemonLog >"$PLATFORM_RESULT/windows-daemon-failure.log" \
+      2>&1 || true
+  fi
   remote Cleanup >"$PLATFORM_RESULT/windows-cleanup.log" 2>&1 \
     || cleanup_status=$?
+  release_join_android_stop || cleanup_status=1
   if [[ "$status" -ne 0 && -s "$PRIVATE_DIR/android-ui.xml" ]]; then
     cp "$PRIVATE_DIR/android-ui.xml" "$PLATFORM_RESULT/android-ui-failure.xml"
   fi
@@ -356,7 +379,7 @@ verify_pixel_relaunch() {
 calibrate_windows_clock
 
 # Windows admin -> Pixel joiner.
-release_join_reset_android_state
+release_join_android_open_network_setup
 remote Reset >"$PLATFORM_RESULT/desktop-admin-reset.log" 2>&1
 REMOTE_NETWORK_NAME="Release Windows admin"
 remote CreateAdmin >"$PLATFORM_RESULT/desktop-admin-create.log" 2>&1
@@ -371,6 +394,7 @@ remote InstallService >"$PLATFORM_RESULT/desktop-admin-service.log" 2>&1
 
 release_join_android_manual_submit "$WINDOWS_ADMIN_ID" "$WINDOWS_NETWORK_ID" \
   >"$PLATFORM_RESULT/pixel-manual-submit.log" 2>&1
+release_join_android_wait_vpn_connected
 REMOTE_PARTICIPANT_NPUB="$RELEASE_JOIN_ANDROID_JOINER_ID"
 REMOTE_PARTICIPANT_ALIAS="Release Pixel"
 desktop_admin_log="$PLATFORM_RESULT/desktop-admin-add.log"
@@ -430,7 +454,7 @@ verify_desktop_relaunch \
 verify_pixel_relaunch "$WINDOWS_ADMIN_ID" "desktop-admin"
 
 # Pixel admin -> Windows joiner.
-release_join_reset_android_state
+release_join_android_open_network_setup
 REMOTE_PARTICIPANT_NPUB=""
 remote Reset >"$PLATFORM_RESULT/desktop-joiner-reset.log" 2>&1
 remote Bootstrap >"$PLATFORM_RESULT/desktop-joiner-bootstrap.log" 2>&1
@@ -570,15 +594,19 @@ finally:
     temporary.unlink(missing_ok=True)
 PY
 
+assert_release_checkout_state \
+  "$DESKTOP_ROOT" "$DESKTOP_APP_GIT_SHA" "$DESKTOP_APP_GIT_TREE" \
+  'Windows Release product' || exit 1
 receipt_binding_args=(
+  ${android_install_binding_args[@]+"${android_install_binding_args[@]}"}
   --desktop-receipt "$DESKTOP_RECEIPT"
   --android-artifact-receipt "$ANDROID_ARTIFACT_RECEIPT"
   --android-install-receipt "$ANDROID_INSTALL_RECEIPT"
   --android-fips-metadata-receipt "$ANDROID_FIPS_METADATA_RECEIPT"
   --android-apk "$RELEASE_JOIN_ANDROID_APK"
   --phase-evidence "$PHASE_EVIDENCE"
-  --expected-desktop-app-sha "$APP_GIT_SHA"
-  --expected-desktop-app-tree "$APP_GIT_TREE"
+  --expected-desktop-app-sha "$DESKTOP_APP_GIT_SHA"
+  --expected-desktop-app-tree "$DESKTOP_APP_GIT_TREE"
   --expected-desktop-fips-sha "$RELEASE_JOIN_FIPS_SHA"
   --expected-desktop-fips-tree "$RELEASE_JOIN_FIPS_TREE"
   --expected-desktop-fips-version "$RELEASE_JOIN_FIPS_VERSION"

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANUAL_JOIN_DRIVER="$ROOT/scripts/desktop-manual-join-ax.swift"
+SERVICE_TOGGLE_DRIVER="$ROOT/scripts/macos-service-toggle-ax.swift"
 
 files=(
   "$ROOT/scripts/macos-vm-release-mobile-join-e2e.sh"
@@ -47,7 +48,7 @@ EOF
 unset -f ps
 
 python3 - "${files[@]}" "$ROOT/scripts/macos_release_join_artifact.py" \
-  "$ROOT/scripts/macos-build" "$MANUAL_JOIN_DRIVER" <<'PY'
+  "$ROOT/scripts/macos-build" "$MANUAL_JOIN_DRIVER" "$SERVICE_TOGGLE_DRIVER" <<'PY'
 import pathlib
 import sys
 
@@ -80,6 +81,49 @@ if 'roster-participant-pending-\\(args[3])' not in manual_join_phase:
     raise SystemExit("macOS manual join UI does not prove pending roster state")
 if 'roster-participant-accepted-\\(args[3])' in manual_join_phase:
     raise SystemExit("macOS manual join UI expects approval before the admin acts")
+manual_join_hold = remote.split("run_manual_join_driver_hold() {", 1)[1].split(
+    "\n}\n\nrun_driver_hold", 1
+)[0]
+for required in (
+    'run_driver_against_held_app release-manual-join "$1" "$2"',
+    'run_driver_against_held_app release-verify "$1" _',
+):
+    if required not in manual_join_hold:
+        raise SystemExit(
+            f"macOS reverse join does not observe accepted state in the held public UI: {required}"
+        )
+manual_join_command = remote.split('  manual-join)', 1)[1].split(
+    "    ;;", 1
+)[0]
+if 'run_manual_join_driver_hold "$2" "$3"' not in manual_join_command:
+    raise SystemExit("macOS reverse join stops the shipped UI before approval is visible")
+for required in (
+    'rm -f "$APPROVAL_STARTED"',
+    '[[ ! -f "$APPROVAL_STARTED"',
+    "approval-start)",
+    ': >"$APPROVAL_STARTED"',
+):
+    if required not in remote:
+        raise SystemExit(f"macOS reverse join lacks approval-window synchronization: {required}")
+if host.count("remote approval-start") != 2:
+    raise SystemExit("macOS reverse directions do not synchronize from both real phone approvals")
+if '  "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact retained iOS receipt is required}" \\\n' in host:
+    raise SystemExit("macOS Pixel-only join coverage is still coupled to an iOS receipt")
+for required in (
+    'if [[ "$MACOS_MOBILE_DIRECTIONS" == "all" ]]; then\n  : "${NVPN_RELEASE_JOIN_IOS_RECEIPT:',
+    'ios_artifact = None if selected == "pixel" else json.loads(',
+    'if ios_artifact is not None:',
+):
+    if required not in host:
+        raise SystemExit(f"macOS join summary lacks optional iOS receipt handling: {required}")
+if "diagnostics)" not in remote or "capture_diagnostics" not in remote:
+    raise SystemExit("macOS join remote cannot preserve failure diagnostics before cleanup")
+if 'remote diagnostics >"$RESULT_DIR/macos/$MACOS_MOBILE_DIRECTION_LABEL-daemon-diagnostic.log"' not in host:
+    raise SystemExit("macOS join gate does not preserve daemon diagnostics on direction failure")
+if "NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=" not in host:
+    raise SystemExit("macOS reverse acceptance still relies on pre-approval submission state")
+if "NVPN_RELEASE_JOIN_MANUAL_COMPLETE=$RELEASE_JOIN_ANDROID_ADMIN_ID" in host:
+    raise SystemExit("macOS reverse acceptance treats pending manual submission as approval")
 longest_short_socket = (
     "/private/tmp/nvpn-rj-4294967295/"
     ".nvpn-runtime/join-0123456789abcdef.sock"
@@ -102,6 +146,8 @@ if 's.get("vpn_status") == "Waiting for participants"' not in listener:
     raise SystemExit("macOS join listener rejects the canonical empty-roster state")
 if 's.get("vpn_status") == "Listening for join requests"' in listener:
     raise SystemExit("macOS join listener still expects an unreachable status")
+if 'join_request_qr_code_or_link' in listener:
+    raise SystemExit("macOS manual join listener still requires unrelated QR state")
 
 cleanup = remote.split("restore_test_profile() {", 1)[1].split(
     "\n}\n\nservice_preflight", 1
@@ -315,6 +361,32 @@ if launch.index("open -n -F") > launch.index("macos_exact_executable_pids"):
     raise SystemExit("manual-join VM looks for its exact PID before launching")
 if "Date().addingTimeInterval(20)" not in manual_join_driver:
     raise SystemExit("manual-join AX driver lacks a bounded cold-import readiness window")
+for required in (
+    "NSRunningApplication(processIdentifier: pid)?.activate(",
+    "options: [.activateAllWindows]",
+    'find(application, identifier: "main-AppWindow-1", timeout: 60)',
+):
+    if required not in manual_join_driver:
+        raise SystemExit(
+            f"manual-join AX driver does not reactivate and await the app window: {required}"
+        )
+press_driver = manual_join_driver.split("func press(", 1)[1].split(
+    "\n}\n\nfunc setValue", 1
+)[0]
+for required in (
+    "let candidates = visible.filter",
+    "for candidate in candidates",
+    "boolAttribute($0, kAXEnabledAttribute) != false",
+    "if boolAttribute(element, kAXEnabledAttribute) == false { break }",
+):
+    if required not in press_driver:
+        raise SystemExit(
+            f"manual-join AX driver does not try every responsive-layout match: {required}"
+        )
+if "visible.first(where:" in press_driver:
+    raise SystemExit(
+        "manual-join AX driver can wedge on the first stale responsive-layout match"
+    )
 
 if 'pgrep -f "$APP_EXE"' in texts["e2e-macos-service-toggle.sh"]:
     raise SystemExit("service-toggle gate still uses substring process matching")
@@ -332,6 +404,17 @@ for required in (
         raise SystemExit(f"service-toggle gate lacks short owned runtime cleanup: {required}")
 if 'DATA_ROOT="$ARTIFACT_DIR/app-data"' in service_toggle:
     raise SystemExit("service-toggle gate still puts Unix sockets under artifacts")
+
+service_toggle_driver = texts["macos-service-toggle-ax.swift"]
+for required in (
+    "NSRunningApplication(processIdentifier: pid)?.activate(",
+    "options: [.activateAllWindows]",
+    'findVisibleIdentifier(application, "main-AppWindow-1", timeout: 60)',
+):
+    if required not in service_toggle_driver:
+        raise SystemExit(
+            f"service-toggle AX driver does not reactivate and await the app window: {required}"
+        )
 
 service_toggle_launch = service_toggle.split("launch_app() {", 1)[1].split(
     "\n}\n\nif ! launch_app", 1

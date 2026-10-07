@@ -412,6 +412,7 @@ exit 0
             mesh_ready: true,
             peers: vec![DaemonPeerState {
                 participant_pubkey: peer.clone(),
+                advertised_routes: vec!["0.0.0.0/0".to_string()],
                 reachable: true,
                 last_fips_seen_at: Some(now),
                 ..DaemonPeerState::default()
@@ -436,6 +437,27 @@ exit 0
         assert!(state.vpn_active);
         assert_eq!(state.connected_peer_count, 1);
         assert!(participant.reachable);
+        assert!(participant.offers_exit_node);
+        assert!(
+            state.exit_node.is_empty(),
+            "exit must be visible before selection"
+        );
+
+        runtime.dispatch(NativeAppAction::UpdateSettings {
+            patch: SettingsPatch {
+                internet_source: Some("private_vpn".to_string()),
+                exit_node: Some(participant.npub.clone()),
+                ..SettingsPatch::default()
+            },
+        });
+        assert_eq!(runtime.config.exit_node, peer);
+        assert_eq!(runtime.config.internet_source, InternetSource::PrivateVpn);
+        assert_eq!(
+            AppConfig::load(&runtime.config_path)
+                .expect("saved selection")
+                .exit_node,
+            peer,
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -50,7 +50,7 @@ impl NativeAppRuntime {
         } else {
             String::new()
         };
-        #[cfg(feature = "paid-exit")]
+        #[cfg(all(feature = "paid-exit", any(target_os = "ios", target_os = "android")))]
         let cashu_wallet_runtime = Some(paid_exit::PaidRouteWalletRuntime::open(&config_path)?);
         let mut runtime = Self {
             rev: 0,
@@ -79,9 +79,10 @@ impl NativeAppRuntime {
             last_service_status_refresh_at: None,
             paid_route_market_filter: NativePaidRouteMarketFilterState::default(),
             paid_route_wallet_last_action: NativePaidRouteWalletActionState::default(),
+            paid_route_wallet_history: NativePaidRouteWalletHistoryState::default(),
             #[cfg(feature = "paid-exit")]
             paid_route_wallet_next_refresh_at: None,
-            #[cfg(feature = "paid-exit")]
+            #[cfg(all(feature = "paid-exit", any(target_os = "ios", target_os = "android")))]
             cashu_wallet_runtime,
             paid_route_payment_last_action: NativePaidRoutePaymentActionState::default(),
             exchange_rate_service,
@@ -141,9 +142,10 @@ impl NativeAppRuntime {
             last_service_status_refresh_at: None,
             paid_route_market_filter: NativePaidRouteMarketFilterState::default(),
             paid_route_wallet_last_action: NativePaidRouteWalletActionState::default(),
+            paid_route_wallet_history: NativePaidRouteWalletHistoryState::default(),
             #[cfg(feature = "paid-exit")]
             paid_route_wallet_next_refresh_at: None,
-            #[cfg(feature = "paid-exit")]
+            #[cfg(all(feature = "paid-exit", any(target_os = "ios", target_os = "android")))]
             cashu_wallet_runtime: None,
             paid_route_payment_last_action: NativePaidRoutePaymentActionState::default(),
             exchange_rate_service,
@@ -222,12 +224,31 @@ impl NativeAppRuntime {
         let port_mapping = daemon_state
             .map(|state| native_port_mapping_status(&state.port_mapping))
             .unwrap_or_default();
+        let config_for_paid = (!config_unavailable).then_some(&self.config);
+        let raw_port_mapping = daemon_state.map(|state| &state.port_mapping);
+        if !config_unavailable && self.config.wallet_fiat_enabled {
+            let _ = self.exchange_rate_service.refresh_if_due();
+        }
+        let mut paid_route_market = self.paid_route_market_state(config_for_paid);
+        if !config_unavailable && self.config.wallet_fiat_enabled {
+            apply_exchange_rate(
+                &mut paid_route_market.wallet,
+                &self.exchange_rate_service.snapshot(),
+            );
+        }
+
         let exit_node_status = if network_setup_required {
             ExitNodeUiStatus::default()
         } else {
             active_network
                 .map(|network| {
-                    self.exit_node_ui_status(vpn_enabled, vpn_active, daemon_state, network)
+                    self.exit_node_ui_status(
+                        vpn_enabled,
+                        vpn_active,
+                        daemon_state,
+                        network,
+                        &paid_route_market,
+                    )
                 })
                 .unwrap_or_default()
         };
@@ -248,18 +269,6 @@ impl NativeAppRuntime {
             } else {
                 self.service_binary_version.clone()
             };
-        let config_for_paid = (!config_unavailable).then_some(&self.config);
-        let raw_port_mapping = daemon_state.map(|state| &state.port_mapping);
-        if !config_unavailable && self.config.wallet_fiat_enabled {
-            let _ = self.exchange_rate_service.refresh_if_due();
-        }
-        let mut paid_route_market = self.paid_route_market_state(config_for_paid);
-        if !config_unavailable && self.config.wallet_fiat_enabled {
-            apply_exchange_rate(
-                &mut paid_route_market.wallet,
-                &self.exchange_rate_service.snapshot(),
-            );
-        }
 
         NativeAppState {
             rev: self.rev,
@@ -383,6 +392,7 @@ impl NativeAppRuntime {
             exit_node_leak_protection: self.config.exit_node_leak_protection,
             exit_node_active: exit_node_status.active,
             exit_node_blocked: exit_node_status.blocked,
+            exit_node_needs_attention: exit_node_status.needs_attention,
             exit_node_status_text: exit_node_status.text,
             exit_dns_mode: self.config.exit_dns.mode.as_str().to_string(),
             exit_dns_doh_provider: self.config.exit_dns.doh_provider.as_str().to_string(),

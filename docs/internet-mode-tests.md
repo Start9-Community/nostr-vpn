@@ -1,0 +1,39 @@
+# Internet mode transitions
+
+`cargo test -p nostr-vpn-app-core --lib all_internet_mode_switches` exercises
+all 25 ordered pairs of Direct, Private VPN, WireGuard upstream, Paid Automatic,
+and Paid Manual through native settings actions, persistence, reload, and UI
+state. It also repeats the destination selection and checks that imported
+WireGuard settings survive switching away.
+
+`cargo test -p nvpn --bin nvpn paid_exit` includes cancellation of pending
+Manual funding and Automatic-to-Manual handover on the same provider. Funding
+already in progress must finish persisting its result without activating an
+obsolete selection.
+
+`./scripts/e2e-paid-exit-automatic-docker.sh` and
+`./scripts/e2e-paid-exit-docker.sh` run the network integration coverage. After
+the initial funded route check, the buyer traverses
+all 25 mode pairs without resetting its daemon between transitions. Each step
+checks DNS resolution, HTTP upload/download, and the source address observed by
+the fixture server. Paid-to-paid transitions must preserve usable channel
+credit and monotonic payments. A paused test mint also verifies that a wallet
+result arriving after Manual-to-Direct is attached to its original session
+while Direct stays selected.
+
+The follow-on traffic check crosses two channel renewals without retrying
+failed requests, checks that renewal retains the agreed capacity, then idles
+for 75 seconds and resumes traffic. A funding regression in
+`vendor/cashu-service/tests/spilman_channel_capacity.rs` covers surplus funding,
+sender change, idempotent recovery, and rejection before spending an
+insufficient token. Wallet regressions also check that mixed proof denominations
+cover the recipient's actual redemption fee, and that a stale pooled HTTP
+connection cannot delay the next operation after switching routes. Connection
+funding must get a turn before background refund maintenance can extend a mint
+cooldown again. The native status check distinguishes that cooldown from an
+active payment request.
+
+These Docker tests use isolated configurations, generated identities, and test
+mint funds. They require Docker network administration/TUN support and Internet
+access for the configured encrypted DNS resolver. They do not exercise native
+window clicks or change the host's selected Internet source.

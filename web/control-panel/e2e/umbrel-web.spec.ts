@@ -394,6 +394,14 @@ test('API supports the Umbrel web config action surface', async ({ request }) =>
   workNetwork = byName(state, 'E2E Renamed');
   expect(workNetwork.participants.some((participant) => participant.npub === peerNpub)).toBeTruthy();
 
+  // Adding the first participant starts the VPN asynchronously. Let that
+  // transition finish before sending a second daemon configuration request.
+  await expect
+    .poll(async () => (await postJson<UiState>(request, '/api/tick')).vpnActive, {
+      timeout: 20_000,
+    })
+    .toBe(true);
+
   state = await postJson<UiState>(request, '/api/set_participant_alias', {
     npub: peerNpub,
     alias: 'Peer Renamed',
@@ -454,6 +462,7 @@ test('manual join admin and joiner actions persist through the shipped web UI', 
   await adminForm.getByLabel('Device ID').fill(peerNpub!);
   await adminForm.getByLabel('Name').fill('Manual web joiner');
   await adminForm.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(adminForm).toBeHidden({ timeout: 20_000 });
 
   await expect
     .poll(async () => {
@@ -480,6 +489,7 @@ test('manual join admin and joiner actions persist through the shipped web UI', 
   await joinerForm.getByLabel('Admin Device ID').fill(peerNpub!);
   await joinerForm.getByLabel('Network ID').fill('a1b2-c3d4-e5f6-0708');
   await joinerForm.getByRole('button', { name: 'Add manually' }).click();
+  await expect(joinerForm).toBeHidden({ timeout: 20_000 });
 
   let manualNetwork: NetworkView | undefined;
   await expect

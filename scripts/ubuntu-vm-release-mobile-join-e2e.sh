@@ -37,7 +37,7 @@ PRIVATE_DIR="$RESULT_DIR/.private-$$"
 PHASE_EVIDENCE="$RESULT_DIR/phase-evidence.json"
 SUMMARY="$RESULT_DIR/summary.json"
 REMOTE_SCRIPT="./scripts/linux-release-mobile-join-remote.sh"
-RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
+RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-30}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 mkdir -p "$RESULT_DIR" "$PRIVATE_DIR"
 chmod 700 "$PRIVATE_DIR"
@@ -54,10 +54,9 @@ chmod 700 "$PRIVATE_DIR"
 
 APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 APP_GIT_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
-[[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ]] || {
-  echo "Linux desktop/mobile join requires a clean committed candidate" >&2
-  exit 2
-}
+assert_release_checkout_state \
+  "$ROOT" "$(git -C "$ROOT" rev-parse HEAD)" "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+  "Linux desktop/mobile join" || exit 2
 [[ "${NVPN_EXPECTED_APP_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ \
   && "$APP_GIT_SHA" == "$NVPN_EXPECTED_APP_GIT_SHA" ]] || {
   echo "Set NVPN_EXPECTED_APP_GIT_SHA to the exact committed candidate" >&2
@@ -127,6 +126,9 @@ remote() {
 cleanup() {
   local status="$?"
   trap - EXIT
+  if ((status != 0)); then
+    release_join_android_capture_failure_log "$RESULT_DIR/android-service-failure.log"
+  fi
   local observer_pid
   for observer_pid in "${acceptance_observer_pids[@]-}"; do
     kill "$observer_pid" >/dev/null 2>&1 || true
@@ -137,7 +139,11 @@ cleanup() {
     wait "$remote_pid" >/dev/null 2>&1 || true
   fi
   if [[ "$import_ready" -eq 1 ]]; then
+    remote ReadDaemonLog >"$RESULT_DIR/daemon.log" 2>/dev/null || true
     remote Cleanup "$service_cleanup_armed" >/dev/null 2>&1 || status=1
+  fi
+  if ! release_join_android_stop; then
+    [[ "$status" -ne 0 ]] || status=1
   fi
   if [[ "${RELEASE_JOIN_DEVICE_MUTATED:-0}" -eq 1 ]]; then
     "${ADB[@]}" shell rm -f /sdcard/nvpn-release-join.xml \
@@ -156,7 +162,8 @@ trap cleanup EXIT
 
 case "${NVPN_UBUNTU_SKIP_GIT_SYNC:-0}" in
   1|true|TRUE|True|yes|YES|Yes|on|ON|On) ;;
-  *) "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$SSH_HOST" ;;
+  *) NVPN_UBUNTU_GIT_SYNC_EXACT_COMMIT="$APP_GIT_SHA" \
+    "$ROOT/scripts/ubuntu-vm-git-sync.sh" "$SSH_HOST" ;;
 esac
 ubuntu_vm_import_release_bundle
 import_ready=1
@@ -418,7 +425,7 @@ linux_admin_pixel_visible() {
 calibrate_remote_clock
 
 # Imported Linux desktop admin -> physical Pixel joiner.
-release_join_reset_android_state
+release_join_android_open_network_setup
 remote Reset >"$RESULT_DIR/desktop-admin-reset.log"
 remote Bootstrap >"$RESULT_DIR/desktop-admin-bootstrap.log"
 remote ReadMarker >"$RESULT_DIR/desktop-admin-bootstrap.json"
@@ -436,6 +443,7 @@ service_cleanup_armed=1
 remote InstallService >"$RESULT_DIR/desktop-admin-service.log"
 release_join_android_manual_submit "$DESKTOP_ADMIN_NPUB" "$DESKTOP_NETWORK_ID" \
   >"$RESULT_DIR/pixel-manual-submit.log" 2>&1
+release_join_android_wait_vpn_connected
 
 desktop_add_log="$RESULT_DIR/desktop-admin-add-pixel.log"
 remote AdminAdd "$RELEASE_JOIN_ANDROID_JOINER_ID" "Release Pixel" \
@@ -506,7 +514,7 @@ remote ReadMarker >"$RESULT_DIR/desktop-admin-relaunch.json"
 )" == true ]]
 
 # Physical Pixel admin -> imported Linux desktop joiner.
-release_join_reset_android_state
+release_join_android_open_network_setup
 remote Cleanup 1 >"$RESULT_DIR/desktop-admin-service-cleanup.log"
 service_cleanup_armed=0
 remote Reset >"$RESULT_DIR/desktop-joiner-reset.log"

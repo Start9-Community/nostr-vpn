@@ -490,6 +490,9 @@ pub(crate) fn stun_host_port(server: &str) -> Option<(String, u16)> {
 
 #[cfg(target_os = "linux")]
 fn stun_ipv4_hosts(app: &AppConfig) -> Vec<Ipv4Addr> {
+    if !app.fips_nostr_discovery_enabled && !app.fips_webrtc_enabled {
+        return Vec::new();
+    }
     let mut hosts = app
         .nat
         .stun_servers

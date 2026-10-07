@@ -118,6 +118,13 @@ func boolAttribute(_ element: AXUIElement, _ name: String) -> Bool? {
     attribute(element, name) as? Bool
 }
 
+func toggleValue(_ element: AXUIElement) -> Bool? {
+    if let value = attribute(element, kAXValueAttribute) as? NSNumber {
+        return value.boolValue
+    }
+    return boolAttribute(element, kAXValueAttribute)
+}
+
 func descendants(_ root: AXUIElement) -> [AXUIElement] {
     var found: [AXUIElement] = []
     var pending = [root]
@@ -257,6 +264,11 @@ func pressAndWaitForSaveCompletion(
     guard boolAttribute(save, kAXEnabledAttribute) == true else {
         throw DriverError.invalidState("Exit DNS save was not actionable")
     }
+    // The settings form is itself a sheet. Only new or nested modals are errors.
+    let settingsSheet = descendants(application).last { element in
+        stringAttribute(element, kAXRoleAttribute) == kAXSheetRole
+            && descendants(element).contains { CFEqual($0, save) }
+    }
     try pressElement(save, label: identifier)
 
     let inFlightProbeDeadline = Date().addingTimeInterval(5)
@@ -276,7 +288,7 @@ func pressAndWaitForSaveCompletion(
                 "Exit DNS save was not actionable after the completion probe"
             )
         }
-        if let modalText = blockingModalText(application) {
+        if let modalText = blockingModalText(application, ignoring: settingsSheet) {
             throw DriverError.invalidState(
                 "Exit DNS save failed: \(modalText)"
             )
@@ -289,7 +301,7 @@ func pressAndWaitForSaveCompletion(
         if let current = findNow(application, identifier: identifier),
            boolAttribute(current, kAXEnabledAttribute) == true {
             Thread.sleep(forTimeInterval: 0.15)
-            if let modalText = blockingModalText(application) {
+            if let modalText = blockingModalText(application, ignoring: settingsSheet) {
                 throw DriverError.invalidState(
                     "Exit DNS save failed: \(modalText)"
                 )
@@ -301,10 +313,27 @@ func pressAndWaitForSaveCompletion(
     throw DriverError.invalidState("Exit DNS save did not complete")
 }
 
-func blockingModalText(_ application: AXUIElement) -> String? {
+func pressAndWaitForSellerSaveCompletion(_ application: AXUIElement) throws {
+    let identifier = "paid-exit-seller-save"
+    let save = try find(application, identifier: identifier)
+    guard boolAttribute(save, kAXEnabledAttribute) == true else {
+        throw DriverError.invalidState("paid-exit seller save was not actionable")
+    }
+    try pressElement(save, label: identifier)
+    Thread.sleep(forTimeInterval: 0.75)
+    if let modalText = blockingModalText(application) {
+        throw DriverError.invalidState("paid-exit seller save failed: \(modalText)")
+    }
+}
+
+func blockingModalText(
+    _ application: AXUIElement,
+    ignoring expectedSheet: AXUIElement? = nil
+) -> String? {
     guard let modal = descendants(application).first(where: { element in
         let role = stringAttribute(element, kAXRoleAttribute)
         return visible(element) && (role == kAXSheetRole || role == "AXDialog")
+            && !(expectedSheet.map { CFEqual(element, $0) } ?? false)
     }) else {
         return nil
     }
@@ -383,46 +412,42 @@ func postKey(
     }
 }
 
-func setText(
-    _ application: AXUIElement,
-    identifier: String,
-    value: String,
-    pid: pid_t
-) throws {
-    let element = try find(application, identifier: identifier)
-    let focusError = AXUIElementSetAttributeValue(
-        element,
-        kAXFocusedAttribute as CFString,
-        kCFBooleanTrue
-    )
-    guard focusError == .success else {
-        throw DriverError.value(identifier, focusError)
-    }
-    postKey(to: pid, keyCode: 0, flags: .maskCommand)
-    let utf16 = Array(value.utf16)
-    let source = CGEventSource(stateID: .hidSystemState)
-    let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
-    utf16.withUnsafeBufferPointer { buffer in
-        down?.keyboardSetUnicodeString(
-            stringLength: buffer.count,
-            unicodeString: buffer.baseAddress
-        )
-    }
-    down?.postToPid(pid)
-    CGEvent(
-        keyboardEventSource: source,
-        virtualKey: 0,
-        keyDown: false
-    )?.postToPid(pid)
-    let deadline = Date().addingTimeInterval(3)
+func setText(_ application: AXUIElement, identifier: String, value: String, pid: pid_t) throws {
+    let deadline = Date().addingTimeInterval(6)
+    var lastError = AXError.cannotComplete
     repeat {
-        if stringAttribute(element, kAXValueAttribute) == value {
-            Thread.sleep(forTimeInterval: 0.1)
-            return
+        let element = try find(application, identifier: identifier, timeout: 1)
+        let focusError = AXUIElementSetAttributeValue(
+            element, kAXFocusedAttribute as CFString, kCFBooleanTrue
+        )
+        lastError = focusError
+        if focusError == .success {
+            postKey(to: pid, keyCode: 0, flags: .maskCommand)
+            let utf16 = Array(value.utf16)
+            let source = CGEventSource(stateID: .hidSystemState)
+            let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+            utf16.withUnsafeBufferPointer { buffer in
+                down?.keyboardSetUnicodeString(
+                    stringLength: buffer.count, unicodeString: buffer.baseAddress
+                )
+            }
+            down?.postToPid(pid)
+            CGEvent(
+                keyboardEventSource: source, virtualKey: 0, keyDown: false
+            )?.postToPid(pid)
+            let valueDeadline = min(deadline, Date().addingTimeInterval(1))
+            repeat {
+                if stringAttribute(element, kAXValueAttribute) == value {
+                    Thread.sleep(forTimeInterval: 0.1)
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            } while Date() < valueDeadline
+            lastError = .cannotComplete
         }
-        Thread.sleep(forTimeInterval: 0.05)
+        Thread.sleep(forTimeInterval: 0.1)
     } while Date() < deadline
-    throw DriverError.value(identifier, .cannotComplete)
+    throw DriverError.value(identifier, lastError)
 }
 
 func selectPicker(
@@ -479,6 +504,39 @@ func reveal(
     if let element = findNow(application, identifier: identifier) {
         return element
     }
+    if let element = descendants(application).first(where: {
+        stringAttribute($0, kAXIdentifierAttribute) == identifier
+    }), AXUIElementPerformAction(
+        element,
+        "AXScrollToVisible" as CFString
+    ) == .success {
+        Thread.sleep(forTimeInterval: 0.2)
+        if let visibleElement = findNow(application, identifier: identifier) {
+            return visibleElement
+        }
+    }
+    for step in 0...8 {
+        let fraction = Double(step) / 8.0
+        for scrollArea in descendants(application) where
+            stringAttribute(scrollArea, kAXRoleAttribute) == kAXScrollAreaRole
+        {
+            guard let scrollBar = attribute(
+                scrollArea,
+                kAXVerticalScrollBarAttribute
+            ) else {
+                continue
+            }
+            _ = AXUIElementSetAttributeValue(
+                scrollBar as! AXUIElement,
+                kAXValueAttribute as CFString,
+                NSNumber(value: fraction)
+            )
+        }
+        Thread.sleep(forTimeInterval: 0.15)
+        if let element = findNow(application, identifier: identifier) {
+            return element
+        }
+    }
     for _ in 0..<8 {
         postKey(to: pid, keyCode: 121) // Page Down.
         Thread.sleep(forTimeInterval: 0.2)
@@ -493,19 +551,9 @@ func createNetworkIfNeeded(
     _ application: AXUIElement,
     pid: pid_t
 ) throws -> Bool {
-    try pressSidebar(application, "sidebar-internet", pid: pid)
-    for _ in 0..<10 {
-        if findNow(application, identifier: "exit-dns-mode") != nil {
-            return false
-        }
-        postKey(to: pid, keyCode: 121) // Page Down.
-        Thread.sleep(forTimeInterval: 0.15)
-    }
     try pressSidebar(application, "sidebar-devices", pid: pid)
     guard findNow(application, identifier: "network-setup-create") != nil else {
-        throw DriverError.invalidState(
-            "Exit DNS controls are absent, but the shipped UI is not in first-run network setup"
-        )
+        return false
     }
     try press(
         application,
@@ -520,9 +568,98 @@ func createNetworkIfNeeded(
     )
     try press(application, "network-create-submit")
     _ = try find(application, identifier: "sidebar-internet")
-    try pressSidebar(application, "sidebar-internet", pid: pid)
-    _ = try reveal(application, identifier: "exit-dns-mode", pid: pid)
     return true
+}
+
+func openPaidExitSeller(
+    _ application: AXUIElement,
+    pid: pid_t
+) throws -> Bool {
+    let created = try createNetworkIfNeeded(application, pid: pid)
+    try pressSidebar(application, "sidebar-sharing", pid: pid)
+    _ = try reveal(application, identifier: "paid-exit-seller-enabled", pid: pid)
+    return created
+}
+
+func setPaidExitSellerEnabled(
+    _ application: AXUIElement,
+    enabled: Bool
+) throws {
+    var toggle = try find(application, identifier: "paid-exit-seller-enabled")
+    if toggleValue(toggle) != enabled {
+        try pressElement(toggle, label: "paid-exit-seller-enabled")
+        let deadline = Date().addingTimeInterval(5)
+        repeat {
+            toggle = try find(
+                application,
+                identifier: "paid-exit-seller-enabled",
+                timeout: 0.5
+            )
+            if toggleValue(toggle) == enabled {
+                Thread.sleep(forTimeInterval: 0.25)
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+    }
+    guard toggleValue(toggle) == enabled else {
+        throw DriverError.invalidState("paid-exit seller toggle did not retain its value")
+    }
+}
+
+func observePaidExitSeller(
+    _ application: AXUIElement,
+    phase: String,
+    pid: pid_t,
+    processName: String,
+    saved: Bool,
+    networkCreated: Bool
+) throws -> [String: Any] {
+    let price = try textValue(
+        application,
+        identifier: "paid-exit-price-msat-per-gb"
+    )
+    let country = try textValue(
+        application,
+        identifier: "paid-exit-country-code"
+    )
+    let mint = try textValue(
+        application,
+        identifier: "paid-exit-accepted-mints"
+    )
+    let toggle = try find(application, identifier: "paid-exit-seller-enabled")
+    guard price == "1000000", country == "FI",
+          mint == "http://cashu-mint:3338", toggleValue(toggle) == true else {
+        throw DriverError.invalidState("paid-exit seller public values changed")
+    }
+    return [
+        "receiptSchema": 1,
+        "phase": phase,
+        "case": "paid-exit-seller",
+        "pid": Int(pid),
+        "processName": processName,
+        "publicUiOnly": true,
+        "privateStateRead": false,
+        "savedViaShippedUi": saved,
+        "enabledViaShippedUi": phase == "apply",
+        "networkCreatedViaShippedUi": networkCreated,
+        "visibleControlIdentifiers": [
+            "paid-exit-seller-enabled",
+            "paid-exit-price-msat-per-gb",
+            "paid-exit-country-code",
+            "paid-exit-accepted-mints",
+            "paid-exit-seller-save",
+        ].sorted(),
+        "values": [
+            "enabled": true,
+            "priceMsatPerGb": 1_000_000,
+            "countryCode": country,
+            "acceptedMints": [mint],
+        ],
+        "observedAtUnixMilliseconds": Int64(
+            (Date().timeIntervalSince1970 * 1_000).rounded(.down)
+        ),
+    ]
 }
 
 func assertConditionalControls(
@@ -676,6 +813,26 @@ func run() throws {
         print("MACOS_EXIT_DNS_AX_ACCESSIBILITY_READY")
         return
     }
+    if args.count == 4,
+       let pid = pid_t(args[1]),
+       args[2] == "--wait-window" {
+        guard AXIsProcessTrusted() else {
+            throw DriverError.accessibilityPermission
+        }
+        let application = AXUIElementCreateApplication(pid)
+        let processName = stringAttribute(application, kAXTitleAttribute)
+        if !processName.isEmpty, processName != args[3] {
+            throw DriverError.invalidState(
+                "AX PID \(pid) belongs to \(processName), expected \(args[3])"
+            )
+        }
+        NSRunningApplication(processIdentifier: pid)?
+            .activate(options: [.activateAllWindows])
+        _ = try find(application, identifier: "main-AppWindow-1")
+        try pressSidebar(application, "sidebar-internet", pid: pid)
+        print("MACOS_EXIT_DNS_AX_WINDOW_READY")
+        return
+    }
     guard args.count == 6,
           let pid = pid_t(args[1]),
           ["apply", "readback"].contains(args[2]) else {
@@ -687,7 +844,6 @@ func run() throws {
         throw DriverError.accessibilityPermission
     }
     let phase = args[2]
-    let spec = try DnsCase.named(args[3])
     let application = AXUIElementCreateApplication(pid)
     let processName = stringAttribute(application, kAXTitleAttribute)
     if !processName.isEmpty, processName != args[5] {
@@ -701,7 +857,72 @@ func run() throws {
         identifier: "main-AppWindow-1",
         timeout: 60
     )
+    if args[3] == "paid-exit-seller" {
+        let networkCreated = try openPaidExitSeller(application, pid: pid)
+        for identifier in [
+            "paid-exit-country-code",
+            "paid-exit-price-msat-per-gb",
+            "paid-exit-accepted-mints",
+            "paid-exit-seller-save",
+        ] {
+            _ = try reveal(application, identifier: identifier, pid: pid)
+        }
+        if phase == "apply" {
+            try setText(
+                application,
+                identifier: "paid-exit-country-code",
+                value: "FI",
+                pid: pid
+            )
+            try setText(
+                application,
+                identifier: "paid-exit-price-msat-per-gb",
+                value: "1000000",
+                pid: pid
+            )
+            try setText(
+                application,
+                identifier: "paid-exit-accepted-mints",
+                value: "http://cashu-mint:3338",
+                pid: pid
+            )
+            _ = try reveal(
+                application,
+                identifier: "paid-exit-seller-save",
+                pid: pid
+            )
+            try pressAndWaitForSellerSaveCompletion(application)
+            _ = try reveal(
+                application,
+                identifier: "paid-exit-seller-enabled",
+                pid: pid
+            )
+            try setPaidExitSellerEnabled(application, enabled: true)
+        }
+        for identifier in [
+            "paid-exit-country-code",
+            "paid-exit-price-msat-per-gb",
+            "paid-exit-accepted-mints",
+            "paid-exit-seller-save",
+            "paid-exit-seller-enabled",
+        ] {
+            _ = try reveal(application, identifier: identifier, pid: pid)
+        }
+        let receipt = try observePaidExitSeller(
+            application,
+            phase: phase,
+            pid: pid,
+            processName: processName.isEmpty ? args[5] : processName,
+            saved: phase == "apply",
+            networkCreated: networkCreated
+        )
+        try writeJSON(receipt, path: args[4])
+        print("MACOS_PAID_EXIT_SELLER_AX_\(phase.uppercased())_OK")
+        return
+    }
+    let spec = try DnsCase.named(args[3])
     let networkCreated = try createNetworkIfNeeded(application, pid: pid)
+    try pressSidebar(application, "sidebar-settings", pid: pid)
     _ = try reveal(application, identifier: "exit-dns-mode", pid: pid)
     if phase == "apply" {
         _ = try selectPicker(

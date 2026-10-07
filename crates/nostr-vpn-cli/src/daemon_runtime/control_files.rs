@@ -141,7 +141,9 @@ pub(crate) fn acquire_unix_daemon_instance_lock_at(
     lock_path: &Path,
     expected_uid: u32,
 ) -> Result<DaemonInstanceLock> {
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(not(target_os = "macos"))]
+    use std::os::unix::fs::DirBuilderExt as _;
 
     let parent = lock_path.parent().ok_or_else(|| {
         anyhow!(
@@ -152,9 +154,15 @@ pub(crate) fn acquire_unix_daemon_instance_lock_at(
     match fs::symlink_metadata(parent) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            builder.mode(0o700);
-            match builder.create(parent) {
+            #[cfg(target_os = "macos")]
+            let created = fs::Directory::open(parent, true).and_then(|directory| {
+                directory.set_owner_and_permissions(
+                    expected_uid, unsafe { libc::getegid() }, 0o700,
+                )
+            });
+            #[cfg(not(target_os = "macos"))]
+            let created = fs::DirBuilder::new().mode(0o700).create(parent);
+            match created {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => {
@@ -310,11 +318,11 @@ pub(crate) fn visible_daemon_state_for_status(
     if running { state.cloned() } else { None }
 }
 
-pub(crate) fn daemon_log_file_path(config_path: &Path) -> PathBuf {
-    let parent = config_path
-        .parent()
-        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
-    parent.join("daemon.log")
+pub(crate) fn daemon_log_file_path(config_path: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return Ok(crate::macos_privileged_files::runtime_directory(config_path)?.join("daemon.log"));
+    #[cfg(not(target_os = "macos"))]
+    Ok(config_path.parent().unwrap_or_else(|| Path::new(".")).join("daemon.log"))
 }
 
 fn runtime_open_options_no_follow() -> OpenOptions {
@@ -325,24 +333,20 @@ fn runtime_open_options_no_follow() -> OpenOptions {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     options
 }
 
 pub(crate) fn redirect_stdio_to_daemon_log(config_path: &Path) -> Result<()> {
-    let log_path = daemon_log_file_path(config_path);
+    let log_path = daemon_log_file_path(config_path)?;
+    #[cfg(target_os = "macos")]
+    crate::macos_privileged_files::protected_directory(log_path.parent().unwrap(), true)?;
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let mut options = runtime_open_options_no_follow();
-    let log_file = options
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("failed to open {}", log_path.display()))?;
-    let _ = set_daemon_runtime_file_permissions_on_file(&log_file, &log_path);
+    let log_file = open_daemon_log_file(&log_path)?;
 
     #[cfg(unix)]
     {
@@ -395,8 +399,11 @@ pub(crate) fn redirect_stdio_to_daemon_log(config_path: &Path) -> Result<()> {
 }
 
 pub(crate) fn compact_daemon_log_if_needed(config_path: &Path) -> Result<bool> {
+    let log_path = daemon_log_file_path(config_path)?;
+    #[cfg(target_os = "macos")]
+    crate::macos_privileged_files::protected_directory(log_path.parent().unwrap(), true)?;
     compact_log_file_if_needed(
-        &daemon_log_file_path(config_path),
+        &log_path,
         DAEMON_LOG_MAX_BYTES,
         DAEMON_LOG_RETAIN_BYTES,
     )
@@ -433,21 +440,25 @@ pub(crate) fn compact_log_file_if_needed(
             path.display()
         ));
     }
-    let original_len = metadata.len();
+    let mut read_options = runtime_open_options_no_follow();
+    let mut file = read_options
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let original_len = validate_daemon_runtime_file(&file, path)?.len();
     if original_len <= max_bytes {
         return Ok(false);
     }
 
     let retain_start = original_len.saturating_sub(retain_bytes);
-    let mut read_options = runtime_open_options_no_follow();
-    let mut file = read_options
-        .read(true)
-        .open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
     std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(retain_start))
         .with_context(|| format!("failed to seek {}", path.display()))?;
     let mut retained = Vec::with_capacity(retain_bytes as usize);
-    std::io::Read::read_to_end(&mut file, &mut retained)
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(&mut file, retain_bytes),
+        &mut retained,
+    )
         .with_context(|| format!("failed to read {}", path.display()))?;
     if let Some(newline) = retained.iter().position(|byte| *byte == b'\n') {
         retained.drain(..=newline);
@@ -459,12 +470,12 @@ pub(crate) fn compact_log_file_if_needed(
         retained.len(),
         original_len
     );
-    let mut write_options = runtime_open_options_no_follow();
-    let mut file = write_options
-        .write(true)
-        .truncate(true)
-        .open(path)
+    // Keep the validated handle: the config owner can replace the path while
+    // the elevated daemon is retaining the old log tail.
+    file.set_len(0)
         .with_context(|| format!("failed to compact {}", path.display()))?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(0))
+        .with_context(|| format!("failed to rewind {}", path.display()))?;
     std::io::Write::write_all(&mut file, header.as_bytes())
         .with_context(|| format!("failed to write compaction header to {}", path.display()))?;
     std::io::Write::write_all(&mut file, &retained)
@@ -482,17 +493,18 @@ pub(crate) fn daemon_state_file_path(config_path: &Path) -> PathBuf {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub(crate) fn daemon_network_cleanup_file_path(config_path: &Path) -> PathBuf {
-    let parent = config_path
-        .parent()
-        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
-    #[cfg(target_os = "linux")]
-    return parent
-        .join(".nvpn-network-cleanup")
-        .join("daemon.cleanup.json");
+pub(crate) fn daemon_network_cleanup_file_path(config_path: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return crate::macos_privileged_files::network_cleanup_path(config_path);
 
-    #[cfg(not(target_os = "linux"))]
-    parent.join("daemon.cleanup.json")
+    #[cfg(not(target_os = "macos"))]
+    {
+        let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
+        #[cfg(target_os = "linux")]
+        return Ok(parent.join(".nvpn-network-cleanup").join("daemon.cleanup.json"));
+        #[cfg(not(target_os = "linux"))]
+        Ok(parent.join("daemon.cleanup.json"))
+    }
 }
 
 pub(crate) fn daemon_control_file_path(config_path: &Path) -> PathBuf {
@@ -553,13 +565,12 @@ pub(crate) fn write_daemon_control_request(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    fs::write(&control_file, format!("{}\n", request.as_str())).with_context(|| {
+    write_runtime_file_atomically(&control_file, format!("{}\n", request.as_str()).as_bytes()).with_context(|| {
         format!(
             "failed to write daemon control request {}",
             control_file.display()
         )
     })?;
-    set_daemon_runtime_file_permissions(&control_file)?;
     if let Err(error) = persist_desired_daemon_vpn_enabled_for_request(config_path, request) {
         eprintln!(
             "daemon: failed to persist desired VPN state in {}: {}",
@@ -660,7 +671,6 @@ pub(crate) fn write_daemon_control_ready(config_path: &Path, pid: u32) -> Result
     }
     write_runtime_file_atomically(&ready_file, format!("{pid}\n").as_bytes())
         .with_context(|| format!("failed to write {}", ready_file.display()))?;
-    set_daemon_runtime_file_permissions(&ready_file)?;
     Ok(())
 }
 
@@ -716,7 +726,6 @@ pub(crate) fn write_daemon_control_result(
     let raw = serde_json::to_vec_pretty(&payload)?;
     write_runtime_file_atomically(&result_file, &raw)
         .with_context(|| format!("failed to write {}", result_file.display()))?;
-    set_daemon_runtime_file_permissions(&result_file)?;
     Ok(())
 }
 
@@ -781,6 +790,7 @@ pub(crate) fn stage_daemon_config_apply(config_path: &Path, source_path: &Path) 
     config
         .save(&staged_path)
         .with_context(|| format!("failed to stage config {}", staged_path.display()))?;
+    #[cfg(not(target_os = "macos"))]
     set_private_cache_file_permissions(&staged_path)?;
     Ok(())
 }
@@ -930,7 +940,6 @@ pub(crate) fn write_daemon_pid_record(path: &Path, record: &DaemonPidRecord) -> 
     let raw = serde_json::to_string_pretty(record)?;
     write_runtime_file_atomically(path, raw.as_bytes())
         .with_context(|| format!("failed to write daemon pid file {}", path.display()))?;
-    set_daemon_runtime_file_permissions(path)?;
     Ok(())
 }
 
@@ -955,8 +964,6 @@ pub(crate) fn read_daemon_state(path: &Path) -> Result<Option<DaemonRuntimeState
                         path.display(),
                         error
                     );
-                } else {
-                    let _ = set_daemon_runtime_file_permissions(path);
                 }
                 return Ok(Some(parsed));
             }
@@ -975,6 +982,5 @@ pub(crate) fn write_daemon_state(path: &Path, state: &DaemonRuntimeState) -> Res
     let raw = serde_json::to_string_pretty(state)?;
     write_runtime_file_atomically(path, raw.as_bytes())
         .with_context(|| format!("failed to write daemon state file {}", path.display()))?;
-    set_daemon_runtime_file_permissions(path)?;
     Ok(())
 }

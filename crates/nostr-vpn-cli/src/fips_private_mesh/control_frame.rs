@@ -5,9 +5,13 @@ fn control_frame_source_pubkey(
 ) -> Option<String> {
     mesh.participant_for_endpoint_node_addr(source_peer.node_addr().as_bytes())
         .or_else(|| {
+            // Configured transit is intentionally outside the private roster,
+            // but its authenticated link still needs Ping/Pong liveness.
             let allow_unknown = matches!(
                 frame,
-                FipsControlFrame::JoinRequest { .. }
+                FipsControlFrame::Ping { .. }
+                    | FipsControlFrame::Pong { .. }
+                    | FipsControlFrame::JoinRequest { .. }
                     | FipsControlFrame::JoinRoster { .. }
                     | FipsControlFrame::JoinRosterAck { .. }
             );
@@ -18,6 +22,12 @@ fn control_frame_source_pubkey(
                         frame,
                         FipsControlFrame::PaidRouteSessionOpen { .. }
                             | FipsControlFrame::PaidRoutePayment { .. }
+                            // A provider can leave the routing table before
+                            // its final reply arrives. The payment/session
+                            // handler validates the authenticated sender
+                            // against the locally pending request.
+                            | FipsControlFrame::PaidRoutePaymentAck { .. }
+                            | FipsControlFrame::PaidRouteSessionOpenAck { .. }
                     );
             allow_unknown.then(|| hex::encode(source_peer.pubkey().serialize()))
         })

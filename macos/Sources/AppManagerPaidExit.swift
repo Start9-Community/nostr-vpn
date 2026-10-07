@@ -4,6 +4,14 @@ import Foundation
 import SwiftUI
 
 extension AppManager {
+    func reselectPaidExit() {
+        dispatch(.reselectPaidExit, status: "Finding another provider")
+    }
+
+    func ratePaidExit(_ seller: String, rating: Int64) {
+        dispatch(.ratePaidExit(sellerNpub: seller, rating: rating), status: "Saving public rating")
+    }
+
     func setAdvertiseExitNode(_ enabled: Bool) {
         dispatch(.updateSettings(patch: settingsPatch(advertiseExitNode: enabled)), status: "Saving routing")
     }
@@ -21,6 +29,7 @@ extension AppManager {
         freeProbeUnits: String,
         graceUnits: String,
         countryCode: String,
+        networkClass: String,
         asn: String
     ) {
         guard let priceMsatPerGb = UInt64(priceMsatPerGb.trimmingCharacters(in: .whitespacesAndNewlines)) else {
@@ -36,6 +45,7 @@ extension AppManager {
             paidExitFreeProbeUnits: Self.parsePaidExitTrafficUnits(freeProbeUnits),
             paidExitGraceUnits: Self.parsePaidExitTrafficUnits(graceUnits),
             paidExitCountryCode: countryCode,
+            paidExitNetworkClass: networkClass,
             paidExitAsn: asn
         )), status: "Saving seller settings")
     }
@@ -154,12 +164,8 @@ extension AppManager {
         dispatch(.refreshPaidRouteWallet(refresh: true), status: "Refreshing wallet")
     }
 
-    func topUpPaidRouteWallet(mintUrl: String?, amountSat: String) {
-        guard let amount = Self.parsePositiveUInt64(amountSat) else { return }
-        dispatch(
-            .topUpPaidRouteWallet(mintUrl: Self.optionalTrimmed(mintUrl), amountSat: amount),
-            status: "Creating invoice"
-        )
+    func refreshPaidRouteWalletHistory() {
+        dispatch(.refreshPaidRouteWalletHistory, status: "Loading history")
     }
 
     func receivePaidRouteWalletToken(_ token: String) {
@@ -172,26 +178,6 @@ extension AppManager {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         dispatch(.previewPaidRouteWalletToken(token: trimmed), status: "Checking token")
-    }
-
-    func sendPaidRouteWalletToken(mintUrl: String?, amountSat: String) {
-        guard let amount = Self.parsePositiveUInt64(amountSat) else { return }
-        dispatch(
-            .sendPaidRouteWalletToken(mintUrl: Self.optionalTrimmed(mintUrl), amountSat: amount),
-            status: "Creating token"
-        )
-    }
-
-    func withdrawPaidRouteWalletLightning(mintUrl: String?, invoice: String) {
-        let trimmedInvoice = invoice.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedInvoice.isEmpty else { return }
-        dispatch(
-            .withdrawPaidRouteWalletLightning(
-                mintUrl: Self.optionalTrimmed(mintUrl),
-                invoice: trimmedInvoice
-            ),
-            status: "Paying invoice"
-        )
     }
 
     func buyPaidRouteOffer(_ offer: NativePaidRouteOfferState) {
@@ -278,6 +264,10 @@ extension AppManager {
             .streamPaidRoutePayments(publish: true, minIncrementMsat: 1, limit: 0),
             status: "Paying for usage"
         )
+    }
+
+    func clearPaidRouteActivity() {
+        dispatch(.clearPaidRouteActivity, status: "Clearing activity")
     }
 
     func receivePaidRoutePayments() {

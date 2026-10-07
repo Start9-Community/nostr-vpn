@@ -1,6 +1,6 @@
 #[cfg(feature = "paid-exit")]
 #[test]
-fn disabled_seller_keeps_existing_channel_control_transport_alive() {
+fn disabled_seller_preserves_channel_control_peers_until_vpn_resumes() {
     use nostr_vpn_core::paid_route_store::{
         PaidRouteChannelRecord, PaidRouteChannelRole, PaidRouteLifecycleStatus, PaidRouteStore,
         update_paid_route_store,
@@ -22,7 +22,7 @@ fn disabled_seller_keeps_existing_channel_control_transport_alive() {
     for network in &mut app.networks {
         network.listen_for_join_requests = false;
     }
-    assert!(!fips_private_runtime_active(&app, false, 0));
+    assert!(!fips_private_runtime_active(&app, false));
 
     let buyer = Keys::generate();
     let buyer_npub = buyer.public_key().to_bech32().expect("buyer npub");
@@ -56,11 +56,8 @@ fn disabled_seller_keeps_existing_channel_control_transport_alive() {
     })
     .expect("persist seller channel");
 
-    assert!(
-        fips_private_runtime_active_for_config(&app, &config_path, false, 0)
-            .expect("inspect seller settlement runtime"),
-        "an existing seller channel must keep its payment transport alive"
-    );
+    assert!(!fips_private_runtime_active(&app, false));
+    assert!(fips_private_runtime_active(&app, true));
 
     let network_id = app.effective_network_id();
     let own_npub = app
@@ -115,9 +112,8 @@ fn disabled_seller_keeps_existing_channel_control_transport_alive() {
     })
     .expect("persist closed seller channel");
     assert!(
-        !fips_private_runtime_active_for_config(&app, &config_path, false, 0)
-            .expect("inspect closed seller runtime"),
-        "terminal seller channels must release an otherwise idle control runtime"
+        !fips_private_runtime_active(&app, false),
+        "closing the channel must leave VPN off"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -266,12 +262,9 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
         !app.connect_to_non_roster_fips_peers,
         "leaving paid mode must release implicit market discovery ownership"
     );
-    assert!(!fips_private_runtime_active(&app, false, 0));
-    assert!(
-        fips_private_runtime_active_for_config(&app, &config_path, false, 0)
-            .expect("inspect pending close runtime"),
-        "queued cooperative close must keep its control transport alive"
-    );
+    assert!(!fips_private_runtime_active(&app, false));
+    assert!(!fips_private_runtime_active(&app, false));
+    assert!(fips_private_runtime_active(&app, true));
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let network_id = app.effective_network_id();
     let own_pubkey = app.own_nostr_pubkey_hex().expect("buyer pubkey");
@@ -320,9 +313,8 @@ async fn paid_exit_settle_signs_manual_cooperative_close_from_wallet() {
         "seller acknowledgment must remove the queued close"
     );
     assert!(
-        !fips_private_runtime_active_for_config(&app, &config_path, false, 0)
-            .expect("inspect acknowledged close runtime"),
-        "idle direct mode must release the control runtime"
+        !fips_private_runtime_active(&app, false),
+        "acknowledging a queued close must leave VPN off"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

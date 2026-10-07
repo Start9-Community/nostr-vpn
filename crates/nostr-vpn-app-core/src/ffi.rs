@@ -35,8 +35,8 @@ use crate::native_state::{
     NativeNetworkSummary, NativeOutboundJoinRequestState, NativePaidExitSellerState,
     NativePaidRouteMarketFilterState, NativePaidRouteMarketState,
     NativePaidRoutePaymentActionState, NativePaidRouteWalletActionState,
-    NativePaidRouteWalletState, NativeParticipantState, NativePortMappingStatus, NativeProbeStatus,
-    NativeRelayState,
+    NativePaidRouteWalletHistoryState, NativePaidRouteWalletState, NativeParticipantState,
+    NativePortMappingStatus, NativeProbeStatus, NativeRelayState,
 };
 use crate::platform::current_runtime_capabilities;
 use crate::state::{
@@ -198,9 +198,10 @@ struct NativeAppRuntime {
     last_service_status_refresh_at: Option<Instant>,
     paid_route_market_filter: NativePaidRouteMarketFilterState,
     paid_route_wallet_last_action: NativePaidRouteWalletActionState,
+    paid_route_wallet_history: NativePaidRouteWalletHistoryState,
     #[cfg(feature = "paid-exit")]
     paid_route_wallet_next_refresh_at: Option<Instant>,
-    #[cfg(feature = "paid-exit")]
+    #[cfg(all(feature = "paid-exit", any(target_os = "ios", target_os = "android")))]
     cashu_wallet_runtime: Option<paid_exit::PaidRouteWalletRuntime>,
     paid_route_payment_last_action: NativePaidRoutePaymentActionState,
     exchange_rate_service: ExchangeRateService,
@@ -256,6 +257,7 @@ struct CliServiceStatusResponse {
 struct ExitNodeUiStatus {
     active: bool,
     blocked: bool,
+    needs_attention: bool,
     text: String,
 }
 
@@ -270,11 +272,14 @@ include!("ffi/helpers.rs");
 #[cfg(test)]
 mod tests {
     include!("ffi/tests_core.rs");
+    include!("ffi/tests_wallet_history.rs");
     include!("ffi/tests_network.rs");
     include!("ffi/tests_network_join_actions.rs");
     include!("ffi/tests_service.rs");
     include!("ffi/tests_service_wireguard.rs");
+    include!("ffi/tests_internet_mode_switches.rs");
     include!("ffi/tests_exit_dns.rs");
+    #[cfg(feature = "paid-exit")]
     include!("ffi/tests_service_paid_exit_config.rs");
     include!("ffi/tests_service_paid_exit_buy.rs");
     include!("ffi/tests_service_macos.rs");

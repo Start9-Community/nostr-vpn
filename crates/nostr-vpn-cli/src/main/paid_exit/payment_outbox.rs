@@ -47,7 +47,9 @@ fn repair_paid_exit_outbox_handle(
 
 #[cfg(unix)]
 fn prepare_paid_exit_payment_outbox(config_path: &Path) -> Result<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    #[cfg(not(target_os = "macos"))]
+    use std::os::unix::fs::DirBuilderExt as _;
 
     let directory = paid_exit_payment_outbox_directory(config_path);
     let owner = |path: &Path| {
@@ -67,9 +69,11 @@ fn prepare_paid_exit_payment_outbox(config_path: &Path) -> Result<PathBuf> {
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            builder.mode(0o700);
-            match builder.create(&directory) {
+            #[cfg(target_os = "macos")]
+            let created = fs::create_dir_all(&directory);
+            #[cfg(not(target_os = "macos"))]
+            let created = fs::DirBuilder::new().mode(0o700).create(&directory);
+            match created {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error.into()),
@@ -249,14 +253,9 @@ fn acknowledge_paid_exit_payment(
             "paid route payment acknowledgment source does not match seller"
         ));
     }
-    let store_path = paid_route_store_file_path(config_path);
-    update_paid_route_store(&store_path, |store| {
-        store.acknowledge_buyer_session_open(
-            seller_pubkey,
-            &envelope.lease_id,
-            unix_timestamp(),
-        )
-    })?;
+    // A payment acknowledgment proves only that the seller persisted the
+    // payment. Routing is admitted separately by PaidRouteSessionOpenAck after
+    // the seller has authenticated and bound the buyer's tunnel IP.
     fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
     Ok(true)
 }

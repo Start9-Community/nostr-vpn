@@ -1,12 +1,37 @@
-const JOIN_ROSTER_DELIVERY_TIMEOUT: Duration = Duration::from_secs(8);
+// After a roster reload replaces the runtime, give the fresh authenticated
+// carrier enough time to finish instead of repeatedly aborting and restarting
+// its connection inside the 15-second public-UI join deadline.
+pub(crate) const JOIN_ROSTER_DELIVERY_TIMEOUT: Duration = Duration::from_secs(12);
 
 impl FipsPrivateMeshRuntime {
     pub(crate) async fn ping_peers(&self, network_id: &str, now: u64) -> Result<usize> {
+        let participants = self.ping_due_participants(now)?;
+        self.ping_participants(network_id, now, participants).await
+    }
+
+    /// A manual join starts before its administrator has a usable return path.
+    /// Retry every daemon heartbeat while identity confirmation is pending;
+    /// the ordinary offline-peer cadence would otherwise suppress the first
+    /// probe sent after routed discovery becomes usable.
+    pub(crate) async fn ping_pending_join_peers(
+        &self,
+        network_id: &str,
+        now: u64,
+    ) -> Result<usize> {
+        let participants = self.mesh.load().peer_pubkeys();
+        self.ping_participants(network_id, now, participants).await
+    }
+
+    async fn ping_participants(
+        &self,
+        network_id: &str,
+        now: u64,
+        participants: Vec<String>,
+    ) -> Result<usize> {
         let frame = FipsControlFrame::Ping {
             network_id: network_id.to_string(),
             sent_at: now,
         };
-        let participants = self.ping_due_participants(now)?;
         let mut sent = 0usize;
         for participant in participants {
             self.note_ping_attempt(&participant, now)?;
@@ -17,14 +42,14 @@ impl FipsPrivateMeshRuntime {
         Ok(sent)
     }
 
-    pub(crate) async fn send_join_request(
+    pub(crate) fn enqueue_join_request(
         &self,
-        control: &FipsControlTcpRuntime,
+        control: &FipsControlTcpSender,
         participant: &str,
         requested_at: u64,
         request: MeshJoinRequest,
     ) -> Result<()> {
-        self.send_stateful_control_frame(
+        self.enqueue_stateful_control_frame(
             control,
             participant,
             &FipsControlFrame::JoinRequest {
@@ -32,7 +57,6 @@ impl FipsPrivateMeshRuntime {
                 request,
             },
         )
-        .await
     }
 
     pub(crate) fn enqueue_roster(
@@ -41,14 +65,12 @@ impl FipsPrivateMeshRuntime {
         participant: &str,
         signed_roster: SignedRoster,
     ) -> Result<()> {
-        let network_id = signed_roster.network_id()?;
-        let roster = signed_roster.roster()?;
         self.enqueue_stateful_control_frame(
             control,
             participant,
             &FipsControlFrame::Roster {
-                network_id,
-                roster,
+                network_id: signed_roster.network_id()?,
+                roster: signed_roster.roster()?,
                 signed_roster: Some(Box::new(signed_roster)),
             },
         )
@@ -78,8 +100,16 @@ impl FipsPrivateMeshRuntime {
             .with_context(|| {
                 format!("failed to deliver and apply FIPS-TCP join roster to {participant}")
             })?;
+            runtime.note_join_roster_receipt(&participant)?;
             runtime.note_tx(Some(&participant), participant_key.as_ref(), sent_len)
         }))
+    }
+
+    /// A matching application receipt is authenticated inbound control
+    /// traffic from the newly rostered participant. Surface that proven
+    /// liveness immediately instead of waiting for the next periodic ping.
+    pub(crate) fn note_join_roster_receipt(&self, participant: &str) -> Result<()> {
+        self.note_control_rx(participant, 0, unix_timestamp())
     }
 
     pub(crate) async fn send_join_roster_ack(
@@ -212,7 +242,10 @@ impl FipsPrivateMeshRuntime {
     }
 
     async fn send_probe_frame(&self, participant: &str, frame: &FipsControlFrame) -> Result<()> {
-        if !matches!(frame, FipsControlFrame::Ping { .. } | FipsControlFrame::Pong { .. }) {
+        if !matches!(
+            frame,
+            FipsControlFrame::Ping { .. } | FipsControlFrame::Pong { .. }
+        ) {
             return Err(anyhow!("stateful control frames require FIPS-TCP"));
         }
         let participant_key = participant_pubkey_bytes(participant);
@@ -468,7 +501,7 @@ impl FipsPrivateMeshRuntime {
                 addresses: peer
                     .addresses
                     .iter()
-                    .map(fips_peer_address_from_hint)
+                    .flat_map(fips_peer_addresses_from_hint)
                     .collect(),
                 connect_policy: if peer.connect_on_start {
                     ConnectPolicy::AutoConnect

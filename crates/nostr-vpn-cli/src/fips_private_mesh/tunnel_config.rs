@@ -303,6 +303,7 @@ impl FipsPrivateTunnelConfig {
             &local_private_subnets,
             true,
         );
+        let mut bootstrap_transit_npubs = HashSet::new();
         // Built-in public bootstrap nodes as fallback transit. They share the
         // same `discovery_fallback_transit` path as operator-configured static
         // peers, so they ferry frames when direct traversal fails but never
@@ -312,6 +313,11 @@ impl FipsPrivateTunnelConfig {
                 app.fips_bootstrap_peer_endpoints(),
                 &tunnel_endpoint_hosts,
                 &local_private_subnets,
+            );
+            bootstrap_transit_npubs.extend(
+                bootstrap_transit
+                    .iter()
+                    .map(|(npub, _)| normalize_fips_endpoint_npub(npub)),
             );
             operator_static.extend(cap_static_non_roster_transit_endpoints(
                 bootstrap_transit,
@@ -344,6 +350,7 @@ impl FipsPrivateTunnelConfig {
         } else {
             0
         };
+        let open_discovery_restart_max_pending = open_discovery_max_pending;
         // With discovery disabled, configured static endpoints are the whole path;
         // stamped recent/live hints can redirect a deterministic direct setup.
         let stamped_endpoint_hints_enabled = app.fips_nostr_discovery_enabled;
@@ -408,6 +415,7 @@ impl FipsPrivateTunnelConfig {
             &mut endpoint_peers,
             own_pubkey.unwrap_or_default(),
             public_websocket_listener,
+            &bootstrap_transit_npubs,
         );
         let websocket_seed_urls = websocket_seed_urls_after_peer_dial_ownership(
             &app.fips_websocket_seed_urls,
@@ -458,14 +466,6 @@ impl FipsPrivateTunnelConfig {
         } else {
             FipsHostTunnelConfig::from_app(app)?
         };
-        #[cfg(target_os = "linux")]
-        let control_plane_bypass_hosts =
-            if crate::route_targets_require_endpoint_bypass(&route_targets) {
-                crate::control_plane_bypass_ipv4_hosts(app)
-            } else {
-                Vec::new()
-            };
-
         Ok(Self {
             identity_nsec: app.nostr.secret_key.clone(),
             network_id: network_id.to_string(),
@@ -494,6 +494,8 @@ impl FipsPrivateTunnelConfig {
                 && (!local_identity_confirmation_pending
                     || app.internet_source == InternetSource::WireGuard),
             public_paid_exit_waiting_for_admission: false,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            magic_dns_suffix: app.magic_dns_suffix.clone(),
             magic_dns_records: if local_identity_confirmation_pending {
                 HashMap::new()
             } else {
@@ -549,13 +551,18 @@ impl FipsPrivateTunnelConfig {
             exit_node_leak_protection: !local_identity_confirmation_pending
                 && app.exit_node_leak_protection,
             nostr_discovery_enabled: app.fips_nostr_discovery_enabled,
-            advertise_on_nostr: !local_identity_confirmation_pending,
+            // A pending manual join has no durable roster route yet. Publish
+            // the same generic identity-bound reachability advert as mobile
+            // so its configured admin can deliver the signed roster after
+            // this config replaces the pre-join runtime.
+            advertise_on_nostr: true,
             webrtc_enabled: app.fips_webrtc_enabled,
             nostr_discovery_policy,
+            open_discovery_restart_max_pending,
             open_discovery_max_pending,
             mesh_mtu: private_mesh_mtu_from_app(Some(app)),
-            #[cfg(target_os = "linux")]
-            control_plane_bypass_hosts,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            control_plane_bypass_hosts: Vec::new(),
         })
     }
 
@@ -634,7 +641,22 @@ impl FipsPrivateTunnelConfig {
         ips
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn pending_paid_exit_split_dns_required(&self) -> bool {
+        self.client_dataplane_enabled
+            && self.public_paid_exit_waiting_for_admission
+            && !self.exit_node_leak_protection
+    }
+
     fn secure_dns_required(&self) -> bool {
+        // Until a public paid seller authenticates and admits the selected
+        // session there is no usable exit path for forwarded DNS. Keep the
+        // system resolver on the direct underlay while ordinary Internet is
+        // allowed to fall through; leak-protected configurations deliberately
+        // remain fail closed.
+        if self.public_paid_exit_waiting_for_admission && !self.exit_node_leak_protection {
+            return false;
+        }
         let active_client_path = self.secure_dns_requested
             || self.fips_host_enabled()
             || (self.wireguard_exit.enabled && self.wireguard_exit.configured())
@@ -656,6 +678,17 @@ impl FipsPrivateTunnelConfig {
         }
     }
 
+    fn public_paid_exit_selected(&self) -> bool {
+        #[cfg(feature = "paid-exit")]
+        {
+            !self.paid_route_accounting_peers.is_empty()
+        }
+        #[cfg(not(feature = "paid-exit"))]
+        {
+            false
+        }
+    }
+
     fn exit_dns_resolver_config(
         &self,
         wireguard_active: bool,
@@ -663,14 +696,40 @@ impl FipsPrivateTunnelConfig {
         if !self.client_dataplane_enabled || !self.secure_dns_requested {
             return ExitDnsConfig::default().resolver_config(None);
         }
-        if self.exit_dns.mode == nostr_vpn_core::config::ExitDnsMode::ThroughExit
+        let public_paid_exit_active = self.public_paid_exit_selected() && !wireguard_active;
+        if !public_paid_exit_active
+            && self.exit_dns.mode == nostr_vpn_core::config::ExitDnsMode::ThroughExit
             && self.wireguard_exit.enabled
             && !wireguard_active
         {
             return Ok(ExitDnsResolverConfig::FailClosed);
         }
         let wireguard = wireguard_active.then_some(&self.wireguard_exit);
-        self.exit_dns.resolver_config(wireguard)
+        let resolver = self.exit_dns.resolver_config(wireguard)?;
+        let ExitDnsResolverConfig::ThroughExit { servers } = resolver else {
+            return Ok(resolver);
+        };
+        if !public_paid_exit_active {
+            return Ok(ExitDnsResolverConfig::ThroughExit { servers });
+        }
+
+        // Private provider DNS addresses such as 10.64.0.1 are only
+        // reachable inside their owning WireGuard tunnel. Reusing one after
+        // selecting an unrelated public paid exit makes the localhost DNS
+        // stub wait forever while ordinary IP traffic through the seller is
+        // otherwise healthy. Preserve explicitly configured public servers;
+        // when none remain, use the encrypted public default.
+        let public_servers = servers
+            .into_iter()
+            .filter(|server| !endpoint_ip_is_private_or_local(*server))
+            .collect::<Vec<_>>();
+        if public_servers.is_empty() {
+            ExitDnsConfig::default().resolver_config(None)
+        } else {
+            Ok(ExitDnsResolverConfig::ThroughExit {
+                servers: public_servers,
+            })
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", test))]
@@ -723,6 +782,7 @@ fn fips_tunnel_requires_endpoint_restart(
     // still propagate through `apply_config` -> `mesh.replace_peers`.
     current.identity_nsec != next.identity_nsec
         || current.network_id != next.network_id
+        || current.local_address != next.local_address
         || current.listen_port != next.listen_port
         || fips_tunnel_public_udp_external_addr(current)
             != fips_tunnel_public_udp_external_addr(next)
@@ -737,7 +797,13 @@ fn fips_tunnel_requires_endpoint_restart(
         || current.webrtc_enabled != next.webrtc_enabled
         || current.share_local_candidates != next.share_local_candidates
         || current.nostr_discovery_policy != next.nostr_discovery_policy
-        || current.open_discovery_max_pending != next.open_discovery_max_pending
+        // Authenticated recent transit peers are a live cache, not a transport
+        // setting. Their bounded deduction changes `open_discovery_max_pending`
+        // during ordinary reloads; restarting here would discard the carrier
+        // that delivered a join approval. Durable capacity or static-seed
+        // changes still differ in `open_discovery_restart_max_pending`.
+        || current.open_discovery_restart_max_pending
+            != next.open_discovery_restart_max_pending
         || current.mesh_mtu.underlay_udp != next.mesh_mtu.underlay_udp
         || fips_host_config_changed(current, next)
 }
@@ -784,6 +850,7 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     control_pubsub: Option<crate::control_pubsub_runtime::ControlPubsubFipsRuntime>,
     state_control: FipsControlTcpRuntime,
     secure_dns: Option<crate::secure_dns_runtime::SecureDnsRuntime>,
+    pending_paid_exit_dns: Option<crate::ConnectMagicDnsRuntime>,
     manages_secure_dns: bool,
     config: FipsPrivateTunnelConfig,
     cleanup_journal_config_path: std::path::PathBuf,
@@ -805,8 +872,12 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     endpoint_bypass_underlay: Option<crate::MacosRouteSpec>,
     #[cfg(target_os = "macos")]
     macos_underlay_refresh_pending: bool,
+    #[cfg(target_os = "macos")]
+    macos_endpoint_bypass_verified_at: Option<Instant>,
     #[cfg(target_os = "linux")]
     original_default_route: Option<String>,
+    #[cfg(target_os = "linux")]
+    ethernet_underlay_default_route: Option<String>,
     #[cfg(target_os = "linux")]
     original_default_ipv6_route: Option<String>,
     #[cfg(target_os = "linux")]

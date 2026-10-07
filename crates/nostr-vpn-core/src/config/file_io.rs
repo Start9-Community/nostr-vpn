@@ -33,6 +33,16 @@ pub fn write_private_file_preserving_user_owner(
     write_private_file_with_owner(path, raw, desired_owner)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn write_private_file_with_owner(
+    path: &Path,
+    raw: &[u8],
+    desired_owner: Option<(u32, u32)>,
+) -> std::io::Result<()> {
+    crate::macos_file_io::write_atomic(path, raw, 0o600, desired_owner, true)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn write_private_file_with_owner(
     path: &Path,
     raw: &[u8],
@@ -121,7 +131,7 @@ pub(crate) fn write_private_file_with_owner(
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn replace_private_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     fs::rename(temporary, destination)
 }
@@ -129,9 +139,15 @@ fn replace_private_file(temporary: &Path, destination: &Path) -> std::io::Result
 #[cfg(windows)]
 fn replace_private_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
+
+    const RETRY_DELAYS_MS: [u64; 7] = [10, 20, 40, 80, 160, 320, 640];
 
     let temporary = temporary
         .as_os_str()
@@ -143,18 +159,76 @@ fn replace_private_file(temporary: &Path, destination: &Path) -> std::io::Result
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    // SAFETY: both arguments are valid, NUL-terminated UTF-16 paths for this call.
-    let moved = unsafe {
-        MoveFileExW(
-            temporary.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    let mut retry = 0;
+    loop {
+        // SAFETY: both arguments are valid, NUL-terminated UTF-16 paths for this call.
+        let moved = unsafe {
+            MoveFileExW(
+                temporary.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+
+        let error = std::io::Error::last_os_error();
+        let retriable = matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == ERROR_ACCESS_DENIED as i32
+                    || code == ERROR_SHARING_VIOLATION as i32
+                    || code == ERROR_LOCK_VIOLATION as i32
+        );
+        if !retriable || retry == RETRY_DELAYS_MS.len() {
+            return Err(error);
+        }
+        std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[retry]));
+        retry += 1;
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::time::Duration;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    #[test]
+    fn private_file_replace_retries_a_transient_share_lock() {
+        let directory = std::env::temp_dir().join(format!(
+            "nvpn-config-replace-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let destination = directory.join("config.toml");
+        let temporary = directory.join("config.toml.tmp");
+        std::fs::write(&destination, b"old").expect("write destination");
+        std::fs::write(&temporary, b"new").expect("write replacement");
+
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&destination)
+            .expect("hold destination without delete sharing");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(75));
+            drop(held);
+        });
+
+        super::replace_private_file(&temporary, &destination)
+            .expect("replace after transient share lock clears");
+        release.join().expect("release destination lock");
+        assert_eq!(
+            std::fs::read(&destination).expect("read replaced destination"),
+            b"new"
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }
 

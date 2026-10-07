@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod endpoint_config_tests {
     use super::*;
-    use nostr_sdk::prelude::Keys;
+    use nostr_sdk::prelude::{Keys, ToBech32};
 
     fn websocket_peer(npub: String) -> FipsEndpointPeerTransportConfig {
         FipsEndpointPeerTransportConfig {
@@ -112,13 +112,112 @@ mod endpoint_config_tests {
         );
         assert_eq!(
             config.node.discovery.nostr.open_discovery_max_pending,
-            128,
+            384,
         );
         assert!(
             config.node.discovery.nostr.open_discovery_max_pending
                 < FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS,
             "public unaffiliated admission must remain bounded below socket capacity",
         );
+    }
+
+    #[test]
+    fn configured_websocket_fallback_enables_transport_without_independent_seed_dial() {
+        let mut transport = test_transport(true, false);
+        transport.websocket.seed_urls.clear();
+        let config = fips_endpoint_config_with_open_discovery_limit(
+            &[websocket_peer(Keys::generate().public_key().to_bech32().expect("npub"))],
+            Some(&transport),
+            resolve_private_mesh_mtu(None, None, None),
+            NostrDiscoveryPolicy::Open,
+            FIPS_NOSTR_OPEN_DISCOVERY_MAX_PENDING,
+        );
+
+        let (_, websocket) = config
+            .transports
+            .websocket
+            .iter()
+            .next()
+            .expect("configured fallback needs an outbound WebSocket transport");
+        assert!(websocket.seed_urls.is_empty());
+    }
+
+    #[test]
+    fn configured_udp_seed_outranks_its_websocket_fallback() {
+        let npub = Keys::generate().public_key().to_bech32().expect("npub");
+        let peers = fips_endpoint_peers_from_mesh(
+            &[],
+            vec![(
+                npub,
+                vec![
+                    "seed.example.org:51820".to_string(),
+                    "websocket:wss://seed.example.org/fips".to_string(),
+                ],
+            )],
+            Vec::new(),
+        );
+
+        assert_eq!(peers.len(), 1);
+        assert_eq!(
+            peers[0]
+                .addresses
+                .iter()
+                .map(|hint| (hint.addr.as_str(), hint.priority))
+                .collect::<Vec<_>>(),
+            [
+                ("seed.example.org:51820", FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY),
+                (
+                    "websocket:wss://seed.example.org/fips",
+                    FIPS_WEBSOCKET_FALLBACK_ENDPOINT_PRIORITY,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_public_seeds_prefer_udp_and_retain_identity_pinned_websocket_fallback() {
+        for (npub, addresses) in DEFAULT_FIPS_BOOTSTRAP_PEERS {
+            let peers = fips_endpoint_peers_from_mesh(
+                &[],
+                vec![(
+                    (*npub).to_string(),
+                    addresses.iter().map(|address| (*address).to_string()).collect(),
+                )],
+                Vec::new(),
+            );
+            let peer = peers.first().expect("default public bootstrap peer");
+            assert_eq!(peers.len(), 1);
+            assert_eq!(peer.npub, *npub);
+            assert!(peer.connect_on_start);
+            assert!(peer.auto_reconnect);
+            let websocket = peer
+                .addresses
+                .iter()
+                .find(|hint| split_peer_transport_addr(&hint.addr).0 == "websocket")
+                .expect("identity-pinned public WebSocket fallback");
+            let udp = peer
+                .addresses
+                .iter()
+                .find(|hint| split_peer_transport_addr(&hint.addr).0 == "udp")
+                .expect("preferred public UDP carrier");
+
+            assert_eq!(udp.priority, FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY);
+            assert_eq!(websocket.priority, FIPS_WEBSOCKET_FALLBACK_ENDPOINT_PRIORITY);
+        }
+    }
+
+    #[test]
+    fn udp_hostname_hints_resolve_before_family_specific_transport_selection() {
+        let addresses = fips_peer_addresses_from_hint(&FipsPeerAddressHint {
+            addr: "localhost:51820".to_string(),
+            seen_at_ms: None,
+            priority: FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY,
+        });
+
+        assert!(!addresses.is_empty());
+        assert!(addresses.iter().all(|address| {
+            address.transport == "udp" && address.addr.parse::<SocketAddr>().is_ok()
+        }));
     }
 
     #[test]
@@ -388,7 +487,12 @@ mod endpoint_config_tests {
         let [lower_npub, higher_npub] = npubs;
 
         let mut lower_seed_peers = vec![websocket_peer(higher_npub.clone())];
-        apply_canonical_websocket_dial_direction(&mut lower_seed_peers, &lower_npub, true);
+        apply_canonical_websocket_dial_direction(
+            &mut lower_seed_peers,
+            &lower_npub,
+            true,
+            &HashSet::new(),
+        );
         assert!(
             !lower_seed_peers[0].connect_on_start,
             "the lower canonical npub keeps the peer configured but does not dial"
@@ -397,7 +501,12 @@ mod endpoint_config_tests {
         assert!(lower_seed_peers[0].discovery_fallback_transit);
 
         let mut higher_seed_peers = vec![websocket_peer(lower_npub.clone())];
-        apply_canonical_websocket_dial_direction(&mut higher_seed_peers, &higher_npub, true);
+        apply_canonical_websocket_dial_direction(
+            &mut higher_seed_peers,
+            &higher_npub,
+            true,
+            &HashSet::new(),
+        );
         assert!(
             higher_seed_peers[0].connect_on_start,
             "the higher canonical npub owns the one physical dial"
@@ -424,10 +533,37 @@ mod endpoint_config_tests {
             std::slice::from_mut(&mut peer),
             &lower_npub,
             true,
+            &HashSet::new(),
         );
         assert!(
             !peer.connect_on_start,
             "only canonical identities decide which seed dials"
+        );
+    }
+
+    #[test]
+    fn canonical_seed_dial_rule_covers_udp_websocket_bootstrap_peer() {
+        let mut npubs = [
+            Keys::generate().public_key().to_bech32().expect("npub"),
+            Keys::generate().public_key().to_bech32().expect("npub"),
+        ];
+        npubs.sort();
+        let [lower_npub, higher_npub] = npubs;
+        let mut mixed_transport_peer = websocket_peer(higher_npub.clone());
+        mixed_transport_peer.addresses.push(FipsPeerAddressHint {
+            addr: "udp:203.0.113.10:51820".to_string(),
+            seen_at_ms: None,
+            priority: FIPS_CONFIGURED_PEER_ENDPOINT_PRIORITY,
+        });
+        apply_canonical_websocket_dial_direction(
+            std::slice::from_mut(&mut mixed_transport_peer),
+            &lower_npub,
+            true,
+            &HashSet::from([higher_npub]),
+        );
+        assert!(
+            !mixed_transport_peer.connect_on_start,
+            "the canonical listener remains passive for a bootstrap seed with UDP and WSS"
         );
     }
 
@@ -445,6 +581,7 @@ mod endpoint_config_tests {
             std::slice::from_mut(&mut mixed_transport_peer),
             &local_npub,
             true,
+            &HashSet::new(),
         );
         assert!(mixed_transport_peer.connect_on_start);
 
@@ -453,6 +590,7 @@ mod endpoint_config_tests {
             std::slice::from_mut(&mut ordinary_client_peer),
             &local_npub,
             false,
+            &HashSet::new(),
         );
         assert!(ordinary_client_peer.connect_on_start);
     }

@@ -49,142 +49,8 @@ fn split_magic_dns_never_uses_an_unusable_windows_random_port() {
     assert_eq!(split_magic_dns_bind_fallback_port(), Some(0));
 }
 
-#[test]
-fn daemon_vpn_idle_status_distinguishes_waiting_from_paused() {
-    assert_eq!(
-        daemon_vpn_idle_status(true, 0, false),
-        crate::WAITING_FOR_PARTICIPANTS_STATUS
-    );
-    assert_eq!(
-        daemon_vpn_idle_status(false, 0, true),
-        "Listening for join requests"
-    );
-    assert_eq!(daemon_vpn_idle_status(false, 0, false), "Paused");
-    assert_eq!(daemon_vpn_idle_status(true, 2, false), "Paused");
-}
-
-#[test]
-fn fips_private_runtime_active_tolerates_no_active_network() {
-    let mut app = AppConfig::generated();
-    app.fips_host_tunnel_enabled = false;
-    for network in &mut app.networks {
-        network.listen_for_join_requests = false;
-    }
-
-    assert!(app.active_network_opt().is_none());
-    assert!(!fips_private_runtime_active(&app, true, 0));
-
-    let network_id = app.networks[0].id.clone();
-    app.set_network_enabled(&network_id, true)
-        .expect("enable network");
-    app.set_network_join_requests_enabled(&network_id, true)
-        .expect("enable join requests");
-    assert!(fips_private_runtime_active(&app, false, 0));
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn enabled_fips_host_tunnel_activates_runtime_while_vpn_is_paused() {
-    let mut app = AppConfig::generated();
-    app.fips_host_tunnel_enabled = true;
-    for network in &mut app.networks {
-        network.listen_for_join_requests = false;
-    }
-
-    assert_eq!(expected_peer_count(&app), 0);
-    assert!(fips_private_runtime_active(&app, false, 0));
-}
-
-#[test]
-fn pending_nostr_join_request_activates_fips_without_network_peers() {
-    let mut app = AppConfig::generated();
-    app.fips_host_tunnel_enabled = false;
-    for network in &mut app.networks {
-        network.listen_for_join_requests = false;
-    }
-
-    assert!(app.active_network_opt().is_none());
-    assert_eq!(expected_peer_count(&app), 0);
-    assert!(app.pending_nostr_join_request.is_none());
-    assert!(!fips_private_runtime_active(&app, false, 0));
-
-    app.ensure_pending_nostr_join_request(1_778_998_000)
-        .expect("pending device-approval request");
-
-    assert!(app.pending_nostr_join_request.is_some());
-    assert!(fips_private_runtime_active(&app, false, 0));
-}
-
-#[cfg(feature = "paid-exit")]
-#[test]
-fn paid_exit_seller_keeps_private_fips_runtime_active_without_roster() {
-    let mut app = AppConfig::generated();
-    app.fips_host_tunnel_enabled = false;
-    app.paid_exit.enabled = true;
-    for network in &mut app.networks {
-        network.listen_for_join_requests = false;
-    }
-
-    assert!(app.active_network_opt().is_none());
-    assert_eq!(expected_peer_count(&app), 0);
-    assert!(paid_exit_fips_runtime_active(&app));
-    assert!(fips_private_runtime_active(&app, false, 0));
-}
-
-#[cfg(feature = "paid-exit")]
-#[test]
-fn paid_automatic_keeps_fips_runtime_active_before_selecting_seller() {
-    use nostr_vpn_core::config::InternetSource;
-
-    let mut app = AppConfig::generated();
-    app.fips_host_tunnel_enabled = false;
-    for network in &mut app.networks {
-        network.listen_for_join_requests = false;
-    }
-
-    app.set_internet_source(InternetSource::PaidAutomatic);
-    assert!(app.public_paid_exit_node_pubkey_hex().is_none());
-    assert!(paid_exit_fips_runtime_active(&app));
-    assert!(fips_private_runtime_active(&app, false, 0));
-
-    app.set_internet_source(InternetSource::Direct);
-    assert!(!app.connect_to_non_roster_fips_peers);
-    assert!(!paid_exit_fips_runtime_active(&app));
-
-    assert!(app.enable_paid_exit_market_discovery());
-    assert_eq!(app.internet_source, InternetSource::Direct);
-    assert!(paid_exit_fips_runtime_active(&app));
-    app.connect_to_non_roster_fips_peers = false;
-    assert!(!paid_exit_fips_runtime_active(&app));
-}
-
-#[cfg(feature = "paid-exit")]
-#[test]
-fn manual_provider_starts_fips_without_switching_source_or_enabling_discovery() {
-    let provider = Keys::generate()
-        .public_key()
-        .to_bech32()
-        .expect("provider npub");
-    let mut app = AppConfig::generated();
-    app.fips_host_tunnel_enabled = false;
-    app.fips_nostr_discovery_enabled = false;
-    app.fips_advertise_public_endpoint = false;
-    for network in &mut app.networks {
-        network.listen_for_join_requests = false;
-    }
-
-    app.set_manual_paid_exit_provider(&provider)
-        .expect("manual provider");
-    app.set_internet_source(InternetSource::PaidManual);
-    app.set_internet_source(InternetSource::Direct);
-
-    assert_eq!(app.internet_source, InternetSource::Direct);
-    assert!(app.connect_to_non_roster_fips_peers);
-    assert!(!app.fips_nostr_discovery_enabled);
-    assert!(!app.fips_advertise_public_endpoint);
-    assert!(paid_exit_fips_runtime_active(&app));
-    assert!(fips_private_runtime_active(&app, false, 0));
-}
+#[path = "runtime_misc/fips_lifecycle.rs"]
+mod fips_lifecycle;
 
 #[cfg(feature = "paid-exit")]
 #[test]
@@ -209,6 +75,7 @@ fn paid_exit_run_settings_prepare_seller_transport_without_ambient_discovery() {
             accepted_mints: None,
             accepted_mint: Vec::new(),
             country_code: None,
+            network_class: None,
             asn: None,
             max_channel_capacity_sat: None,
             channel_expiry_secs: None,
@@ -297,11 +164,7 @@ fn selected_public_paid_exit_counts_as_private_fips_peer_without_active_network(
     assert!(app.active_network_opt().is_none());
     assert_eq!(expected_peer_count(&app), 1);
     assert!(paid_exit_fips_runtime_active(&app));
-    assert!(fips_private_runtime_active(
-        &app,
-        true,
-        expected_peer_count(&app)
-    ));
+    assert!(fips_private_runtime_active(&app, true));
 
     let own_pubkey = app.own_nostr_pubkey_hex().expect("own pubkey");
     let config = crate::fips_private_mesh::FipsPrivateTunnelConfig::from_app(
@@ -331,9 +194,21 @@ fn selected_public_paid_exit_counts_as_private_fips_peer_without_active_network(
 fn fips_roster_publish_attempts_disconnected_recipients() {
     let recipients = vec!["alice".to_string(), "bob".to_string()];
 
-    let (ready, pending) = split_ready_fips_roster_recipients(recipients.clone());
+    let (ready, pending) = split_ready_fips_roster_recipients(recipients.clone(), &HashSet::new());
 
     assert_eq!(ready, recipients);
+    assert!(pending.is_empty());
+}
+#[test]
+fn generic_roster_waits_for_join_receipt_without_delaying_existing_peers() {
+    let recipients = vec!["existing".to_string(), "joining".to_string()];
+    let awaiting = HashSet::from(["joining".to_string()]);
+    let (ready, pending) = split_ready_fips_roster_recipients(recipients, &awaiting);
+    assert_eq!(ready, ["existing"]);
+    assert_eq!(pending, awaiting);
+    let (ready, pending) =
+        split_ready_fips_roster_recipients(pending.into_iter().collect(), &HashSet::new());
+    assert_eq!(ready, ["joining"]);
     assert!(pending.is_empty());
 }
 #[test]
@@ -831,143 +706,9 @@ fn fips_pending_roster_recovery_ignores_connected_non_roster_transit() {
     ));
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-#[test]
-fn runtime_exit_node_routes_do_not_advertise_ipv6_default() {
-    let mut app = AppConfig::generated();
-    app.node.advertise_exit_node = true;
+#[path = "runtime_misc/exit_forwarding.rs"]
+mod exit_forwarding;
 
-    assert_eq!(runtime_exit_node_default_routes(), vec!["0.0.0.0/0"]);
-    assert_eq!(runtime_effective_advertised_routes(&app), vec!["0.0.0.0/0"]);
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn paid_exit_host_forwarding_does_not_advertise_free_exit_route() {
-    let mut app = AppConfig::generated();
-    app.paid_exit.enabled = true;
-
-    assert!(runtime_effective_advertised_routes(&app).is_empty());
-    assert_eq!(
-        runtime_local_exit_forwarding_routes(&app),
-        vec!["0.0.0.0/0"]
-    );
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn paid_exit_forwarding_ignores_removed_legacy_ip_support_knobs() {
-    let mut app = AppConfig::generated();
-    app.paid_exit.enabled = true;
-    app.paid_exit.ip_support.ipv4 = false;
-    app.paid_exit.ip_support.ipv6 = true;
-
-    assert_eq!(
-        runtime_local_exit_forwarding_routes(&app),
-        vec!["0.0.0.0/0"]
-    );
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn paid_exit_forwarding_rejects_paid_on_paid_resale() {
-    let mut app = AppConfig::generated();
-    app.paid_exit.enabled = true;
-    app.set_internet_source(InternetSource::PaidAutomatic);
-
-    assert!(runtime_local_exit_forwarding_routes(&app).is_empty());
-}
-
-#[test]
-fn legacy_macos_exit_cleanup_leaves_global_ipv4_forwarding_alone() {
-    let mut app = AppConfig::generated();
-    app.node.advertise_exit_node = true;
-
-    let plan = legacy_macos_exit_cleanup_plan(&runtime_effective_advertised_routes(&app));
-
-    assert!(plan.cleanup_pf_nat);
-    assert!(!plan.restore_ipv4_forwarding);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn legacy_macos_cleanup_journal_does_not_claim_ownerless_endpoint_routes() {
-    let state: MacosNetworkCleanupState = serde_json::from_str(
-        r#"{
-            "iface": "utun42",
-            "endpoint_bypass_routes": ["203.0.113.7/32"],
-            "original_default_route": {
-                "gateway": "192.0.2.1",
-                "interface": "en0"
-            }
-        }"#,
-    )
-    .expect("deserialize pre-ownership cleanup journal");
-
-    let actionable = crate::daemon_runtime::macos_cleanup_managed_routes(&state);
-
-    assert!(
-        actionable
-            .iter()
-            .all(|route| route.target != "203.0.113.7/32"),
-        "an ownerless legacy endpoint route is non-actionable migration data"
-    );
-    assert_eq!(
-        actionable,
-        vec![
-            MacosManagedRoute {
-                target: "0.0.0.0/1".to_string(),
-                gateway: None,
-                interface: Some("utun42".to_string()),
-            },
-            MacosManagedRoute {
-                target: "128.0.0.0/1".to_string(),
-                gateway: None,
-                interface: Some("utun42".to_string()),
-            },
-        ],
-        "exact legacy tunnel ownership remains actionable"
-    );
-}
-
-#[test]
-fn macos_exit_node_pf_rules_are_scoped_to_tunnel_source_and_outbound_iface() {
-    let rules = crate::macos_network::macos_exit_node_pf_rules("utun42", "en0", "10.44.0.0/16");
-
-    assert_eq!(
-        rules,
-        concat!(
-            "nat on en0 inet from 10.44.0.0/16 to any -> (en0)\n",
-            "pass in quick on utun42 inet from 10.44.0.0/16 to any keep state\n",
-            "pass out quick on en0 inet from 10.44.0.0/16 to any keep state\n",
-        )
-    );
-    assert!(!rules.contains("net.inet.ip.forwarding"));
-    assert!(!rules.contains("pass in quick on en0"));
-}
-
-#[test]
-fn macos_ipv4_forwarding_state_parser_accepts_only_kernel_boolean_values() {
-    assert!(!crate::parse_macos_ipv4_forwarding_state("0\n").expect("disabled state"));
-    assert!(crate::parse_macos_ipv4_forwarding_state("1\n").expect("enabled state"));
-    assert!(crate::parse_macos_ipv4_forwarding_state("2\n").is_err());
-    assert!(crate::parse_macos_ipv4_forwarding_state("").is_err());
-}
-
-#[test]
-fn macos_pf_state_parser_accepts_pfctl_status_details() {
-    assert!(
-        crate::parse_macos_pf_enabled("Status: Enabled for 2 days 01:02:03\n")
-            .expect("enabled state")
-    );
-    assert!(!crate::parse_macos_pf_enabled("Status: Disabled\n").expect("disabled state"));
-    assert!(crate::parse_macos_pf_enabled("Status: Unknown\n").is_err());
-    assert!(crate::parse_macos_pf_enabled("").is_err());
-}
-
-#[test]
-fn macos_exit_node_cleanup_flushes_only_nvpn_anchor() {
-    let args = crate::macos_network::macos_pf_anchor_flush_args();
-    assert_eq!(args, vec!["-a", "com.apple/nostrvpn-exit", "-F", "all"]);
-    assert_eq!(args[1].matches('/').count(), 1);
-}
+#[cfg(all(feature = "paid-exit", any(target_os = "linux", target_os = "macos")))]
+#[path = "runtime_misc/payment_routes.rs"]
+mod payment_routes;

@@ -11,6 +11,15 @@ pub(super) async fn fund_automatic_paid_exit(
             "automatic paid exit funding cancelled by internet mode"
         ));
     }
+    fund_paid_exit_session(app, config_path, session_id, now_unix).await
+}
+
+pub(crate) async fn fund_paid_exit_session(
+    app: &AppConfig,
+    config_path: &Path,
+    session_id: &str,
+    now_unix: u64,
+) -> Result<StreamingRoutePaymentEnvelope> {
     let store_path = paid_route_store_file_path(config_path);
     let store = load_paid_route_store(&store_path)?;
     let session = store
@@ -33,35 +42,76 @@ pub(super) async fn fund_automatic_paid_exit(
         .get(&lease.lease.quote_id)
         .cloned()
         .ok_or_else(|| anyhow!("automatic paid exit session has no quote"))?;
-    let wallet_data_dir = paid_exit_wallet_data_dir(config_path);
-    let Some(client_store_lock) =
-        SharedSpilmanClientStoreLock::try_acquire(spilman_client_store_path(&wallet_data_dir))
-            .map_err(|error| anyhow!("{error}"))?
-    else {
-        return Err(anyhow!("Cashu channel storage is busy; retry funding"));
-    };
-    let opened = open_streaming_route_cashu_spilman_channel_from_wallet_with_lock(
-        &wallet_data_dir,
-        StreamingRouteOpenCashuSpilmanChannelFromWalletRequest {
-            mint_url: channel.mint_url,
-            receiver_pubkey_hex: quote.quote.receiver_pubkey_hex,
-            capacity_sat: session.session.payment.capacity_sat,
-            expiry_unix: channel.expires_at_unix,
-            max_amount_per_output: 0,
-            unit: "sat".to_string(),
-            opening_paid_msat: 0,
-            keyset_id: None,
-            keyset_info_json: None,
+    let retry_at = store.buyer_session_funding_retry_at(session_id);
+    if retry_at == u64::MAX {
+        return Err(anyhow!(
+            "More wallet funds are needed to cover channel credit and mint fees"
+        ));
+    }
+    if now_unix < retry_at {
+        return Err(
+            anyhow::Error::new(cashu_service::MintRetryAfter(retry_at - now_unix))
+                .context("Cashu mint recovery is waiting before another funding attempt"),
+        );
+    }
+    let mint_url = channel.mint_url.clone();
+    let result = crate::cashu_wallet_daemon::request_daemon_cashu_wallet_worker(
+        config_path,
+        crate::cashu_wallet_daemon::DaemonCashuWalletCommand::OpenSpilmanChannel {
+            request: StreamingRouteOpenCashuSpilmanChannelFromWalletRequest {
+                mint_url: channel.mint_url,
+                receiver_pubkey_hex: quote.quote.receiver_pubkey_hex,
+                capacity_sat: session.session.payment.capacity_sat,
+                expiry_unix: channel.expires_at_unix,
+                max_amount_per_output: 0,
+                unit: "sat".to_string(),
+                // Credit the first sat toward traffic. A refundable
+                // zero-payment deposit is not payment for a new probe.
+                opening_paid_msat: 1_000,
+                keyset_id: None,
+                keyset_info_json: None,
+                client_request_id: Some(session_id.to_string()),
+                route_created_at_unix: Some(channel.created_at_unix),
+            },
         },
-        client_store_lock,
     )
-    .await?;
+    .await;
+    let result = match result {
+        Ok(value) => value,
+        Err(error) => {
+            update_paid_route_store(&store_path, |store| {
+                if let Some(shortfall) =
+                    error.downcast_ref::<cashu_service::CashuInsufficientFunds>()
+                {
+                    return store.record_buyer_session_funding_shortfall(
+                        session_id,
+                        shortfall.required_sat,
+                    );
+                }
+                store.defer_buyer_mint_retry(
+                    &mint_url,
+                    unix_timestamp(),
+                    true,
+                    error
+                        .downcast_ref::<cashu_service::MintRetryAfter>()
+                        .map(|delay| delay.0),
+                )
+            })?;
+            return Err(error);
+        }
+    };
+    let opened: cashu_service::StreamingRouteOpenCashuSpilmanChannelFromWalletResult =
+        serde_json::from_value(result)
+            .context("daemon wallet returned an invalid opened Cashu channel")?;
+
+    let now_unix = unix_timestamp().max(now_unix);
     let buyer_npub = app
         .nostr_keys()?
         .public_key()
         .to_bech32()
         .context("failed to encode automatic paid exit buyer npub")?;
     let payment = update_paid_route_store(&store_path, |store| {
+        store.clear_buyer_mint_retry(&opened.channel.mint_url, now_unix)?;
         store.attach_buyer_spilman_channel(AttachPaidRouteBuyerSpilmanChannelRequest {
             session_id: session_id.to_string(),
             channel_id: opened.channel.channel_id.clone(),
@@ -137,7 +187,7 @@ pub(super) fn suspend_automatic_paid_exit(
     Ok(())
 }
 
-pub(super) fn queue_recovered_automatic_channel_open(
+pub(crate) fn queue_recovered_paid_exit_channel_open(
     app: &AppConfig,
     config_path: &Path,
     session_id: &str,
@@ -168,7 +218,7 @@ pub(super) fn queue_recovered_automatic_channel_open(
     Ok(())
 }
 
-fn drain_paid_exit_buyer_usage(
+pub(super) fn drain_paid_exit_buyer_usage(
     runtime: &crate::fips_private_mesh::FipsPrivateTunnelRuntime,
     config_path: &Path,
     seller_pubkey: &str,

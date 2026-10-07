@@ -49,6 +49,74 @@ fn status_commands_do_not_migrate_legacy_config_or_create_sidecars() {
     }
 }
 
+#[test]
+fn status_reports_fips_connections_while_vpn_is_paused() {
+    let dir = TestDir::new();
+    let config_path = dir.path().join("config.toml");
+    fs::write(
+        &config_path,
+        AppConfig::generated()
+            .plaintext_toml()
+            .expect("encode config"),
+    )
+    .expect("write config");
+    let state_path = dir.path().join("daemon.state.json");
+    let mut state = serde_json::json!({
+        "updated_at": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        "vpn_enabled": false,
+        "vpn_active": false,
+        "vpn_status": "Paused",
+        "expected_peer_count": 0,
+        "connected_peer_count": 0,
+        "fips_direct_roster_peer_count": 2,
+        "fips_other_peer_count": 3,
+        "mesh_ready": false,
+    });
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let status = |json: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nvpn"));
+        command
+            .args(["status", "--discover-secs", "0", "--config"])
+            .arg(&config_path)
+            .env("NVPN_DAEMON_STATUS_MODE", "state-file")
+            .env("NVPN_DAEMON_STATE_RUNNING_MAX_AGE_SECS", "60");
+        if json {
+            command.arg("--json");
+        }
+        let output = command.output().expect("run status");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("status is UTF-8")
+    };
+    let output: serde_json::Value = serde_json::from_str(&status(true)).unwrap();
+    assert_eq!(output["daemon"]["running"], true);
+    assert_eq!(
+        output["daemon"]["state"]["fips_direct_roster_peer_count"],
+        2
+    );
+    assert_eq!(output["daemon"]["state"]["fips_other_peer_count"], 3);
+    assert_eq!(output["peer_count"], 0);
+    assert_eq!(output["mesh_ready"], false);
+    let text = status(false);
+    assert!(text.contains("vpn_status: Paused"), "{text}");
+    assert!(
+        text.contains("fips_peers: 5 connected (2 direct roster, 3 other)"),
+        "{text}"
+    );
+
+    state["updated_at"] = 0.into();
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let text = status(false);
+    assert!(text.contains("daemon: stopped"));
+    assert!(
+        !text.lines().any(|line| line.starts_with("fips_peers:")),
+        "stopped daemon must not report stale links"
+    );
+}
+
 fn directory_snapshot(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
     fs::read_dir(path)
         .expect("read test directory")

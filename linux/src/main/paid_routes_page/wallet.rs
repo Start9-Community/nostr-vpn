@@ -30,7 +30,7 @@ pub(super) fn build_paid_route_wallet_card(app: &AppRef, page: &gtk::Box, state:
         card.append(&balance);
     }
     if state.wallet_fiat_enabled && !wallet.fiat_balance_text.is_empty() {
-        detail_row(&card, "Fiat", &wallet.fiat_balance_text);
+        detail_row(&card, "Bitcoin", &format_paid_route_msat(wallet.total_balance_msat));
         detail_row(
             &card,
             "Rate",

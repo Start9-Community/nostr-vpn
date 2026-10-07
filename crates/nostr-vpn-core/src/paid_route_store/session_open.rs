@@ -4,6 +4,208 @@ use crate::paid_routes::PAID_ROUTE_OFFER_VERSION;
 const PAID_ROUTE_SESSION_ID_MAX_LEN: usize = 256;
 
 impl PaidRouteStore {
+    pub fn begin_buyer_session_open_attempt(
+        &mut self,
+        session_id: &str,
+        now_unix: u64,
+    ) -> Result<bool> {
+        let session_id = trimmed_required(session_id, "paid route session id")?;
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("paid route buyer session {session_id} does not exist"))?;
+        let lease = self
+            .leases
+            .get(&session.session.lease_id)
+            .ok_or_else(|| anyhow!("paid route buyer session {session_id} has no lease"))?;
+        let channel = self
+            .channels
+            .get(&session.session.payment.channel_id)
+            .ok_or_else(|| anyhow!("paid route buyer session {session_id} has no channel"))?;
+        if channel.role != PaidRouteChannelRole::Buyer {
+            return Err(anyhow!(
+                "paid route session {session_id} is not a buyer session"
+            ));
+        }
+        if lease.lease.expires_at_unix.min(channel.expires_at_unix) <= now_unix {
+            return Err(anyhow!("paid route buyer session {session_id} has expired"));
+        }
+        ensure_open_buyer_channel(channel, lease)?;
+
+        let before = self.clone();
+        self.selected_buyer_session_id = session_id.clone();
+        self.buyer_session_open_attempts.clear();
+        if session.funding_started_unix == 0
+            && !self
+                .buyer_session_admissions
+                .contains_key(&session.session.lease_id)
+        {
+            self.buyer_session_open_attempts
+                .insert(session_id.clone(), now_unix.max(1));
+        }
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.last_successful_probe_unix = session.successful_probe_unix();
+            session.updated_at_unix = session.updated_at_unix.max(now_unix);
+            // A reconnect must earn fresh end-to-end evidence. Keeping the
+            // previous probe here can make the UI report Connected while the
+            // newly installed route is blackholing traffic.
+            session.session.realized_exit_ip = None;
+            session.session.observed_country_code = None;
+            session.session.observed_asn = None;
+            session.session.quality = None;
+        }
+        Ok(*self != before)
+    }
+
+    pub fn begin_latest_buyer_session_open_attempt_for_seller(
+        &mut self,
+        seller_pubkey: &str,
+        now_unix: u64,
+    ) -> Result<Option<String>> {
+        let seller_pubkey = normalize_nostr_pubkey(seller_pubkey)?;
+        let selected_is_current_seller = self
+            .sessions
+            .get(&self.selected_buyer_session_id)
+            .and_then(|session| {
+                let lease = self.leases.get(&session.session.lease_id)?;
+                let channel = self.channels.get(&session.session.payment.channel_id)?;
+                Some(
+                    channel.role == PaidRouteChannelRole::Buyer
+                        && normalize_nostr_pubkey(&channel.counterparty_npub)
+                            .ok()
+                            .as_deref()
+                            == Some(seller_pubkey.as_str())
+                        && lease.lease.expires_at_unix.min(channel.expires_at_unix) > now_unix
+                        && paid_route_lifecycle_allows_routing(lease.status)
+                        && paid_route_lifecycle_allows_routing(channel.status),
+                )
+            })
+            .unwrap_or(false);
+        if selected_is_current_seller {
+            return Ok(Some(self.selected_buyer_session_id.clone()));
+        }
+        self.selected_buyer_session_id.clear();
+        self.buyer_session_open_attempts.clear();
+        let session_id = self
+            .sessions
+            .values()
+            .filter_map(|session| {
+                let lease = self.leases.get(&session.session.lease_id)?;
+                let channel = self.channels.get(&session.session.payment.channel_id)?;
+                (channel.role == PaidRouteChannelRole::Buyer
+                    && normalize_nostr_pubkey(&channel.counterparty_npub)
+                        .ok()
+                        .as_deref()
+                        == Some(seller_pubkey.as_str())
+                    && lease.lease.expires_at_unix.min(channel.expires_at_unix) > now_unix
+                    && paid_route_lifecycle_allows_routing(lease.status)
+                    && paid_route_lifecycle_allows_routing(channel.status))
+                .then_some((session.updated_at_unix, session.session.session_id.clone()))
+            })
+            .max_by_key(|(updated_at, _)| *updated_at)
+            .map(|(_, session_id)| session_id);
+        if let Some(session_id) = session_id.as_deref() {
+            self.begin_buyer_session_open_attempt(session_id, now_unix)?;
+        }
+        Ok(session_id)
+    }
+
+    pub fn reconcile_buyer_session_lifecycle(
+        &mut self,
+        now_unix: u64,
+        open_timeout_secs: u64,
+    ) -> PaidRouteBuyerSessionLifecycleReconcile {
+        let before = self.clone();
+        let buyer_lease_ids = self
+            .sessions
+            .values()
+            .filter_map(|session| {
+                self.channels
+                    .get(&session.session.payment.channel_id)
+                    .is_some_and(|channel| channel.role == PaidRouteChannelRole::Buyer)
+                    .then_some(session.session.lease_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for lease in self.leases.values_mut() {
+            if buyer_lease_ids.contains(&lease.lease.lease_id)
+                && paid_route_lifecycle_allows_routing(lease.status)
+                && lease.lease.expires_at_unix <= now_unix
+            {
+                lease.status = PaidRouteLifecycleStatus::Expired;
+                lease.updated_at_unix = lease.updated_at_unix.max(now_unix);
+            }
+        }
+        for channel in self.channels.values_mut() {
+            if channel.role == PaidRouteChannelRole::Buyer
+                && paid_route_lifecycle_allows_routing(channel.status)
+                && channel.expires_at_unix <= now_unix
+            {
+                channel.status = PaidRouteLifecycleStatus::Expired;
+                channel.updated_at_unix = channel.updated_at_unix.max(now_unix);
+                if channel.error.is_empty() {
+                    channel.error = "Paid route session expired".to_string();
+                }
+            }
+        }
+
+        let attempts = self
+            .buyer_session_open_attempts
+            .iter()
+            .map(|(session_id, started_at)| (session_id.clone(), *started_at))
+            .collect::<Vec<_>>();
+        let mut result = PaidRouteBuyerSessionLifecycleReconcile::default();
+        for (session_id, started_at) in attempts {
+            let Some(session) = self.sessions.get(&session_id) else {
+                self.buyer_session_open_attempts.remove(&session_id);
+                continue;
+            };
+            let lease_id = session.session.lease_id.clone();
+            let channel_id = session.session.payment.channel_id.clone();
+            if session.funding_started_unix != 0 {
+                self.buyer_session_open_attempts.remove(&session_id);
+                continue;
+            }
+            if self.buyer_session_admissions.contains_key(&lease_id) {
+                self.buyer_session_open_attempts.remove(&session_id);
+                continue;
+            }
+            let current = self
+                .leases
+                .get(&lease_id)
+                .is_some_and(|lease| paid_route_lifecycle_allows_routing(lease.status))
+                && self.channels.get(&channel_id).is_some_and(|channel| {
+                    channel.role == PaidRouteChannelRole::Buyer
+                        && paid_route_lifecycle_allows_routing(channel.status)
+                });
+            if !current {
+                self.buyer_session_open_attempts.remove(&session_id);
+                continue;
+            }
+            if open_timeout_secs == 0 || now_unix.saturating_sub(started_at) < open_timeout_secs {
+                continue;
+            }
+            if let Some(lease) = self.leases.get_mut(&lease_id) {
+                lease.status = PaidRouteLifecycleStatus::Failed;
+                lease.updated_at_unix = lease.updated_at_unix.max(now_unix);
+            }
+            if let Some(channel) = self.channels.get_mut(&channel_id) {
+                channel.status = PaidRouteLifecycleStatus::Failed;
+                channel.updated_at_unix = channel.updated_at_unix.max(now_unix);
+                channel.error = format!(
+                    "Seller did not acknowledge the session within {} seconds",
+                    open_timeout_secs
+                );
+            }
+            self.buyer_session_open_attempts.remove(&session_id);
+            if self.selected_buyer_session_id == session_id {
+                result.selected_session_timed_out = true;
+                result.selected_session_id = session_id;
+            }
+        }
+        result.changed = *self != before;
+        result
+    }
+
     pub fn buyer_session_is_seller_admitted(&self, session_id: &str) -> Result<bool> {
         let session_id = trimmed_required(session_id, "paid route session id")?;
         let session = self
@@ -13,6 +215,106 @@ impl PaidRouteStore {
         Ok(self
             .buyer_session_admissions
             .contains_key(&session.session.lease_id))
+    }
+
+    pub fn fail_selected_buyer_session(&mut self, error: &str, now_unix: u64) -> Result<bool> {
+        let session_id = trimmed_required(
+            &self.selected_buyer_session_id,
+            "selected paid route session id",
+        )?;
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("paid route buyer session {session_id} does not exist"))?;
+        let lease_id = session.session.lease_id.clone();
+        let channel_id = session.session.payment.channel_id.clone();
+        let channel = self
+            .channels
+            .get(&channel_id)
+            .ok_or_else(|| anyhow!("paid route buyer session {session_id} has no channel"))?;
+        if channel.role != PaidRouteChannelRole::Buyer {
+            return Err(anyhow!(
+                "paid route session {session_id} is not a buyer session"
+            ));
+        }
+
+        let before = self.clone();
+        if let Some(lease) = self.leases.get_mut(&lease_id)
+            && paid_route_lifecycle_allows_routing(lease.status)
+        {
+            lease.status = PaidRouteLifecycleStatus::Failed;
+            lease.updated_at_unix = lease.updated_at_unix.max(now_unix);
+        }
+        if let Some(channel) = self.channels.get_mut(&channel_id)
+            && paid_route_lifecycle_allows_routing(channel.status)
+        {
+            channel.status = PaidRouteLifecycleStatus::Failed;
+            channel.updated_at_unix = channel.updated_at_unix.max(now_unix);
+            channel.error = trimmed_required(error, "paid route failure reason")?;
+        }
+        self.buyer_session_open_attempts.remove(&session_id);
+        Ok(*self != before)
+    }
+
+    pub fn retry_failed_funded_buyer_session(
+        &mut self,
+        session_id: &str,
+        now_unix: u64,
+    ) -> Result<bool> {
+        let session_id = trimmed_required(session_id, "paid route session id")?;
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("paid route buyer session {session_id} does not exist"))?;
+        let lease_id = session.session.lease_id.clone();
+        let channel_id = session.session.payment.channel_id.clone();
+        let lease = self
+            .leases
+            .get(&lease_id)
+            .ok_or_else(|| anyhow!("paid route buyer session {session_id} has no lease"))?;
+        let channel = self
+            .channels
+            .get(&channel_id)
+            .ok_or_else(|| anyhow!("paid route buyer session {session_id} has no channel"))?;
+        if channel.role != PaidRouteChannelRole::Buyer {
+            return Err(anyhow!(
+                "paid route session {session_id} is not a buyer session"
+            ));
+        }
+        if lease.lease.expires_at_unix.min(channel.expires_at_unix) <= now_unix {
+            return Err(anyhow!("paid route buyer session {session_id} has expired"));
+        }
+        if channel.status != PaidRouteLifecycleStatus::Failed
+            && lease.status != PaidRouteLifecycleStatus::Failed
+        {
+            return Ok(false);
+        }
+        if !paid_route_session_has_payment_material(&session.session, channel) {
+            return Err(anyhow!(
+                "paid route buyer session {session_id} cannot be retried without a funded channel"
+            ));
+        }
+
+        let before = self.clone();
+        let status = if self.buyer_session_admissions.contains_key(&lease_id) {
+            PaidRouteLifecycleStatus::Active
+        } else {
+            PaidRouteLifecycleStatus::Opening
+        };
+        if let Some(lease) = self.leases.get_mut(&lease_id) {
+            lease.status = status;
+            lease.updated_at_unix = lease.updated_at_unix.max(now_unix);
+        }
+        if let Some(channel) = self.channels.get_mut(&channel_id) {
+            channel.status = status;
+            channel.updated_at_unix = channel.updated_at_unix.max(now_unix);
+            channel.error.clear();
+        }
+        self.buyer_session_open_attempts.remove(&session_id);
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.updated_at_unix = session.updated_at_unix.max(now_unix);
+        }
+        Ok(*self != before)
     }
 
     pub fn acknowledge_buyer_session_open(
@@ -47,11 +349,45 @@ impl PaidRouteStore {
         let previous = self
             .buyer_session_admissions
             .insert(lease_id, acknowledged_at_unix.max(1));
+        self.buyer_session_open_attempts.remove(&session_id);
+        if let Some(lease) = self.leases.get_mut(&session.session.lease_id) {
+            lease.status = preserve_terminal_status(lease.status, PaidRouteLifecycleStatus::Active);
+            lease.updated_at_unix = lease.updated_at_unix.max(acknowledged_at_unix);
+        }
+        if let Some(channel) = self.channels.get_mut(&session.session.payment.channel_id) {
+            channel.status =
+                preserve_terminal_status(channel.status, PaidRouteLifecycleStatus::Active);
+            channel.updated_at_unix = channel.updated_at_unix.max(acknowledged_at_unix);
+            if channel.status == PaidRouteLifecycleStatus::Active {
+                channel.error.clear();
+            }
+        }
         Ok(previous.is_none())
     }
 
     pub fn buyer_has_seller_admission(&self, seller_pubkey: &str, now_unix: u64) -> Result<bool> {
         let seller_pubkey = normalize_nostr_pubkey(seller_pubkey)?;
+        // An older admission must not restore the trial route while the
+        // selected session is waiting for its mint. Renewal still uses the
+        // selected, paid session until the successor is ready.
+        if self
+            .sessions
+            .get(&self.selected_buyer_session_id)
+            .is_some_and(|session| {
+                session.funding_started_unix != 0
+                    && self
+                        .channels
+                        .get(&session.session.payment.channel_id)
+                        .is_some_and(|channel| {
+                            normalize_nostr_pubkey(&channel.counterparty_npub)
+                                .ok()
+                                .as_deref()
+                                == Some(seller_pubkey.as_str())
+                        })
+            })
+        {
+            return Ok(false);
+        }
         Ok(self.sessions.values().any(|session| {
             let Some(lease) = self.leases.get(&session.session.lease_id) else {
                 return false;
@@ -63,6 +399,7 @@ impl PaidRouteStore {
                 return false;
             };
             channel.role == PaidRouteChannelRole::Buyer
+                && session.funding_started_unix == 0
                 && paid_route_lifecycle_allows_routing(lease.status)
                 && paid_route_lifecycle_allows_routing(channel.status)
                 && session.session.routing_decision(terms).allow_routing
@@ -131,13 +468,45 @@ impl PaidRouteStore {
         now_unix: u64,
     ) -> Result<Option<PaidRouteSessionOpen>> {
         let seller_pubkey = normalize_nostr_pubkey(seller_pubkey)?;
+        if !self.selected_buyer_session_id.is_empty() {
+            let Some(session) = self.sessions.get(&self.selected_buyer_session_id) else {
+                return Ok(None);
+            };
+            let Some(lease) = self.leases.get(&session.session.lease_id) else {
+                return Ok(None);
+            };
+            let Some(channel) = self.channels.get(&session.session.payment.channel_id) else {
+                return Ok(None);
+            };
+            let selected_matches = channel.role == PaidRouteChannelRole::Buyer
+                && session.funding_started_unix == 0
+                && normalize_nostr_pubkey(&channel.counterparty_npub)
+                    .ok()
+                    .as_deref()
+                    == Some(seller_pubkey.as_str())
+                && paid_route_lifecycle_allows_routing(lease.status)
+                && paid_route_lifecycle_allows_routing(channel.status)
+                && lease.lease.expires_at_unix.min(channel.expires_at_unix) > now_unix;
+            return selected_matches
+                .then(|| {
+                    self.build_buyer_session_open(
+                        &session.session.session_id,
+                        buyer_npub,
+                        buyer_tunnel_ip,
+                        now_unix,
+                    )
+                })
+                .transpose();
+        }
+
         let candidate = self
             .sessions
             .values()
             .filter_map(|session| {
                 let lease = self.leases.get(&session.session.lease_id)?;
                 let channel = self.channels.get(&session.session.payment.channel_id)?;
-                if channel.role != PaidRouteChannelRole::Buyer
+                if session.funding_started_unix != 0
+                    || channel.role != PaidRouteChannelRole::Buyer
                     || normalize_nostr_pubkey(&channel.counterparty_npub)
                         .ok()
                         .as_deref()
@@ -146,7 +515,10 @@ impl PaidRouteStore {
                     return None;
                 }
                 let expires_at = lease.lease.expires_at_unix.min(channel.expires_at_unix);
-                (expires_at > now_unix).then_some((session.updated_at_unix, session))
+                (expires_at > now_unix
+                    && paid_route_lifecycle_allows_routing(lease.status)
+                    && paid_route_lifecycle_allows_routing(channel.status))
+                .then_some((session.updated_at_unix, session))
             })
             .max_by_key(|(updated_at, _)| *updated_at)
             .map(|(_, session)| session);
@@ -212,29 +584,11 @@ impl PaidRouteStore {
                 .saturating_add(config.channel.channel_expiry_secs.max(1)),
         );
 
-        for existing in self.sessions.values() {
-            let Some(existing_lease) = self.leases.get(&existing.session.lease_id) else {
-                continue;
-            };
-            let Some(existing_channel) = self.channels.get(&existing.session.payment.channel_id)
-            else {
-                continue;
-            };
-            if existing_channel.role == PaidRouteChannelRole::Seller
-                && normalize_nostr_pubkey(&existing_lease.lease.buyer_npub)
-                    .ok()
-                    .as_deref()
-                    == Some(buyer_pubkey.as_str())
-                && existing.session.lease_id != lease_id
-                && existing.session.payment.cashu_spilman_payment.is_none()
-                && existing.session.payment.cashu_token_lease.is_none()
-            {
-                return Err(anyhow!(
-                    "paid route buyer already consumed a free probe on this seller"
-                ));
-            }
-        }
-
+        // A funded channel can arrive before its session-open frame. In that case the
+        // payment handler has already created this seller session, and this frame is
+        // binding the authenticated buyer's tunnel IP to it. Handle that replay before
+        // enforcing the one-free-probe-per-buyer rule: an older free probe must not
+        // prevent a newly funded session from becoming routable.
         let session_id = seller_session_id_for_lease(&lease_id);
         if self.sessions.contains_key(&session_id) {
             let lease = self
@@ -257,6 +611,26 @@ impl PaidRouteStore {
                     "existing paid route session uses a different buyer tunnel IP"
                 ));
             }
+            if !self.seller_session_tunnel_ips.contains_key(&session_id) {
+                let session = &self.sessions[&session_id].session;
+                let terms = accepted_channel_terms(
+                    &self.channels[&session.payment.channel_id],
+                    PaidRouteChannelRole::Seller,
+                )?
+                .clone();
+                // Funding with zero payment must not mint a fresh free allowance.
+                if session.payment.paid_msat == 0
+                    && (terms.channel.free_probe_units > 0 || terms.channel.grace_units > 0)
+                {
+                    self.claim_seller_free_probe(
+                        &buyer_pubkey,
+                        &lease_id,
+                        request.authenticated_source_ip,
+                        &terms,
+                        request.now_unix,
+                    )?;
+                }
+            }
             self.seller_session_tunnel_ips
                 .insert(session_id.clone(), buyer_tunnel_ip);
             let admission = self
@@ -274,12 +648,42 @@ impl PaidRouteStore {
                 changed: false,
             });
         }
+
+        for existing in self.sessions.values() {
+            let Some(existing_lease) = self.leases.get(&existing.session.lease_id) else {
+                continue;
+            };
+            let Some(existing_channel) = self.channels.get(&existing.session.payment.channel_id)
+            else {
+                continue;
+            };
+            if existing_channel.role == PaidRouteChannelRole::Seller
+                && normalize_nostr_pubkey(&existing_lease.lease.buyer_npub)
+                    .ok()
+                    .as_deref()
+                    == Some(buyer_pubkey.as_str())
+                && existing.session.lease_id != lease_id
+                && existing.session.payment.cashu_spilman_payment.is_none()
+                && existing.session.payment.cashu_token_lease.is_none()
+            {
+                return Err(anyhow!(
+                    "paid route buyer already consumed a free probe on this seller"
+                ));
+            }
+        }
         if config.channel.free_probe_units == 0 {
             return Err(anyhow!(
                 "paid route session is waiting for its funded seller channel"
             ));
         }
         self.ensure_seller_lease_slot_available(&service_id, &lease_id, &channel_id, &buyer_npub)?;
+        self.claim_seller_free_probe(
+            &buyer_pubkey,
+            &lease_id,
+            request.authenticated_source_ip,
+            &config,
+            request.now_unix,
+        )?;
         let quote_id = seller_quote_id_for_lease(&lease_id);
         let payment = PaidRoutePaymentState {
             mode: PaidRoutePaymentMode::CashuSpilman,

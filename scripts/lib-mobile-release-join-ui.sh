@@ -110,6 +110,42 @@ release_join_observe_until_ms() {
   return 1
 }
 
+release_join_android_capture_failure_log() {
+  local output="$1" deadline_ms result=0
+  [[ "${RELEASE_JOIN_ANDROID_MUTATED:-0}" -eq 1 ]] || return 0
+  deadline_ms=$(( $(release_join_now_ms) + 5000 ))
+  # Capture the visible failure without waiting for the accessibility tree to idle.
+  release_join_run_until_ms "$deadline_ms" "Android failure screen capture" \
+    "${ADB[@]}" exec-out screencap -p \
+    >"$output.png" 2>"$output.png.stderr" || true
+  # Keep only this app's lifecycle records, before cleanup can erase context.
+  # Reuse the selected device and bounded poll runner; never impede cleanup.
+  release_join_run_until_ms "$deadline_ms" "Android service failure log capture" \
+    "${ADB[@]}" logcat -d -v epoch -s NostrVpnService:I '*:S' \
+    >"$output" 2>"$output.stderr" || result=$?
+  if ((result != 0)); then
+    printf 'Android service log capture failed (status %s)\n' "$result" \
+      >>"$output.stderr" || true
+  fi
+  return 0
+}
+
+release_join_android_stop() {
+  [[ "${RELEASE_JOIN_ANDROID_MUTATED:-0}" -eq 1 ]] || return 0
+  local package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
+  local deadline_ms services
+  deadline_ms=$(( $(release_join_now_ms) + 5000 ))
+  # Stop only the selected test app, retaining its state and failure evidence.
+  release_join_run_until_ms "$deadline_ms" "Android test app stop" \
+    "${ADB[@]}" shell am force-stop "$package" >/dev/null || return 1
+  services="$(release_join_run_until_ms "$deadline_ms" "Android test app cleanup" \
+    "${ADB[@]}" shell dumpsys activity services "$package")" || return 1
+  [[ "$services" == *"(nothing)"* && "$services" != *"ServiceRecord{"* ]] || {
+    echo "Android test app service did not stop cleanly" >&2
+    return 1
+  }
+}
+
 release_join_android_accepted_snapshot_ms() {
   local participant="$1" snapshot_ms
   release_join_android_dump_ui || return 1
@@ -141,14 +177,14 @@ release_join_observe_pair_until_ms() {
 
 release_join_android_dump_ui() {
   RELEASE_JOIN_ANDROID_UI_XML="$PRIVATE_DIR/android-ui.xml"
-  "${ADB[@]}" shell uiautomator dump /sdcard/nvpn-release-join.xml >/dev/null 2>&1
+  "${ADB[@]}" shell uiautomator dump /sdcard/nvpn-release-join.xml >/dev/null 2>&1 || return 1
   "${ADB[@]}" exec-out cat /sdcard/nvpn-release-join.xml \
     >"$RELEASE_JOIN_ANDROID_UI_XML"
 }
 
 release_join_android_query() {
   local kind="$1" expected="$2" output="$3"
-  release_join_android_dump_ui
+  release_join_android_dump_ui || return 1
   release_join_android_query_dumped "$kind" "$expected" "$output"
 }
 
@@ -186,20 +222,35 @@ release_join_android_tap_visible() {
 }
 
 release_join_android_scroll() {
-  local size width height
+  local size width height start target duration=220 direction="${2:-forward}"
   size="$("${ADB[@]}" shell wm size | tr -d '\r' | sed -n 's/^Physical size: //p')"
   width="${size%x*}"
   height="${size#*x}"
+  start="$((height * 4 / 5))"
+  target="$((height / 3))"
+  if [[ "${1:-}" == checkbox-label ]]; then
+    target="$((height * 3 / 5))"
+    duration=400
+  fi
+  if [[ "$direction" == backward ]]; then
+    local previous_start="$start"
+    start="$target"
+    target="$previous_start"
+  fi
   "${ADB[@]}" shell input swipe \
-    "$((width / 2))" "$((height * 4 / 5))" \
-    "$((width / 2))" "$((height / 3))" 220
+    "$((width / 2))" "$start" \
+    "$((width / 2))" "$target" "$duration"
 }
 
 release_join_android_scroll_to() {
-  local kind="$1" expected="$2" visibility="${3:-safe-center}"
+  local kind="$1" expected="$2" visibility="${3:-safe-center}" direction="${4:-forward}"
   local attempts
   case "$visibility" in
     safe-center|visible-center) ;;
+    *) return 2 ;;
+  esac
+  case "$direction" in
+    forward|backward) ;;
     *) return 2 ;;
   esac
   for ((attempts = 0; attempts < 12; attempts++)); do
@@ -208,7 +259,7 @@ release_join_android_scroll_to() {
     then
       return 0
     fi
-    release_join_android_scroll >/dev/null
+    release_join_android_scroll "$kind" "$direction" >/dev/null
     sleep 0.2
   done
   return 1
@@ -241,11 +292,13 @@ release_join_android_enter() {
     || return 1
   "${ADB[@]}" shell input keyevent KEYCODE_DEL || return 1
   "${ADB[@]}" shell input text "${value// /%s}" </dev/null || return 1
-  "${ADB[@]}" shell input keyevent KEYCODE_BACK || return 1
   deadline=$((SECONDS + 3))
   while ((SECONDS < deadline)); do
     actual="$(release_join_android_query text "$value" text 2>/dev/null || true)"
-    [[ "$actual" == "$value" ]] && return 0
+    if [[ "$actual" == "$value" ]]; then
+      "${ADB[@]}" shell input keyevent KEYCODE_BACK
+      return $?
+    fi
     sleep 0.1
   done
   echo "Android join field did not retain exact text: $selector" >&2
@@ -257,6 +310,63 @@ release_join_android_launch() {
   "${ADB[@]}" shell am start -W \
     --ez org.nostrvpn.app.extra.RELEASE_JOIN_IMAGE_IMPORT true \
     -n "$package/org.nostrvpn.app.MainActivity" >/dev/null
+}
+
+release_join_android_open_network_setup() {
+  release_join_require_device_mutation_allowed || return 1
+  RELEASE_JOIN_DEVICE_MUTATED=1
+  RELEASE_JOIN_ANDROID_MUTATED=1
+  release_join_android_stop || return 1
+  release_join_android_launch || return 1
+  local deadline=$((SECONDS + RELEASE_JOIN_UI_WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    release_join_android_dump_ui || return 1
+    if release_join_android_query_dumped description 'Create Network' center >/dev/null 2>&1; then
+      return 0
+    fi
+    if release_join_android_query_dumped network-picker 'Turn VPN ' center >/dev/null 2>&1; then
+      release_join_android_normalize_carrier || return 1
+      # A preceding exit test may have retained a now-stopped fixture. Select
+      # native internet through the UI, without erasing its saved configuration.
+      release_join_android_tap_center description 'Internet tab' || return 1
+      # The shared list retains Settings' scroll offset; the picker is above it.
+      release_join_android_scroll_to resource internet-source-picker safe-center backward || return 1
+      if ! release_join_android_query text 'This device' center >/dev/null 2>&1; then
+        release_join_android_tap_center resource internet-source-picker || return 1
+        release_join_android_tap_center description 'Internet source This device' || return 1
+        release_join_android_wait_query text 'This device' || return 1
+      fi
+      release_join_android_tap_center network-picker 'Turn VPN ' || return 1
+      release_join_android_scroll_to text 'Add network' visible-center || return 1
+      release_join_android_tap_visible text 'Add network' || return 1
+      release_join_android_wait_query description 'Create Network'
+      return $?
+    fi
+    sleep 0.1
+  done
+  echo 'Android did not expose its public network setup controls' >&2
+  return 1
+}
+
+release_join_android_normalize_carrier() {
+  local label checked
+  release_join_android_tap_center description 'Settings tab' || return 1
+  for label in \
+    'Connect to non-roster FIPS peers' \
+    'Find peers over Nostr relays' \
+    'Use bootstrap servers'
+  do
+    release_join_android_scroll_to checkbox-label "$label" || return 1
+    checked="$(release_join_android_query_dumped checkbox-label "$label" checked)" \
+      || return 1
+    if [[ "$checked" != true ]]; then
+      release_join_android_tap checkbox-label "$label" || return 1
+      [[ "$(release_join_android_query checkbox-label "$label" checked)" == true ]] || {
+        echo "Android join prerequisite did not turn on: $label" >&2
+        return 1
+      }
+    fi
+  done
 }
 
 release_join_android_tap_center() {
@@ -324,10 +434,37 @@ release_join_android_accept_camera_permission() {
 
 release_join_android_accept_join_transport_permissions() {
   release_join_android_wait_through_system_prompts \
-    resource manual-join-expand 10 || {
+    description 'Manual join' 10 || {
       echo "Android join transport permission did not complete" >&2
       return 1
     }
+}
+
+release_join_android_accept_admin_transport_permissions() {
+  release_join_android_wait_through_system_prompts \
+    description "Open manual device approval" 10 || {
+      echo "Android admin transport permission did not complete" >&2
+      return 1
+    }
+}
+
+release_join_android_os_vpn_connected() {
+  local package="${NVPN_DEFAULT_APP_ID:-fi.siriusbusiness.nvpn}"
+  "${ADB[@]}" shell dumpsys connectivity 2>/dev/null \
+    | tr -d '\r' \
+    | grep -F "ni{VPN CONNECTED extra: VPN:$package}" >/dev/null
+}
+
+release_join_android_wait_vpn_connected() {
+  local deadline=$((SECONDS + RELEASE_JOIN_UI_WAIT_SECS))
+  while ((SECONDS < deadline)); do
+    if release_join_android_os_vpn_connected; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "Android network did not start its production VPN" >&2
+  return 1
 }
 
 release_join_android_public_value() {
@@ -367,10 +504,12 @@ release_join_android_open_link_device() {
 
 release_join_android_create_admin() {
   release_join_android_launch
-  release_join_android_wait_query resource network-setup-create
-  release_join_android_tap resource network-setup-create
-  release_join_android_wait_query resource network-create-submit
-  release_join_android_tap resource network-create-submit
+  release_join_android_wait_query description 'Create Network'
+  release_join_android_tap description 'Create Network'
+  release_join_android_wait_query description 'Create network'
+  release_join_android_tap description 'Create network'
+  release_join_android_accept_admin_transport_permissions
+  release_join_android_wait_vpn_connected
   release_join_android_open_link_device
   RELEASE_JOIN_ANDROID_ADMIN_ID="$(
     release_join_android_public_value "Admin Device ID value"
@@ -395,12 +534,12 @@ release_join_android_create_admin() {
 
 release_join_android_show_qr() {
   release_join_android_launch
-  release_join_android_wait_query resource network-setup-join
-  release_join_android_tap resource network-setup-join
+  release_join_android_wait_query description 'Join Network'
+  release_join_android_tap description 'Join Network'
   release_join_android_accept_join_transport_permissions
-  release_join_android_scroll_to resource manual-join-expand
-  release_join_android_tap resource manual-join-expand
-  release_join_android_wait_query resource joiner-device-id-value
+  release_join_android_scroll_to description 'Manual join'
+  release_join_android_tap description 'Manual join'
+  release_join_android_wait_query description-prefix 'Joiner Device ID value: '
   RELEASE_JOIN_ANDROID_JOINER_ID="$(
     release_join_android_public_value "Joiner Device ID value"
   )"
@@ -434,14 +573,14 @@ release_join_android_background_foreground_pending_qr() {
 
 release_join_android_assert_qr_full_width() {
   local qr_width content_width ratio_bps
-  release_join_android_dump_ui
+  release_join_android_dump_ui || return 1
   qr_width="$(
     release_join_android_query_dumped \
       description "Join request QR code" width
   )" || return 1
   content_width="$(
     release_join_android_query_dumped \
-      resource "join-request-qr-content" width
+      description "Join request QR content width" width
   )" || return 1
   [[ "$qr_width" =~ ^[1-9][0-9]*$ \
     && "$content_width" =~ ^[1-9][0-9]*$ ]] \
@@ -457,6 +596,7 @@ release_join_android_assert_qr_full_width() {
   then
     RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS="$ratio_bps"
   fi
+  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS=$RELEASE_JOIN_ANDROID_QR_CONTENT_WIDTH_BPS"
 }
 
 release_join_android_assert_pending_qr() {
@@ -465,10 +605,6 @@ release_join_android_assert_pending_qr() {
   release_join_android_public_value \
     "Joiner Device ID value" \
     | grep -Fxq "$RELEASE_JOIN_ANDROID_JOINER_ID"
-}
-
-release_join_android_wait_join_complete() {
-  release_join_android_wait_accepted_participant "$1"
 }
 
 release_join_android_wait_accepted_participant() {
@@ -494,16 +630,24 @@ release_join_android_relaunch_and_wait_accepted() {
 }
 
 release_join_android_wait_qr_join_complete() {
-  local admin="$1" deadline=$((SECONDS + RELEASE_JOIN_DELIVERY_WAIT_SECS))
-  local description
-  while ((SECONDS < deadline)); do
-    release_join_android_launch >/dev/null 2>&1 || true
-    release_join_android_dump_ui
+  local admin="$1" deadline_ms="${2:-$(( $(release_join_now_ms) + RELEASE_JOIN_DELIVERY_WAIT_SECS * 1000 ))}"
+  local observations="${3:-}" description snapshot_ms
+  [[ "$deadline_ms" =~ ^[0-9]+$ ]] || return 2
+  while (( $(release_join_now_ms) < deadline_ms )); do
+    # The pending QR is already foregrounded. Observe delivery without sending
+    # another activity intent on every poll or consuming its acceptance window.
+    release_join_android_dump_ui || return 1
+    snapshot_ms="$(release_join_now_ms)"
+    if ((snapshot_ms > deadline_ms)); then
+      [[ -z "$observations" ]] || printf '%s\tdeadline-exceeded\n' "$snapshot_ms" >>"$observations"
+      return 1
+    fi
     if release_join_android_query_dumped \
         description "Join request QR code" center >/dev/null 2>&1; then
+      [[ -z "$observations" ]] || printf '%s\tpending\n' "$snapshot_ms" >>"$observations"
       description="$(
         release_join_android_query_dumped \
-          resource joiner-device-id-value description
+          description-prefix 'Joiner Device ID value: ' description
       )" || return 1
       [[ "$description" == \
         "Joiner Device ID value: $RELEASE_JOIN_ANDROID_JOINER_ID" ]] \
@@ -516,6 +660,8 @@ release_join_android_wait_qr_join_complete() {
       echo "Android join QR disappeared before the exact accepted admin roster was visible" >&2
       return 1
     fi
+    [[ -z "$observations" ]] || printf '%s\taccepted\n' "$snapshot_ms" >>"$observations"
+    printf '%s\n' "$snapshot_ms"
     return 0
   done
   return 1
@@ -535,7 +681,7 @@ release_join_android_scan_prepare() {
 }
 
 release_join_android_scan_submit() {
-  local joiner="$1" image="$2" filename after deadline
+  local joiner="$1" image="$2" filename after deadline point submitted_ms
   [[ "${RELEASE_JOIN_ANDROID_SCAN_BEFORE:-}" =~ ^[0-9]+$ ]] || {
     echo "Android QR image import was not prepared before approval" >&2
     return 1
@@ -556,10 +702,15 @@ release_join_android_scan_submit() {
   release_join_android_wait_query \
     description "Confirm adding scanned join request" \
     "${RELEASE_JOIN_IMPORT_WAIT_SECS:-15}"
-  release_join_require_fresh_ios_pending_qr
-  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$(release_join_now_ms)"
-  release_join_android_tap_center \
-    description "Confirm adding scanned join request"
+  point="$(release_join_android_query \
+    description "Confirm adding scanned join request" center)" || return 1
+  release_join_require_fresh_ios_pending_qr || return 1
+  # Accessibility lookup can wait for the animated image picker to settle.
+  # Start delivery timing only when the prepared approval is actually tapped.
+  submitted_ms="$(release_join_now_ms)"
+  # shellcheck disable=SC2086
+  "${ADB[@]}" shell input tap $point || return 1
+  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$submitted_ms"
   release_join_android_wait_through_system_prompts \
     resource "roster-participant-accepted-$joiner" 10 || {
       echo "Android admin transport permission did not complete" >&2
@@ -590,6 +741,41 @@ release_join_capture_android_qr() {
   }
 }
 
+release_join_ios_copy_test_file() {
+  # CoreDevice file access can block while XCTest waits for host input. AFC
+  # uses the existing USB pairing and leaves the runner session untouched.
+  python3 - "$IOS_DEVICE" "$@" <<'PY'
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+
+device, direction, bundle, source, destination = sys.argv[1:]
+command = ["ios-deploy", "--id", device, "--no-wifi", "--bundle_id", bundle]
+try:
+    if direction == "to":
+        subprocess.run(
+            command + ["--upload", source, "--to", destination],
+            capture_output=True, timeout=15, check=True,
+        )
+    elif direction == "from":
+        with tempfile.TemporaryDirectory(prefix="nvpn-ios-test-copy-") as directory:
+            subprocess.run(
+                command + ["--download=" + source, "--to", directory],
+                capture_output=True, timeout=15, check=True,
+            )
+            downloaded = pathlib.Path(directory) / source
+            if not downloaded.is_file() or downloaded.is_symlink():
+                raise ValueError("missing exact downloaded file")
+            shutil.copyfile(downloaded, destination)
+    else:
+        raise ValueError("invalid copy direction")
+except (OSError, ValueError, subprocess.SubprocessError) as error:
+    raise SystemExit(f"iOS USB test file copy failed ({type(error).__name__})") from None
+PY
+}
+
 release_join_capture_ios_qr() {
   local output="$1"
   local bundle filename expected_sha actual_sha
@@ -608,14 +794,8 @@ release_join_capture_ios_qr() {
   bundle="${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner"
   RELEASE_JOIN_IOS_CAPTURED_QR_FILENAME="$filename"
   export RELEASE_JOIN_IOS_CAPTURED_QR_FILENAME
-  xcrun devicectl device copy from \
-    --device "$IOS_DEVICE" \
-    --domain-type appDataContainer \
-    --domain-identifier "$bundle" \
-    --source "Documents/$filename" \
-    --destination "$output" \
-    --timeout 15 \
-    --quiet >/dev/null || {
+  release_join_ios_copy_test_file from "$bundle" \
+    "Documents/$filename" "$output" || {
     echo "Could not copy the XCTest QR screen capture from the iPhone" >&2
     return 1
   }
@@ -637,15 +817,19 @@ release_join_stage_ios_qr_image() {
   RELEASE_JOIN_IOS_STAGED_QR_FILENAME="$filename"
   export RELEASE_JOIN_IOS_STAGED_QR_FILENAME
   for bundle in "$app_bundle" "$runner_bundle"; do
-    xcrun devicectl device copy to \
-      --device "$IOS_DEVICE" \
-      --domain-type appDataContainer \
-      --domain-identifier "$bundle" \
-      --source "$image" \
-      --destination "Documents/$filename" \
-      --timeout 15 \
-      --quiet >/dev/null || return 1
+    release_join_ios_copy_test_file to "$bundle" \
+      "$image" "Documents/$filename" || return 1
   done
+}
+
+release_join_signal_ios_peer_accepted() {
+  local filename="$1" joiner="$2" signal="$PRIVATE_DIR/ios-peer-accepted.txt"
+  [[ "$filename" == nvpn-peer-accepted-*.txt && "$filename" != */* ]] || return 1
+  release_join_valid_npub "$joiner" || return 1
+  printf '%s' "$joiner" >"$signal"
+  release_join_ios_copy_test_file to \
+    "${NVPN_DEFAULT_IOS_BUNDLE_ID:-fi.siriusbusiness.nvpn}.UITests.xctrunner" \
+    "$signal" "Documents/$filename"
 }
 
 release_join_require_fresh_ios_pending_qr() {
@@ -672,24 +856,24 @@ release_join_require_fresh_ios_pending_qr() {
 release_join_android_manual_submit() {
   local admin="$1" network="$2"
   release_join_android_launch
-  release_join_android_wait_query resource network-setup-join
-  release_join_android_tap resource network-setup-join
+  release_join_android_wait_query description 'Join Network'
+  release_join_android_tap description 'Join Network'
   release_join_android_accept_join_transport_permissions
-  release_join_android_scroll_to resource manual-join-expand
-  release_join_android_tap resource manual-join-expand
-  release_join_android_wait_query resource joiner-device-id-value
+  release_join_android_scroll_to description 'Manual join'
+  release_join_android_tap description 'Manual join'
+  release_join_android_wait_query description-prefix 'Joiner Device ID value: '
   RELEASE_JOIN_ANDROID_JOINER_ID="$(
     release_join_android_public_value "Joiner Device ID value"
   )"
   release_join_valid_npub "$RELEASE_JOIN_ANDROID_JOINER_ID"
-  release_join_android_enter resource manual-join-admin-id "$admin"
+  release_join_android_enter description 'Manual join admin Device ID' "$admin"
   release_join_android_enter \
-    resource manual-join-network-id "$network" visible-center
-  release_join_android_wait_query resource manual-join-submit
-  release_join_android_tap_center resource manual-join-submit
+    description 'Manual join Network ID' "$network" visible-center
+  release_join_android_wait_query description 'Add network manually'
+  release_join_android_tap_center description 'Add network manually'
   local deadline=$((SECONDS + 3))
   while ((SECONDS < deadline)); do
-    if ! release_join_android_query resource manual-join-submit center >/dev/null 2>&1; then
+    if ! release_join_android_query description 'Add network manually' center >/dev/null 2>&1; then
       echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1"
       export RELEASE_JOIN_ANDROID_JOINER_ID
       return 0
@@ -698,20 +882,6 @@ release_join_android_manual_submit() {
   done
   echo "Android manual join submit did not change the shipped UI" >&2
   return 1
-}
-
-release_join_android_admin_add_visible() {
-  local joiner="$1"
-  release_join_android_dump_ui || return 1
-  if release_join_android_query_dumped \
-      description "Add joining device manually" center >/dev/null 2>&1
-  then
-    return 1
-  fi
-  release_join_android_query_dumped \
-      resource "roster-participant-pending-$joiner" center >/dev/null 2>&1 \
-    || release_join_android_query_dumped \
-      resource "roster-participant-accepted-$joiner" center >/dev/null 2>&1
 }
 
 release_join_android_manual_admin_prepare() {
@@ -742,8 +912,7 @@ release_join_android_manual_admin_prepare() {
 }
 
 release_join_android_manual_admin_tap() {
-  local joiner="$1" deadline enabled submitted_ms
-  local submitted_visible=0
+  local joiner="$1" enabled submitted_ms point
   [[ "${RELEASE_JOIN_ANDROID_ADMIN_ADD_JOINER:-}" == "$joiner" \
     && "${RELEASE_JOIN_ANDROID_ADMIN_ADD_BEFORE:-}" =~ ^[0-9]+$ ]] || {
     echo "Android manual admin-add was not prepared for this exact joiner" >&2
@@ -758,22 +927,14 @@ release_join_android_manual_admin_tap() {
     echo "Android prepared admin-add controls changed before submission" >&2
     return 1
   }
+  point="$(release_join_android_query \
+    description "Add joining device manually" visible-center)" || return 1
+  # Time the actual tap, not the preparatory accessibility snapshot. The caller
+  # already observes accepted state on both devices under this same deadline.
   submitted_ms="$(release_join_now_ms)"
-  release_join_android_tap_visible \
-    description "Add joining device manually" || return 1
-  deadline=$((SECONDS + 3))
-  while ((SECONDS < deadline)); do
-    if release_join_android_admin_add_visible "$joiner"; then
-      echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$submitted_ms"
-      submitted_visible=1
-      break
-    fi
-    sleep 0.1
-  done
-  if ((submitted_visible != 1)); then
-    echo "Android manual admin-add tap did not visibly submit" >&2
-    return 1
-  fi
+  # shellcheck disable=SC2086
+  "${ADB[@]}" shell input tap $point || return 1
+  echo "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=$submitted_ms"
 }
 
 release_join_android_manual_admin_wait_accepted() {
@@ -840,6 +1001,7 @@ release_join_ios_test_command() {
     "NVPN_RELEASE_JOIN_JOINER_ID="
     "NVPN_RELEASE_JOIN_NETWORK_ID="
     "NVPN_RELEASE_JOIN_NETWORK_NAME="
+    "NVPN_RELEASE_JOIN_PEER_ACCEPTED_FILENAME="
     "NVPN_RELEASE_JOIN_SETUP_WAIT_SECS="
     "NVPN_IOS_BUNDLE_ID="
     "NVPN_RELEASE_JOIN_BLACKBOX=1"
@@ -863,7 +1025,7 @@ release_join_ios_test_command() {
     xcodebuild
     -xctestrun "$case_xctestrun"
     -destination "platform=iOS,id=$RELEASE_JOIN_IOS_UDID,arch=arm64"
-    -destination-timeout 60
+    -destination-timeout 180
     -collect-test-diagnostics never
     -parallel-testing-enabled NO
     -only-testing:"NostrVpnIosUITests/NostrVpnReleaseJoinUITests/$test_name"
@@ -884,9 +1046,17 @@ release_join_ios_stop_runner() {
     ios_release_network_stop_forced_xctrunner "$device"
 }
 
+# XCTest setUp activates the existing app to preserve its live join carrier.
+# Do not restart it here; the tests verify relaunch durability after delivery.
 release_join_ios_start_test() {
   local test_name="$1" log="$2"
   shift 2
+  release_join_require_device_mutation_allowed || return 1
+  if ! ios_release_network_require_unlocked "${IOS_DEVICE:-$RELEASE_JOIN_IOS_UDID}"; then
+    RELEASE_JOIN_IOS_STARTUP_FAILED=1
+    return 75
+  fi
+  RELEASE_JOIN_DEVICE_MUTATED=1
   local -a command=()
   local command_file pid pgid actual_pgid caller_pgid cleanup_status=0
   local monitor_was_enabled=0
@@ -937,14 +1107,20 @@ release_join_ios_start_test() {
   RELEASE_JOIN_IOS_TEST_LOG="$log"
   RELEASE_JOIN_IOS_TEST_NAME="$test_name"
   if ! release_join_ios_wait_selected_test_started \
-      "${RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-60}"; then
+      "${RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-240}"; then
+    RELEASE_JOIN_IOS_STARTUP_FAILED=1
     release_join_ios_abort_test || true
     return 1
   fi
+  RELEASE_JOIN_IOS_METHOD_STARTED=1
 }
 
 release_join_ios_abort_test() {
   local status=0 pid="$RELEASE_JOIN_IOS_TEST_PID" pgid="$RELEASE_JOIN_IOS_TEST_PGID"
+  if [[ -n "$RELEASE_JOIN_IOS_TEST_NAME" && -s "$RELEASE_JOIN_IOS_TEST_LOG" ]] \
+      && release_join_ios_assert_selected_test_started >/dev/null 2>&1; then
+    RELEASE_JOIN_IOS_METHOD_STARTED=1
+  fi
   if [[ "$pgid" =~ ^[1-9][0-9]*$ ]]; then
     ios_release_network_terminate_process_group "$pgid" || status=1
   elif [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
@@ -974,12 +1150,17 @@ release_join_ios_assert_selected_test_started() {
 }
 
 release_join_ios_wait_selected_test_started() {
-  local timeout="${1:-${RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-60}}"
+  local timeout="${1:-${RELEASE_JOIN_IOS_LAUNCH_WAIT_SECS:-240}}"
   local expected="Test Case '-[NostrVpnIosUITests.NostrVpnReleaseJoinUITests $RELEASE_JOIN_IOS_TEST_NAME]' started."
   local deadline=$((SECONDS + timeout))
   while ((SECONDS < deadline)); do
     if grep -Fq "$expected" "$RELEASE_JOIN_IOS_TEST_LOG" 2>/dev/null; then
       return 0
+    fi
+    if grep -Fq 'Timed out while enabling automation mode.' \
+        "$RELEASE_JOIN_IOS_TEST_LOG" 2>/dev/null; then
+      echo "Apple UI Automation authentication failed before the test started. Unlocking alone does not authorize UI testing; retain the runner and wait for on-device approval before retrying." >&2
+      return 75
     fi
     if [[ -n "$RELEASE_JOIN_IOS_TEST_PID" ]] \
         && ! kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null; then
@@ -1048,6 +1229,6 @@ release_join_ios_finish_test() {
 release_join_ios_run_test() {
   local test_name="$1" log="$2"
   shift 2
-  release_join_ios_start_test "$test_name" "$log" "$@"
+  release_join_ios_start_test "$test_name" "$log" "$@" || return 1
   release_join_ios_finish_test
 }

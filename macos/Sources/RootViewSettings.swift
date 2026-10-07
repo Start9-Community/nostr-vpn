@@ -3,10 +3,29 @@ import CoreImage
 import SwiftUI
 
 extension RootView {
+    var settingsPane: some View {
+        ScrollViewReader { proxy in
+            pageScroll {
+                pageTitle("Settings", "gearshape")
+                settingsSection
+            }
+            .onAppear {
+                if settingsScrollToWireGuard {
+                    proxy.scrollTo("settings-wireguard", anchor: .top)
+                    settingsScrollToWireGuard = false
+                }
+            }
+        }
+    }
+
     var settingsSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            deviceSettings
             generalSettings
+            connectionSettings
+            exitDnsSettings
+            wireGuardUpstreamSettings
+                .id("settings-wireguard")
+            deviceSettings
             if state.paidRouteMarket.supported {
                 walletDisplaySettings
             }
@@ -17,6 +36,77 @@ extension RootView {
             networkSettings
             systemSettings
             diagnosticsSection
+        }
+    }
+
+    var connectionSettings: some View {
+        surface {
+            sectionHeader("Connection", systemImage: "network")
+            Toggle("Block internet if selected source disconnects", isOn: Binding(
+                get: { state.exitNodeLeakProtection },
+                set: { manager.setExitNodeLeakProtection($0) }
+            ))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .disabled(manager.actionInFlight)
+        }
+    }
+
+    var exitDnsSettings: some View {
+        surface {
+            sectionHeader("Exit DNS", systemImage: "lock.shield")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("MagicDNS stays local. Public DNS follows this policy while an internet exit is active.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Mode", selection: $exitDnsMode) {
+                Text("Automatic (recommended)").tag("automatic")
+                Text("Encrypted DNS").tag("encrypted")
+                Text("DNS through exit").tag("through_exit")
+            }
+            .accessibilityIdentifier("exit-dns-mode")
+
+            if exitDnsMode == "encrypted" {
+                Picker("Provider", selection: $exitDnsDohProvider) {
+                    Text("Cloudflare").tag("cloudflare")
+                    Text("Quad9").tag("quad9")
+                    Text("Custom DoH").tag("custom")
+                }
+                .accessibilityIdentifier("exit-dns-provider")
+                if exitDnsDohProvider == "custom" {
+                    TextField("HTTPS DoH URL", text: $exitDnsCustomDohUrl)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("exit-dns-custom-url")
+                    TextField("Bootstrap IPs, comma separated", text: $exitDnsCustomDohBootstrapIps)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("exit-dns-bootstrap-ips")
+                }
+            } else if exitDnsMode == "through_exit" {
+                TextField("DNS server IPs, comma separated", text: $exitDnsThroughExitServers)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("exit-dns-through-servers")
+                Text("These DNS packets are sent only through the selected exit.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Uses WireGuard profile DNS when supplied; otherwise Cloudflare encrypted DNS.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                manager.saveExitDnsSettings(
+                    mode: exitDnsMode,
+                    provider: exitDnsDohProvider,
+                    customUrl: exitDnsCustomDohUrl,
+                    bootstrapIps: exitDnsCustomDohBootstrapIps,
+                    throughExitServers: exitDnsThroughExitServers
+                )
+            } label: {
+                Label("Save Exit DNS", systemImage: "checkmark")
+            }
+            .disabled(manager.actionInFlight)
+            .accessibilityIdentifier("exit-dns-save")
         }
     }
 
@@ -265,17 +355,10 @@ extension RootView {
         .disabled(disabled)
     }
 
-    var wireGuardExitSettings: some View {
-        surface {
-            sectionHeader("WireGuard Upstream", systemImage: "network")
-            wireGuardUpstreamEditor
-        }
-    }
-
     var wireGuardUpstreamSettings: some View {
         surface {
             disclosureSection(
-                title: "Upstream VPN",
+                title: "WireGuard VPN",
                 systemImage: "network",
                 isExpanded: $wireGuardUpstreamExpanded,
                 font: .headline

@@ -32,12 +32,18 @@ case "$ARTIFACT_ACTION" in
 esac
 MACOS_MOBILE_DIRECTIONS="${NVPN_MACOS_RELEASE_MOBILE_DIRECTIONS:-all}"
 case "$MACOS_MOBILE_DIRECTIONS" in
-  all|pixel) ;;
+  all|pixel|macos-admin-iphone) ;;
   *)
-    echo "Unsupported NVPN_MACOS_RELEASE_MOBILE_DIRECTIONS=$MACOS_MOBILE_DIRECTIONS (expected all or pixel)" >&2
+    echo "Unsupported NVPN_MACOS_RELEASE_MOBILE_DIRECTIONS=$MACOS_MOBILE_DIRECTIONS (expected all, pixel, or macos-admin-iphone)" >&2
     exit 2
     ;;
 esac
+REUSE_PIXEL_RECEIPT="${NVPN_MACOS_RELEASE_REUSE_PIXEL_RECEIPT:-}"
+if [[ -n "$REUSE_PIXEL_RECEIPT" \
+  && ( "$MACOS_MOBILE_DIRECTIONS" != "all" || "$ARTIFACT_ACTION" != "run-only" ) ]]; then
+  echo "Retained Mac/Pixel coverage requires all directions with run-only artifacts" >&2
+  exit 2
+fi
 MACOS_RUST_PROFILE="${NVPN_MACOS_RUST_PROFILE:-release}"
 MACOS_XCODE_CONFIGURATION="${NVPN_MACOS_XCODE_CONFIGURATION:-Release}"
 if [[ "$MACOS_RUST_PROFILE" != "release" \
@@ -116,7 +122,7 @@ PUBLICATION_DIR="$RESULT_DIR/macos/publication"
 CACHED_APP="$PUBLICATION_DIR/Nostr VPN.app"
 CACHED_RECEIPT="$PUBLICATION_DIR/artifact.json"
 RUN_ONLY_RECEIPT="${NVPN_MACOS_RELEASE_RUN_ONLY_RECEIPT:-$RESULT_DIR/macos/artifact.json}"
-RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-15}"
+RELEASE_JOIN_UI_WAIT_SECS="${NVPN_RELEASE_JOIN_UI_WAIT_SECS:-30}"
 RELEASE_JOIN_DELIVERY_WAIT_SECS="${NVPN_RELEASE_JOIN_DELIVERY_WAIT_SECS:-15}"
 RELEASE_JOIN_CAMERA_WAIT_SECS="${NVPN_RELEASE_JOIN_CAMERA_WAIT_SECS:-30}"
 RELEASE_JOIN_IOS_SETUP_WAIT_SECS="${NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS:-90}"
@@ -162,6 +168,9 @@ cleanup() {
   local status=$?
   local cleanup_status=0
   trap - EXIT
+  if ((status != 0)); then
+    release_join_android_capture_failure_log "$RESULT_DIR/macos/android-service-failure.log"
+  fi
   if [[ -n "${RELEASE_JOIN_IOS_TEST_PID:-}" ]] \
       && kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null
   then
@@ -216,7 +225,7 @@ remote() {
   local remote_command argument
   # shellcheck disable=SC2016 # $HOME is expanded by the remote shell.
   printf -v remote_command \
-    'cd %q && env NVPN_APP_REPO_PATH=. NVPN_FIPS_REPO_PATH=%q NVPN_MACOS_RELEASE_JOIN_ARTIFACT_DIR=%q NVPN_EXTERNAL_HARNESS_DIGEST=%q NVPN_EXPECTED_APP_GIT_SHA=%q NVPN_EXPECTED_APP_GIT_TREE=%q NVPN_EXPECTED_HARNESS_GIT_SHA=%q NVPN_EXPECTED_HARNESS_GIT_TREE=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_FIPS_GIT_TREE=%q NVPN_EXPECTED_FIPS_VERSION=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q "$HOME"/%q %q' \
+    'cd %q && env NVPN_APP_REPO_PATH=. NVPN_FIPS_REPO_PATH=%q NVPN_MACOS_RELEASE_JOIN_ARTIFACT_DIR=%q NVPN_EXTERNAL_HARNESS_DIGEST=%q NVPN_EXPECTED_APP_GIT_SHA=%q NVPN_EXPECTED_APP_GIT_TREE=%q NVPN_EXPECTED_HARNESS_GIT_SHA=%q NVPN_EXPECTED_HARNESS_GIT_TREE=%q NVPN_EXPECTED_FIPS_GIT_SHA=%q NVPN_EXPECTED_FIPS_GIT_TREE=%q NVPN_EXPECTED_FIPS_VERSION=%q NVPN_EXPECTED_MACOS_SIGNING_IDENTITY_SHA1=%q NVPN_EXPECTED_MACOS_SIGNING_TEAM_ID=%q NVPN_EXPECTED_MACOS_SIGNER_CERT_SHA256=%q NVPN_RELEASE_JOIN_IOS_SETUP_WAIT_SECS=%q "$HOME"/%q %q' \
     "$GUEST_REPO" \
     "../fips" \
     "artifacts/macos-release-mobile-join" \
@@ -231,6 +240,7 @@ remote() {
     "$MACOS_SIGNING_IDENTITY" \
     "$EXPECTED_MACOS_TEAM" \
     "$EXPECTED_MACOS_CERT" \
+    "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
     "$REMOTE_SCRIPT_REL" \
     "$subcommand"
   for argument in "$@"; do
@@ -285,7 +295,7 @@ marker_value() {
 
 macos_reverse_desktop_visible() {
   grep -Fq \
-    "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_MANUAL_COMPLETE=$RELEASE_JOIN_ANDROID_ADMIN_ID" \
+    "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=$RELEASE_JOIN_ANDROID_ADMIN_ID" \
     "$1" 2>/dev/null \
     && release_join_now_ms
 }
@@ -304,6 +314,12 @@ macos_reverse_pixel_visible() {
 macos_mobile_direction_cleanup() {
   local status=$? observer_pid
   trap - EXIT
+  if [[ "$status" -ne 0 ]]; then
+    release_join_android_capture_failure_log \
+      "$RESULT_DIR/macos/$MACOS_MOBILE_DIRECTION_LABEL-android-service-failure.log"
+    remote diagnostics >"$RESULT_DIR/macos/$MACOS_MOBILE_DIRECTION_LABEL-daemon-diagnostic.log" \
+      2>&1 || true
+  fi
   if [[ -n "${RELEASE_JOIN_IOS_TEST_PID:-}" ]] \
       && kill -0 "$RELEASE_JOIN_IOS_TEST_PID" 2>/dev/null
   then
@@ -333,6 +349,9 @@ macos_mobile_direction_cleanup() {
   if [[ "$status" -ne 0 && -s "$PRIVATE_DIR/android-ui.xml" ]]; then
     cp "$PRIVATE_DIR/android-ui.xml" \
       "$RESULT_DIR/macos/${MACOS_MOBILE_DIRECTION_LABEL}-android-ui.xml"
+  fi
+  if ! release_join_android_stop; then
+    [[ "$status" -ne 0 ]] || status=1
   fi
   exit "$status"
 }
@@ -489,6 +508,54 @@ print(json.load(open(sys.argv[1])).get("artifactReceiptSha256", ""))
     echo "Remote macOS verification does not bind the selected run-only receipt" >&2
     return 1
   }
+}
+
+reuse_pixel_coverage() {
+  node --input-type=module - \
+    "$ROOT" "$REUSE_PIXEL_RECEIPT" "$RESULT_DIR/macos/artifact.json" \
+    "$ANDROID_ARTIFACT_RECEIPT" "$ANDROID_INSTALL_RECEIPT" \
+    "$RESULT_DIR/macos" <<'JS'
+import { createHash } from 'node:crypto'
+import { lstatSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+const [root, source, artifactPath, androidPath, installPath, output] = process.argv.slice(2)
+const { readRequiredJson, validateMacosPixelJoinReceipt } = await import(
+  pathToFileURL(join(root, 'scripts/release-artifact-provenance-lib.mjs'))
+)
+if (!lstatSync(source).isFile() || lstatSync(source).isSymbolicLink()) {
+  throw new Error('Retained Mac/Pixel receipt must be a regular file.')
+}
+const bytes = readFileSync(source)
+const hash = (value) => createHash('sha256').update(value).digest('hex')
+const timings = validateMacosPixelJoinReceipt({
+  receipt: JSON.parse(bytes),
+  artifactReceipt: readRequiredJson(artifactPath, 'Selected macOS artifact'),
+  artifactReceiptSha256: hash(readFileSync(artifactPath)),
+  androidArtifact: readRequiredJson(androidPath, 'Selected Android artifact'),
+  androidArtifactReceiptSha256: hash(readFileSync(androidPath)),
+  androidInstallReceiptSha256: hash(readFileSync(installPath)),
+  androidInstallReceiptSize: readFileSync(installPath).length,
+})
+function retainExact(path, value) {
+  const expected = Buffer.from(value)
+  try {
+    writeFileSync(path, expected, { flag: 'wx' })
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error
+    const existing = lstatSync(path)
+    if (!existing.isFile() || existing.isSymbolicLink()
+      || !readFileSync(path).equals(expected)) {
+      throw new Error('Existing retained Mac/Pixel evidence does not match the selected receipt.')
+    }
+  }
+}
+retainExact(join(output, 'reused-pixel-summary.json'), bytes)
+retainExact(join(output, 'delivery-times.tsv'),
+  ['macOS-admin-to-Android-manual', 'Android-admin-to-macOS-manual']
+    .map((label) => `${label}\t${timings[label]}\n`).join(''))
+console.log(hash(bytes))
+JS
 }
 
 write_component_proof() {
@@ -660,7 +727,7 @@ if [[ "$ARTIFACT_ACTION" == "full" || "$ARTIFACT_ACTION" == "run-only" ]]; then
     echo "macOS/mobile Release join gate requires exact artifact reuse" >&2
     exit 2
   }
-  if [[ "$MACOS_MOBILE_DIRECTIONS" == "all" ]]; then
+  if [[ "$MACOS_MOBILE_DIRECTIONS" != "pixel" ]]; then
     release_join_validate_reused_artifacts || {
       echo "macOS/mobile Release join gate rejected the exact mobile artifacts" >&2
       exit 1
@@ -693,7 +760,7 @@ if [[ "$ARTIFACT_ACTION" == "full" || "$ARTIFACT_ACTION" == "run-only" ]]; then
     --expected-android-fips-sha "$RELEASE_JOIN_FIPS_SHA" \
     --expected-android-fips-tree "$RELEASE_JOIN_FIPS_TREE" \
     --expected-android-fips-version "$RELEASE_JOIN_FIPS_VERSION" \
-    "${android_install_validation[@]}" \
+    ${android_install_validation[@]+"${android_install_validation[@]}"} \
     >/dev/null
 fi
 
@@ -755,6 +822,14 @@ if [[ "$ARTIFACT_ACTION" != "full" && "$ARTIFACT_ACTION" != "run-only" ]]; then
   exit 0
 fi
 
+REUSED_PIXEL_RECEIPT_SHA256=""
+if [[ -n "$REUSE_PIXEL_RECEIPT" ]]; then
+  REUSED_PIXEL_RECEIPT_SHA256="$(reuse_pixel_coverage)"
+  [[ "$REUSED_PIXEL_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+  echo "Retained exact Mac/Pixel pairing and relaunch evidence; running both iPhone directions"
+else
+  rm -f "$RESULT_DIR/macos/delivery-times.tsv"
+fi
 remote_app_ownership_armed=1
 
 ANDROID_REQUESTED="${NVPN_ANDROID_SERIAL:-${ANDROID_SERIAL:-}}"
@@ -774,7 +849,6 @@ release_join_assert_one_android_package || {
 }
 RELEASE_JOIN_DEVICE_MUTATION_ALLOWED=1
 export RELEASE_JOIN_DEVICE_MUTATION_ALLOWED
-rm -f "$RESULT_DIR/macos/delivery-times.tsv"
 macos_admin_android_status=0
 android_admin_macos_status=0
 macos_admin_ios_status=0
@@ -783,6 +857,8 @@ DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE=0
 IPHONE_ADMIN_DESKTOP_JOINER_RELAUNCH_DURABLE=0
 
 # macOS admin -> physical Android joiner.
+if [[ "$MACOS_MOBILE_DIRECTIONS" != "macos-admin-iphone" \
+  && -z "$REUSED_PIXEL_RECEIPT_SHA256" ]]; then
 set +e
 (
 set -euo pipefail
@@ -793,7 +869,7 @@ ios_test_pid_owner=""
 acceptance_observer_pids=()
 trap macos_mobile_direction_cleanup EXIT
 prepare_macos_mobile_direction "$MACOS_MOBILE_DIRECTION_LABEL"
-release_join_reset_android_state
+release_join_android_open_network_setup
 desktop_admin_log="$RESULT_DIR/macos/desktop-admin.log"
 remote create-admin "ReleaseDesktopAdmin" >"$desktop_admin_log" 2>&1
 DESKTOP_ADMIN_ID="$(marker_value "$desktop_admin_log" NVPN_RELEASE_JOIN_ADMIN_ID)"
@@ -802,6 +878,7 @@ release_join_valid_npub "$DESKTOP_ADMIN_ID"
 [[ -n "$DESKTOP_NETWORK_ID" ]]
 release_join_android_manual_submit "$DESKTOP_ADMIN_ID" "$DESKTOP_NETWORK_ID" \
   >"$RESULT_DIR/macos/android-manual-submit.log" 2>&1
+release_join_android_wait_vpn_connected
 desktop_add_log="$RESULT_DIR/macos/desktop-add-android.log"
 desktop_android_log_offset="$(remote daemon-log-offset)"
 remote admin-add "$RELEASE_JOIN_ANDROID_JOINER_ID" ReleaseGatePhone \
@@ -858,7 +935,7 @@ ios_test_pid_owner=""
 acceptance_observer_pids=()
 trap macos_mobile_direction_cleanup EXIT
 prepare_macos_mobile_direction "$MACOS_MOBILE_DIRECTION_LABEL"
-release_join_reset_android_state
+release_join_android_open_network_setup
 release_join_android_create_admin
 desktop_joiner_identity_log="$RESULT_DIR/macos/android-admin-desktop-identity.log"
 remote joiner-id >"$desktop_joiner_identity_log"
@@ -884,6 +961,7 @@ wait_log_marker "$desktop_join_log" NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10
 android_admin_log="$RESULT_DIR/macos/android-admin-add-desktop.log"
 release_join_android_manual_admin_tap "$DESKTOP_JOINER_ID" \
   | tee "$android_admin_log"
+remote approval-start
 android_submitted_ms="$(
   sed -n 's/.*NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS=//p' \
     "$android_admin_log" | tail -n 1
@@ -917,8 +995,9 @@ if ((android_admin_macos_status != 0)); then
   echo "Pixel admin -> macOS joiner failed; continuing independent Apple checks" >&2
 fi
 finish_macos_mobile_direction pixel-admin-macos-joiner
+fi
 
-if [[ "$MACOS_MOBILE_DIRECTIONS" == "all" ]]; then
+if [[ "$MACOS_MOBILE_DIRECTIONS" != "pixel" ]]; then
 # macOS admin -> physical iPhone joiner. XCTest only drives the shipped
 # accessibility tree; the app receives no launch arguments or environment.
 set +e
@@ -931,7 +1010,6 @@ ios_test_pid_owner=""
 acceptance_observer_pids=()
 trap macos_mobile_direction_cleanup EXIT
 prepare_macos_mobile_direction "$MACOS_MOBILE_DIRECTION_LABEL"
-release_join_restart_ios_in_place
 desktop_ios_admin_log="$RESULT_DIR/macos/desktop-ios-admin.log"
 remote create-admin "ReleaseMacIphoneAdmin" >"$desktop_ios_admin_log" 2>&1
 DESKTOP_IOS_ADMIN_ID="$(
@@ -943,10 +1021,12 @@ DESKTOP_IOS_NETWORK_ID="$(
 release_join_valid_npub "$DESKTOP_IOS_ADMIN_ID"
 [[ -n "$DESKTOP_IOS_NETWORK_ID" ]]
 ios_join_log="$(ios_log macos-admin-iphone-join)"
+peer_accepted_filename="nvpn-peer-accepted-$(uuidgen).txt"
 release_join_ios_start_test \
   testManualJoinAndRequireRosterCompletion "$ios_join_log" \
   "NVPN_RELEASE_JOIN_ADMIN_ID=$DESKTOP_IOS_ADMIN_ID" \
-  "NVPN_RELEASE_JOIN_NETWORK_ID=$DESKTOP_IOS_NETWORK_ID"
+  "NVPN_RELEASE_JOIN_NETWORK_ID=$DESKTOP_IOS_NETWORK_ID" \
+  "NVPN_RELEASE_JOIN_PEER_ACCEPTED_FILENAME=$peer_accepted_filename"
 ios_test_pid_owner="$(
   macos_mobile_direction_child_owner "$RELEASE_JOIN_IOS_TEST_PID"
 )"
@@ -957,9 +1037,13 @@ IOS_JOINER_ID="$(
   ios_marker_value_from "$ios_join_log" NVPN_RELEASE_JOIN_JOINER_ID
 )"
 release_join_valid_npub "$IOS_JOINER_ID"
+# Public entry, restoring transport settings, and carrier authentication are
+# separate setup stages. Let the trusted runner finish them before approval.
 release_join_ios_wait_marker \
-  NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 "$RELEASE_JOIN_IOS_SETUP_WAIT_SECS" \
+  NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 \
+  "$((2 * RELEASE_JOIN_IOS_SETUP_WAIT_SECS + RELEASE_JOIN_UI_WAIT_SECS))" \
   || { echo "iPhone did not submit through shipped manual-join controls" >&2; exit 1; }
+remote carrier-ready >"$RESULT_DIR/macos/desktop-iphone-carrier-ready.log" 2>&1
 desktop_add_ios_log="$RESULT_DIR/macos/desktop-add-iphone.log"
 desktop_iphone_log_offset="$(remote daemon-log-offset)"
 remote admin-add "$IOS_JOINER_ID" ReleaseGateIphone \
@@ -970,18 +1054,28 @@ wait_log_marker \
   "$desktop_add_ios_log" NVPN_RELEASE_JOIN_APPROVAL_SUBMITTED_MS= 10
 desktop_ios_submitted_ms="$(release_join_now_ms)"
 release_join_ios_wait_marker \
-  NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS= "$RELEASE_JOIN_DELIVERY_WAIT_SECS" \
+  NVPN_RELEASE_JOIN_ROSTER_APPLIED_MS= "$((RELEASE_JOIN_DELIVERY_WAIT_SECS + 15))" \
   || {
     echo "iPhone did not receive the macOS signed roster in time" >&2
     exit 1
   }
 desktop_ios_completed_ms="$(release_join_now_ms)"
+# Retain a late delivery's actual acknowledgment and relaunch evidence before
+# reporting its timing failure. Interrupting XCTest at the acceptance deadline
+# hides which delivery stage was late and prevents orderly device cleanup.
+desktop_ios_delivery_status=0
 assert_delivery_deadline \
   "$desktop_ios_submitted_ms" "$desktop_ios_completed_ms" \
-  "macOS-admin-to-iPhone-manual"
+  "macOS-admin-to-iPhone-manual" || desktop_ios_delivery_status=$?
 wait_log_marker \
   "$desktop_add_ios_log" "NVPN_RELEASE_JOIN_ADMIN_ACCEPTED=$IOS_JOINER_ID"
 wait_log_marker "$desktop_add_ios_log" NVPN_MACOS_RELEASE_APP_HOLDING=1
+remote require-delivery-log \
+  "$IOS_JOINER_ID" "$desktop_iphone_log_offset" \
+  >"$RESULT_DIR/macos/desktop-add-iphone-delivery.txt" \
+  2>"$RESULT_DIR/macos/desktop-add-iphone-daemon.log"
+release_join_signal_ios_peer_accepted \
+  "$peer_accepted_filename" "$DESKTOP_IOS_ADMIN_ID"
 release_join_ios_finish_test \
   || {
     echo "iPhone did not receive and retain the macOS signed roster" >&2
@@ -997,15 +1091,12 @@ iphone_joiner_relaunch_admin="$(
     exit 1
   }
 DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE=1
-remote require-delivery-log \
-  "$IOS_JOINER_ID" "$desktop_iphone_log_offset" \
-  >"$RESULT_DIR/macos/desktop-add-iphone-delivery.txt" \
-  2>"$RESULT_DIR/macos/desktop-add-iphone-daemon.log"
 wait "$remote_pid"
 remote_pid=""
 remote_pid_owner=""
 remote verify "$IOS_JOINER_ID" \
   >"$RESULT_DIR/macos/desktop-ios-admin-verify.log"
+exit "$desktop_ios_delivery_status"
 )
 macos_admin_ios_status=$?
 set -e
@@ -1017,6 +1108,7 @@ fi
 finish_macos_mobile_direction macos-admin-iphone-joiner
 
 # Physical iPhone admin -> macOS joiner.
+if [[ "$MACOS_MOBILE_DIRECTIONS" == "all" ]]; then
 set +e
 (
 set -euo pipefail
@@ -1027,7 +1119,6 @@ ios_test_pid_owner=""
 acceptance_observer_pids=()
 trap macos_mobile_direction_cleanup EXIT
 prepare_macos_mobile_direction "$MACOS_MOBILE_DIRECTION_LABEL"
-release_join_restart_ios_in_place
 ios_create_admin "Release iPhone macOS admin"
 desktop_ios_join_log="$RESULT_DIR/macos/iphone-admin-desktop-join.log"
 remote manual-join \
@@ -1041,16 +1132,18 @@ DESKTOP_IOS_JOINER_ID="$(
 )"
 release_join_valid_npub "$DESKTOP_IOS_JOINER_ID"
 wait_log_marker "$desktop_ios_join_log" NVPN_RELEASE_JOIN_MANUAL_SUBMITTED=1 10
-if grep -Fq "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS=" \
+if grep -Fq "NVPN_RELEASE_JOIN_MARKER NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=" \
   "$desktop_ios_join_log"
 then
-  echo "macOS joiner completed before the iPhone approval" >&2
+  echo "macOS joiner accepted a roster before the iPhone approval" >&2
   exit 1
 fi
 ios_admin_log="$(ios_log iphone-admin-macos-add)"
+ios_peer_accepted_filename="nvpn-peer-accepted-$(uuidgen).txt"
 release_join_ios_start_test \
   testManualAdminAddRequiresRosterProgress "$ios_admin_log" \
-  "NVPN_RELEASE_JOIN_JOINER_ID=$DESKTOP_IOS_JOINER_ID"
+  "NVPN_RELEASE_JOIN_JOINER_ID=$DESKTOP_IOS_JOINER_ID" \
+  "NVPN_RELEASE_JOIN_PEER_ACCEPTED_FILENAME=$ios_peer_accepted_filename"
 ios_test_pid_owner="$(
   macos_mobile_direction_child_owner "$RELEASE_JOIN_IOS_TEST_PID"
 )"
@@ -1065,10 +1158,15 @@ ios_admin_submitted_ms="$(
 )"
 [[ "$ios_admin_submitted_ms" =~ ^[0-9]+$ ]]
 ios_admin_observed_submitted_ms="$(release_join_now_ms)"
+remote approval-start
 wait_log_marker \
-  "$desktop_ios_join_log" NVPN_RELEASE_JOIN_MANUAL_COMPLETE_MS \
-  "$RELEASE_JOIN_DELIVERY_WAIT_SECS"
+  "$desktop_ios_join_log" \
+  "NVPN_RELEASE_JOIN_ROSTER_PARTICIPANT=$RELEASE_JOIN_IOS_ADMIN_ID" \
+  "$((RELEASE_JOIN_DELIVERY_WAIT_SECS + 15))"
 ios_admin_remote_completed_ms="$(release_join_now_ms)"
+echo "iPhone-to-macOS approval observed after $((ios_admin_remote_completed_ms - ios_admin_observed_submitted_ms))ms"
+release_join_signal_ios_peer_accepted \
+  "$ios_peer_accepted_filename" "$DESKTOP_IOS_JOINER_ID"
 release_join_ios_finish_test \
   || {
     echo "iPhone admin did not retain the exact macOS joiner" >&2
@@ -1085,8 +1183,12 @@ ios_admin_phone_elapsed_ms=$((ios_admin_applied_ms - ios_admin_submitted_ms))
 ios_admin_delivery_elapsed_ms="$ios_admin_remote_elapsed_ms"
 ((ios_admin_phone_elapsed_ms <= ios_admin_delivery_elapsed_ms)) \
   || ios_admin_delivery_elapsed_ms="$ios_admin_phone_elapsed_ms"
+# Complete both durability checks even when delivery was late, as in the
+# opposite direction. The observation window does not widen the 15s limit.
+ios_admin_delivery_status=0
 assert_delivery_duration \
-  "$ios_admin_delivery_elapsed_ms" "iPhone-admin-to-macOS-manual"
+  "$ios_admin_delivery_elapsed_ms" "iPhone-admin-to-macOS-manual" \
+  || ios_admin_delivery_status=$?
 ios_admin_relaunch_joiner="$(
   ios_marker_value_from \
     "$ios_admin_log" NVPN_RELEASE_JOIN_ADMIN_RELAUNCH_DURABLE
@@ -1104,6 +1206,7 @@ finish_remote "$desktop_ios_join_log" \
   }
 remote verify "$RELEASE_JOIN_IOS_ADMIN_ID" \
   >"$RESULT_DIR/macos/desktop-ios-joiner-verify.log"
+((ios_admin_delivery_status == 0))
 )
 ios_admin_macos_status=$?
 set -e
@@ -1113,6 +1216,7 @@ else
   IPHONE_ADMIN_DESKTOP_JOINER_RELAUNCH_DURABLE=1
 fi
 finish_macos_mobile_direction iphone-admin-macos-joiner
+fi
 release_join_launch_ios_release
 release_join_assert_one_ios_process
 fi
@@ -1125,18 +1229,27 @@ if ((macos_admin_android_status != 0 \
   exit 1
 fi
 
+if [[ "$MACOS_MOBILE_DIRECTIONS" == "macos-admin-iphone" ]]; then
+  echo "MACOS_MOBILE_JOIN_DIAGNOSTIC_OK macos-admin-iphone"
+  exit 0
+fi
+
+if [[ "$MACOS_MOBILE_DIRECTIONS" == "all" ]]; then
+  : "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact retained iOS receipt is required}"
+fi
+
 python3 - \
   "$RESULT_DIR/macos/summary.json" \
   "$RESULT_DIR/macos/delivery-times.tsv" \
   "$RESULT_DIR/macos/artifact.json" \
-  "${NVPN_RELEASE_JOIN_IOS_RECEIPT:?exact retained iOS receipt is required}" \
+  "${NVPN_RELEASE_JOIN_IOS_RECEIPT:-}" \
   "$DESKTOP_ADMIN_IPHONE_JOINER_RELAUNCH_DURABLE" \
   "$IPHONE_ADMIN_DESKTOP_JOINER_RELAUNCH_DURABLE" \
   "$APP_GIT_SHA" \
   "$APP_GIT_TREE" \
   "$ANDROID_ARTIFACT_RECEIPT" \
   "$ANDROID_INSTALL_RECEIPT" \
-  "$MACOS_MOBILE_DIRECTIONS" <<'PY'
+  "$MACOS_MOBILE_DIRECTIONS" "$REUSED_PIXEL_RECEIPT_SHA256" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -1157,6 +1270,14 @@ pixel_timings = {
     "Android-admin-to-macOS-manual",
 }
 selected = sys.argv[11]
+reused_pixel_sha256 = sys.argv[12]
+if reused_pixel_sha256 and (
+    selected != "all"
+    or hashlib.sha256(
+        pathlib.Path(sys.argv[1]).with_name("reused-pixel-summary.json").read_bytes()
+    ).hexdigest() != reused_pixel_sha256
+):
+    raise SystemExit("Retained Mac/Pixel evidence changed during the iPhone run")
 expected_timings = all_timings if selected == "all" else pixel_timings
 if set(timings) != expected_timings or any(
     elapsed < 0 or elapsed > 15_000 for elapsed in timings.values()
@@ -1165,8 +1286,10 @@ if set(timings) != expected_timings or any(
 artifact_path = pathlib.Path(sys.argv[3])
 artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
 component_proof = artifact.get("componentInputProof") or {}
-ios_artifact_path = pathlib.Path(sys.argv[4])
-ios_artifact = json.loads(ios_artifact_path.read_text(encoding="utf-8"))
+ios_artifact_path = None if selected == "pixel" else pathlib.Path(sys.argv[4])
+ios_artifact = None if selected == "pixel" else json.loads(
+    ios_artifact_path.read_text(encoding="utf-8")
+)
 (
     desktop_admin_iphone_joiner_relaunch,
     iphone_admin_desktop_joiner_relaunch,
@@ -1211,10 +1334,9 @@ ios_identity_keys = (
     "signerCertificateSha256",
     "installedBundleIdentifier",
 )
-if (
+if ios_artifact is not None and (
     ios_artifact.get("receiptSchema") != 2
-    or ios_artifact.get("artifactType")
-    != "iOS Ad Hoc Release join-test variant"
+    or ios_artifact.get("artifactType") != "iOS Ad Hoc Release join-test variant"
     or ios_artifact.get("companySigningVerified") is not True
     or any(not ios_artifact.get(key) for key in ios_identity_keys)
 ):
@@ -1239,45 +1361,40 @@ if (
     )
 ):
     raise SystemExit("Android join artifact/install receipt pair is not exact")
+artifact_summary = {
+    "type": "signed macOS Release app",
+    "appGitSha": artifact["appGitSha"],
+    "appGitTree": artifact["appGitTree"],
+    "harnessGitSha": app_sha,
+    "harnessGitTree": app_tree,
+    "artifactReceiptSha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+    "appExecutableSha256": artifact["appExecutableSha256"],
+    "android": {
+        "artifactReceiptSha256": hashlib.sha256(
+            android_artifact_receipt.read_bytes()
+        ).hexdigest(),
+        "artifactReceiptSize": android_artifact_receipt.stat().st_size,
+        "installReceiptSha256": hashlib.sha256(
+            android_install_receipt.read_bytes()
+        ).hexdigest(),
+        "installReceiptSize": android_install_receipt.stat().st_size,
+        **{key: android_artifact[key] for key in android_identity_keys},
+    },
+}
+if ios_artifact is not None:
+    artifact_summary["ios"] = {
+        "artifactReceiptSha256": hashlib.sha256(
+            ios_artifact_path.read_bytes()
+        ).hexdigest(),
+        **{key: ios_artifact[key] for key in ios_identity_keys},
+    }
+
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(
         {
             "schema": 1,
             "platform": "macos",
-            "artifact": {
-                "type": "signed macOS Release app",
-                "appGitSha": artifact["appGitSha"],
-                "appGitTree": artifact["appGitTree"],
-                "harnessGitSha": app_sha,
-                "harnessGitTree": app_tree,
-                "artifactReceiptSha256": hashlib.sha256(
-                    artifact_path.read_bytes()
-                ).hexdigest(),
-                "appExecutableSha256": artifact["appExecutableSha256"],
-                "android": {
-                    "artifactReceiptSha256": hashlib.sha256(
-                        android_artifact_receipt.read_bytes()
-                    ).hexdigest(),
-                    "artifactReceiptSize": android_artifact_receipt.stat().st_size,
-                    "installReceiptSha256": hashlib.sha256(
-                        android_install_receipt.read_bytes()
-                    ).hexdigest(),
-                    "installReceiptSize": android_install_receipt.stat().st_size,
-                    **{
-                        key: android_artifact[key]
-                        for key in android_identity_keys
-                    },
-                },
-                "ios": {
-                    "artifactReceiptSha256": hashlib.sha256(
-                        ios_artifact_path.read_bytes()
-                    ).hexdigest(),
-                    **{
-                        key: ios_artifact[key]
-                        for key in ios_identity_keys
-                    },
-                },
-            },
+            "artifact": artifact_summary,
             "builtOnHost": True,
             "builtOnTestVm": False,
             "remoteImportVerified": True,
@@ -1288,6 +1405,8 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
             "fixtureInvoked": False,
             "acceptedSelectorSemantics": "participant-state-not-pending",
             "selectedDirections": selected,
+            **({"reusedPixelReceiptSha256": reused_pixel_sha256}
+               if reused_pixel_sha256 else {}),
             "desktopAdminAndroidJoiner": True,
             "androidAdminDesktopJoiner": True,
             "desktopAdminIphoneJoiner": selected == "all",

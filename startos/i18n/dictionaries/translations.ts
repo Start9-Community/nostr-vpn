@@ -32,6 +32,7 @@ export default {
     27: 'Ya no se puede acceder a ese servicio por Nostr VPN.',
     28: 'Un servicio compartido está accesible',
     29: 'Un servicio compartido no está accesible',
+    30: 'La contraseña actual del panel de control deja de funcionar de inmediato, y cualquiera que haya iniciado sesión con ella pierde el acceso. La nueva contraseña se muestra una sola vez.',
   },
   de_DE: {
     0: 'Nostr VPN wird gestartet',
@@ -64,6 +65,7 @@ export default {
     27: 'Dieser Dienst ist über Nostr VPN nicht mehr erreichbar.',
     28: 'Ein freigegebener Dienst ist erreichbar',
     29: 'Ein freigegebener Dienst ist nicht erreichbar',
+    30: 'Das aktuelle Passwort der Steuerungskonsole funktioniert sofort nicht mehr, und wer damit angemeldet ist, wird ausgesperrt. Das neue Passwort wird nur einmal angezeigt.',
   },
   pl_PL: {
     0: 'Uruchamianie Nostr VPN',
@@ -96,6 +98,7 @@ export default {
     27: 'Ta usługa nie jest już osiągalna przez Nostr VPN.',
     28: 'Udostępniona usługa jest osiągalna',
     29: 'Udostępniona usługa nie jest osiągalna',
+    30: 'Obecne hasło panelu sterowania natychmiast przestaje działać, a każdy, kto jest nim zalogowany, traci dostęp. Nowe hasło jest wyświetlane tylko raz.',
   },
   fr_FR: {
     0: 'Démarrage de Nostr VPN',
@@ -128,5 +131,6 @@ export default {
     27: 'Ce service n’est plus accessible via Nostr VPN.',
     28: 'Un service partagé est accessible',
     29: 'Un service partagé n’est pas accessible',
+    30: 'Le mot de passe actuel du panneau de configuration cesse immédiatement de fonctionner, et toute personne connectée avec lui perd l’accès. Le nouveau mot de passe n’est affiché qu’une seule fois.',
   },
 } satisfies Record<string, LangDict>

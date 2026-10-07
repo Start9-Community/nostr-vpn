@@ -1207,8 +1207,43 @@ for invalid in (
 PY
 }
 
+test_roaming_network_change_probe_keeps_failure_budget_calibrated() {
+  python3 - "$ROOT_DIR/scripts/e2e-fips-roaming-docker.sh" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+if 'NETWORK_CHANGE_PAYLOAD_PROBE_INTERVAL_SECS="${NVPN_E2E_NETWORK_CHANGE_PAYLOAD_PROBE_INTERVAL_SECS:-1}"' not in source:
+    raise SystemExit("network-change probe interval is not independently calibrated")
+
+section = source[
+    source.index("run_underlay_network_change() {"):
+    source.index("\ncleanup\n", source.index("run_underlay_network_change() {"))
+]
+calls = re.findall(r"start_payload_probe\s+node-[ab][^\n]+", section)
+if len(calls) != 2:
+    raise SystemExit(f"expected two network-change payload probes, found {calls}")
+for call in calls:
+    if not call.endswith('"$NETWORK_CHANGE_PAYLOAD_PROBE_INTERVAL_SECS"'):
+        raise SystemExit(f"network-change payload probe uses the flap cadence: {call}")
+PY
+}
+
+test_roaming_direct_path_assertion_uses_observed_route() {
+  local script="$ROOT_DIR/scripts/e2e-fips-roaming-docker.sh"
+  local runtime_status="$ROOT_DIR/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_status.rs"
+  assert_file_contains "$runtime_status" \
+    "status.last_outbound_route = peer_link.last_outbound_route.clone();" \
+    "daemon status preserves the observed FIPS payload route"
+  assert_file_contains "$script" \
+    '(.fips_last_outbound_route? == "direct")' \
+    "roaming direct-path assertion uses the observed payload route"
+}
+
 test_dockerfile_supports_local_base_images() {
   local dockerfile="$ROOT_DIR/Dockerfile.e2e"
+  local paid_exit_dockerfile="$ROOT_DIR/Dockerfile.paid-exit-e2e"
   local compose
 
   assert_file_not_contains "$dockerfile" "syntax=docker/dockerfile" "Dockerfile external frontend directive"
@@ -1218,7 +1253,15 @@ test_dockerfile_supports_local_base_images() {
   assert_file_contains "$dockerfile" 'FROM ${NVPN_E2E_RUNTIME_IMAGE} AS runtime' "runtime image from"
   assert_file_contains "$dockerfile" "ARG NVPN_E2E_BUILDER_APT_INSTALL=1" "builder apt arg"
   assert_file_contains "$dockerfile" "ARG NVPN_E2E_RUNTIME_APT_INSTALL=1" "runtime apt arg"
+  assert_file_contains "$dockerfile" "COPY vendor ./vendor" "vendored Cashu source copy"
+  assert_file_contains "$paid_exit_dockerfile" "COPY vendor ./vendor" "paid-exit vendored Cashu source copy"
   assert_file_contains "$dockerfile" "[patch.crates-io]" "local FIPS Cargo patch table"
+  assert_file_contains "$dockerfile" 'nvpn-fips-core = { path = "/app/fips/crates/fips-core" }' "renamed local FIPS core patch"
+  assert_file_contains "$dockerfile" 'nvpn-fips-endpoint = { path = "/app/fips/crates/fips-endpoint" }' "renamed local FIPS endpoint patch"
+  assert_file_contains "$dockerfile" 'nvpn-fips-identity = { path = "/app/fips/crates/fips-identity" }' "renamed local FIPS identity patch"
+  assert_file_contains "$paid_exit_dockerfile" 'nvpn-fips-core = { path = "/app/fips/crates/fips-core" }' "paid-exit renamed local FIPS core patch"
+  assert_file_contains "$paid_exit_dockerfile" 'nvpn-fips-endpoint = { path = "/app/fips/crates/fips-endpoint" }' "paid-exit renamed local FIPS endpoint patch"
+  assert_file_contains "$paid_exit_dockerfile" 'nvpn-fips-identity = { path = "/app/fips/crates/fips-identity" }' "paid-exit renamed local FIPS identity patch"
 
   for compose in \
     "$ROOT_DIR/docker-compose.e2e.yml" \
@@ -1565,6 +1608,8 @@ test_phase_argument_selection
 test_phase_summary_pipeline_columns
 test_start_compose_services_supports_skip_build
 test_roaming_network_change_rebind_log_contract
+test_roaming_network_change_probe_keeps_failure_budget_calibrated
+test_roaming_direct_path_assertion_uses_observed_route
 test_dockerfile_supports_local_base_images
 test_perf_harness_supports_cpu_stress
 test_perf_metadata_maps_e2e_env

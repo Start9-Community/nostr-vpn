@@ -1,49 +1,53 @@
 #[cfg(feature = "paid-exit")]
 mod paid_exit {
     use std::collections::HashSet;
-    use std::fmt::Write as _;
     use std::io::Write as _;
     use std::process::Stdio;
 
     use nostr_sdk::prelude::ToBech32;
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     use nostr_vpn_core::paid_route_store::{
-        AttachPaidRouteBuyerSpilmanChannelRequest, BuildPaidRouteBuyerPaymentEnvelopeKind,
-        BuildPaidRouteBuyerPaymentEnvelopeRequest, BuildPaidRouteBuyerSignedPaymentEnvelopeRequest,
+        AttachPaidRouteBuyerSpilmanChannelRequest, BuildPaidRouteBuyerPaymentEnvelopeRequest,
+    };
+    use nostr_vpn_core::paid_route_store::{
+        BuildPaidRouteBuyerPaymentEnvelopeKind, BuildPaidRouteBuyerSignedPaymentEnvelopeRequest,
         OpenPaidRouteBuyerSessionRequest, PaidRouteChannelRecord, PaidRouteChannelRole,
-        PaidRouteLifecycleStatus, PaidRouteSellerCollectionState, PaidRouteStore, PaidRouteWalletState,
-        UpdatePaidRouteSessionProbeRequest, load_paid_route_store,
+        PaidRouteLifecycleStatus, PaidRouteSellerCollectionState, PaidRouteStore,
+        PaidRouteWalletState, UpdatePaidRouteSessionProbeRequest, load_paid_route_store,
         normalize_paid_route_mint_url, paid_route_store_file_path, update_paid_route_store,
     };
     use nostr_vpn_core::paid_routes::{
-        ManualPaidExitProvider, PaidExitConfig, PaidExitUpstream, PaidRouteAccessState, PaidRouteCountryClaim,
-        PaidRouteOffer, PaidRouteQualityMetrics, PaidRouteRoutingDecision,
+        ManualPaidExitProvider, PaidExitConfig, PaidExitUpstream, PaidRouteAccessState,
+        PaidRouteCountryClaim, PaidRouteOffer, PaidRouteQualityMetrics, PaidRouteRoutingDecision,
         normalize_paid_route_country_code, paid_route_country_claim,
     };
     use serde_json::json;
 
     use crate::native_state::{
         NativePaidRouteChannelState, NativePaidRouteOfferState, NativePaidRouteSessionState,
-        NativePaidRouteWalletMintState,
+        NativePaidRouteWalletHistoryState, NativePaidRouteWalletMintState,
     };
 
     use super::{
         AppConfig, Command, CommandWindowExt, Context, DaemonRuntimeState, InternetSource,
-        NVPN_BIN_ENV, NativeAppRuntime,
-        NativePaidExitSellerState, NativePaidRouteMarketFilterState, NativePaidRouteMarketState,
+        NVPN_BIN_ENV, NativeAppRuntime, NativePaidExitSellerState,
+        NativePaidRouteMarketFilterState, NativePaidRouteMarketState,
         NativePaidRoutePaymentActionState, NativePaidRouteWalletActionState,
-        NativePaidRouteWalletState, Output, PaidExitSellerEgress, Path, PathBuf,
-        PortMappingStatus, Result, age_secs_since, anyhow, compact_age_text,
-        ensure_success, extract_json_document, normalize_nostr_pubkey,
-        peer_offers_exit_node, short_pubkey, unix_timestamp,
+        NativePaidRouteWalletState, Output, PaidExitSellerEgress, Path, PathBuf, PortMappingStatus,
+        Result, age_secs_since, anyhow, compact_age_text, ensure_success, extract_json_document,
+        normalize_nostr_pubkey, peer_offers_exit_node, short_pubkey, unix_timestamp,
     };
 
     const PAID_ROUTE_WALLET_TOP_UP_POLL_CADENCE: std::time::Duration =
         std::time::Duration::from_secs(3);
 
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     include!("paid_exit_wallet_runtime.rs");
+    include!("paid_exit_wallet_client.rs");
     include!("paid_exit_actions.rs");
     include!("paid_exit_manual_provider.rs");
     include!("paid_exit_wallet_helpers.rs");
+    include!("paid_exit_wallet_history.rs");
     include!("paid_exit_state.rs");
     include!("paid_exit_text.rs");
     include!("paid_exit_json.rs");
@@ -54,18 +58,112 @@ mod paid_exit {
 
         #[test]
         fn price_text_uses_one_fixed_gigabyte_denominator() {
-            assert_eq!(
-                paid_route_price_text(25_000),
-                "25000 msat/GB"
-            );
+            assert_eq!(paid_route_price_text(25_000), "25 sat/GB");
             assert_eq!(paid_route_price_text(0), "free");
+            assert_eq!(paid_route_price_text(1_250), "1.25 sat/GB");
+            assert_eq!(paid_route_price_text(1), "0.001 sat/GB");
             assert_eq!(
-                paid_route_price_text_with_fiat(25_000, Some(80_000.0), "EUR", false),
-                "25000 msat/GB · ≈ 0.02 EUR/GB"
+                paid_route_price_text_with_fiat(25_000, Some(80_000.0), "EUR"),
+                "≈ €0.02/GB"
             );
             assert_eq!(
-                paid_route_price_text_with_fiat(25_000, Some(80_000.0), "EUR", true),
-                "25000 msat/GB"
+                paid_route_price_text_with_fiat(25_000, None, "EUR"),
+                "25 sat/GB"
+            );
+            assert_eq!(
+                paid_route_price_text_with_fiat(25_000, Some(100_000.0), "USD"),
+                "≈ $0.025/GB"
+            );
+            assert_eq!(
+                paid_route_price_text_with_fiat(0, Some(80_000.0), "EUR"),
+                "free"
+            );
+            assert_eq!(
+                paid_route_price_text_with_fiat(1, Some(10_000.0), "USD"),
+                "<$0.000001/GB"
+            );
+            assert_eq!(
+                paid_route_price_text_with_fiat(25_000, Some(f64::NAN), "USD"),
+                "25 sat/GB"
+            );
+            assert_eq!(
+                paid_route_price_text_with_fiat(1_000, Some(8_000_000.0), "JPY"),
+                "≈ ¥0.08/GB"
+            );
+            assert_eq!(
+                crate::exchange_rate::format_fiat_msat(1_000, 8_000_000.0, "JPY"),
+                "<¥1"
+            );
+        }
+
+        #[test]
+        fn terminal_session_titles_win_over_stale_payment_state() {
+            assert_eq!(
+                paid_route_session_title_text("Free probe", "expired", false, false, 0),
+                "Ended"
+            );
+            assert_eq!(
+                paid_route_session_title_text(
+                    "Seller did not acknowledge",
+                    "failed",
+                    false,
+                    false,
+                    0,
+                ),
+                "Connection failed"
+            );
+        }
+
+        #[test]
+        fn fiat_presentation_updates_channel_and_session_amounts_without_changing_accounting() {
+            let mut channels = vec![NativePaidRouteChannelState {
+                capacity_sat: 250,
+                paid_msat: 25_000,
+                ..NativePaidRouteChannelState::default()
+            }];
+            let mut sessions = vec![NativePaidRouteSessionState {
+                lifecycle_status: "active".into(),
+                access_state: "paid".into(),
+                usage_text: "1 GB used".into(),
+                paid_msat: 25_000,
+                amount_due_msat: 30_000,
+                unpaid_msat: 5_000,
+                channel_balance_msat: 225_000,
+                ..NativePaidRouteSessionState::default()
+            }];
+            apply_paid_route_currency(&mut channels, &mut sessions, &|msat| {
+                crate::exchange_rate::format_fiat_msat(msat, 80_000.0, "EUR")
+            });
+            assert_eq!(channels[0].capacity_text, "≈ €0.20");
+            assert_eq!(channels[0].capacity_sat, 250);
+            assert_eq!(sessions[0].paid_text, "≈ €0.02 paid");
+            assert_eq!(sessions[0].amount_due_text, "≈ €0.02 due");
+            assert_eq!(sessions[0].unpaid_text, "≈ €0.004 behind");
+            assert_eq!(sessions[0].channel_balance_text, "≈ €0.18 in channel");
+            assert_eq!(sessions[0].detail_text, "Paid, 1 GB used, ≈ €0.02 due");
+            assert_eq!(sessions[0].paid_msat, 25_000);
+            assert_eq!(sessions[0].amount_due_msat, 30_000);
+            assert_eq!(sessions[0].unpaid_msat, 5_000);
+        }
+
+        #[test]
+        fn paid_route_activity_can_be_cleared_without_mutating_wallet_or_sessions() {
+            let error = anyhow!("test runtime");
+            let mut runtime = NativeAppRuntime::from_startup_error(&error);
+            runtime.paid_route_payment_last_action = NativePaidRoutePaymentActionState {
+                kind: "send".to_string(),
+                status_text: "Payment send attempted".to_string(),
+                ..NativePaidRoutePaymentActionState::default()
+            };
+
+            runtime.dispatch(crate::NativeAppAction::ClearPaidRouteActivity);
+
+            assert!(runtime.paid_route_payment_last_action.kind.is_empty());
+            assert!(
+                runtime
+                    .paid_route_payment_last_action
+                    .status_text
+                    .is_empty()
             );
         }
 
@@ -106,7 +204,7 @@ mod paid_exit {
         #[test]
         fn empty_wallet_reports_a_known_zero_balance_without_nav_badge() {
             let state = paid_route_wallet_state(
-                &PaidRouteWalletState::default(),
+                &PaidRouteStore::default(),
                 &NativePaidRouteWalletActionState::default(),
             );
 
@@ -119,17 +217,10 @@ mod paid_exit {
         #[test]
         fn unchecked_mint_omits_unknown_balance_copy() {
             let mut store = PaidRouteStore::default();
-            assert!(store.upsert_wallet_mint(
-                "https://mint.example",
-                "Example",
-                None,
-                0,
-            ));
+            assert!(store.upsert_wallet_mint("https://mint.example", "Example", None, 0,));
 
-            let state = paid_route_wallet_state(
-                &store.wallet,
-                &NativePaidRouteWalletActionState::default(),
-            );
+            let state =
+                paid_route_wallet_state(&store, &NativePaidRouteWalletActionState::default());
 
             assert!(!state.balance_known);
             assert!(state.total_balance_text.is_empty());
@@ -139,27 +230,49 @@ mod paid_exit {
         #[test]
         fn native_wallet_state_keeps_multiple_mints_for_gui_rows() {
             let mut store = PaidRouteStore::default();
-            assert!(store.upsert_wallet_mint(
-                "https://mint-one.example",
-                "One",
-                None,
-                1,
-            ));
-            assert!(store.upsert_wallet_mint(
-                "https://mint-two.example",
-                "Two",
-                None,
-                2,
-            ));
+            assert!(store.upsert_wallet_mint("https://mint-one.example", "One", None, 1,));
+            assert!(store.upsert_wallet_mint("https://mint-two.example", "Two", None, 2,));
 
-            let state = paid_route_wallet_state(
-                &store.wallet,
-                &NativePaidRouteWalletActionState::default(),
-            );
+            let state =
+                paid_route_wallet_state(&store, &NativePaidRouteWalletActionState::default());
 
             assert_eq!(state.mints.len(), 2);
             assert_ne!(state.mints[0].url, state.mints[1].url);
             assert_eq!(state.mints.iter().filter(|mint| mint.is_default).count(), 1);
+        }
+
+        #[test]
+        fn buyer_channel_balance_excludes_paid_amount_and_closed_channels() {
+            assert_eq!(
+                paid_route_channel_balance_msat(
+                    PaidRouteChannelRole::Buyer,
+                    PaidRouteLifecycleStatus::Active,
+                    true,
+                    20,
+                    1_000,
+                ),
+                19_000
+            );
+            assert_eq!(
+                paid_route_channel_balance_msat(
+                    PaidRouteChannelRole::Buyer,
+                    PaidRouteLifecycleStatus::Closed,
+                    true,
+                    20,
+                    1_000,
+                ),
+                0
+            );
+            assert_eq!(
+                paid_route_channel_balance_msat(
+                    PaidRouteChannelRole::Buyer,
+                    PaidRouteLifecycleStatus::Active,
+                    false,
+                    20,
+                    1_000,
+                ),
+                0
+            );
         }
 
         #[test]
@@ -210,10 +323,8 @@ mod paid_exit {
             store
                 .upsert_signed_offer(live, Vec::new(), now)
                 .expect("store live offer");
-            let directory = std::env::temp_dir().join(format!(
-                "nvpn-market-liveness-{}-{now}",
-                std::process::id()
-            ));
+            let directory = std::env::temp_dir()
+                .join(format!("nvpn-market-liveness-{}-{now}", std::process::id()));
             std::fs::create_dir_all(&directory).expect("create market test directory");
             let path = directory.join("paid-routes.json");
             update_paid_route_store(&path, |target| {
@@ -283,6 +394,10 @@ impl NativeAppRuntime {
         }
     }
 
+    fn pending_paid_route_funding_status(&self) -> Option<(String, bool)> {
+        None
+    }
+
     fn active_paid_route_exit_ip(&self, _selected_exit_node: &str) -> Option<String> {
         let _ = self;
         None
@@ -301,6 +416,10 @@ impl NativeAppRuntime {
     }
 
     fn refresh_paid_route_wallet(&mut self, _refresh: bool) -> Result<()> {
+        self.paid_exit_not_built()
+    }
+
+    fn refresh_paid_route_wallet_history(&mut self) -> Result<()> {
         self.paid_exit_not_built()
     }
 
@@ -341,6 +460,7 @@ impl NativeAppRuntime {
         _offer_key: &str,
         _mint_url: Option<&str>,
         _channel_capacity_sat: Option<u64>,
+        _source: InternetSource,
     ) -> Result<()> {
         self.paid_exit_not_built()
     }
@@ -353,7 +473,20 @@ impl NativeAppRuntime {
         self.paid_exit_not_built()
     }
 
-    fn select_paid_route_session(&mut self, _session_id: &str, _connect: bool) -> Result<()> {
+    fn select_paid_route_session(
+        &mut self,
+        _session_id: &str,
+        _connect: bool,
+        _source: InternetSource,
+    ) -> Result<()> {
+        self.paid_exit_not_built()
+    }
+
+    fn reselect_paid_exit(&mut self) -> Result<()> {
+        Err(anyhow!("paid exits are unavailable"))
+    }
+
+    fn rate_paid_exit(&mut self, _seller_npub: &str, _rating: i64) -> Result<()> {
         self.paid_exit_not_built()
     }
 

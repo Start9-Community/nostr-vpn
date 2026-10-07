@@ -29,6 +29,15 @@ impl FipsPrivateTunnelRuntime {
         false
     }
 
+    #[cfg(feature = "paid-exit")]
+    pub(crate) fn paid_exit_dns_health_probe(
+        &self,
+    ) -> Result<crate::secure_dns_runtime::SecureDnsHealthProbe> {
+        Err(anyhow!(
+            "secure DNS is unavailable for paid exit health on this platform"
+        ))
+    }
+
     pub(crate) fn client_dataplane_enabled(&self) -> bool {
         false
     }
@@ -111,11 +120,19 @@ impl FipsPrivateTunnelRuntime {
         Ok(0)
     }
 
+    pub(crate) async fn ping_pending_join_peers(
+        &self,
+        _network_id: &str,
+        _now: u64,
+    ) -> Result<usize> {
+        Ok(0)
+    }
+
     pub(crate) async fn refresh_link_statuses(&self) -> Result<()> {
         Ok(())
     }
 
-    pub(crate) async fn send_join_request(
+    pub(crate) fn enqueue_join_request(
         &self,
         _participant: &str,
         _requested_at: u64,

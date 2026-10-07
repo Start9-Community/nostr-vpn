@@ -262,17 +262,10 @@ fn mobile_runtime_state_with_tun_counters(
             Some((participant, peer))
         })
         .collect::<HashMap<_, _>>();
-    let peer_config_by_participant = config
-        .peers
-        .iter()
-        .map(|peer| (peer.participant_pubkey.clone(), peer))
-        .collect::<HashMap<_, _>>();
-
     let peers = mesh
         .peer_statuses()
         .into_iter()
         .map(|status| {
-            let peer_config = peer_config_by_participant.get(&status.pubkey);
             let link = link_by_participant.get(&status.pubkey);
             let peer_presence = presence.get(&status.pubkey);
             let last_seen_at = peer_presence.and_then(|presence| presence.last_seen_at);
@@ -286,13 +279,19 @@ fn mobile_runtime_state_with_tun_counters(
             });
             let link_connected = link.is_some_and(|peer| peer.connected);
             let reachable = presence_connected || link_connected;
-            let advertised_routes = peer_config
-                .map(|peer| peer.allowed_ips.clone())
+            // Allowed IPs express our route selection, not the peer's offer.
+            // Retain received capabilities so exits are discoverable before
+            // selection and disappear when sharing is withdrawn or expires.
+            let advertised_routes = peer_presence
+                .filter(|peer| {
+                    peer.capabilities_received_at.is_some_and(|received_at| {
+                        mobile_timestamp_within_grace(now, received_at, MOBILE_PEER_CAPS_GRACE_SECS)
+                    })
+                })
+                .map(|peer| peer.advertised_routes.clone())
                 .unwrap_or_default();
-            let tunnel_ip = advertised_routes
-                .first()
-                .map(|route| strip_cidr(route).to_string())
-                .or_else(|| derive_mesh_tunnel_ip(&config.network_id, &status.pubkey))
+            let tunnel_ip = derive_mesh_tunnel_ip(&config.network_id, &status.pubkey)
+                .map(|ip| strip_cidr(&ip).to_string())
                 .unwrap_or_default();
 
             DaemonPeerState {
@@ -465,9 +464,12 @@ fn note_mobile_peer_pong(
 fn mobile_peer_ping_due(
     last_seen_at: Option<u64>,
     last_ping_sent_at: Option<u64>,
+    configured_transit: bool,
     now: u64,
 ) -> bool {
-    let interval = if last_seen_at.is_some_and(|last_seen_at| {
+    let interval = if configured_transit {
+        MOBILE_CONFIGURED_TRANSIT_PING_INTERVAL_SECS
+    } else if last_seen_at.is_some_and(|last_seen_at| {
         mobile_timestamp_within_grace(now, last_seen_at, MOBILE_PEER_ONLINE_GRACE_SECS)
     }) {
         MOBILE_PEER_ACTIVE_PING_INTERVAL_SECS
@@ -477,32 +479,57 @@ fn mobile_peer_ping_due(
     last_ping_sent_at.is_none_or(|sent_at| mobile_elapsed_at_least(now, sent_at, interval))
 }
 
+fn mobile_ping_participants(
+    mut participants: Vec<String>,
+    bootstrap_peers: &HashMap<String, Vec<FipsPeerAddressHint>>,
+) -> Vec<(String, bool)> {
+    let configured_transit = bootstrap_peers
+        .iter()
+        .filter(|(_, hints)| !hints.is_empty())
+        .filter_map(|(participant, _)| normalize_nostr_pubkey(participant).ok())
+        .collect::<HashSet<_>>();
+    participants.extend(configured_transit.iter().cloned());
+    participants.sort();
+    participants.dedup();
+    participants
+        .into_iter()
+        .map(|participant| {
+            let is_configured_transit = configured_transit.contains(&participant);
+            (participant, is_configured_transit)
+        })
+        .collect()
+}
+
 async fn mobile_ping_peers(
     endpoint: &FipsEndpoint,
     mesh: &MobileMesh,
     peer_identities: &Arc<RwLock<MobilePeerIdentityMap>>,
     presence: &Arc<RwLock<HashMap<String, MobilePeerPresence>>>,
     network_id: &str,
+    bootstrap_peers: &HashMap<String, Vec<FipsPeerAddressHint>>,
 ) -> Result<usize> {
     let now = unix_timestamp();
     let peers = {
         let mesh = mobile_mesh_snapshot(mesh)?;
         mesh.peer_pubkeys()
     };
+    let peers = mobile_ping_participants(peers, bootstrap_peers);
     let participants = {
         let presence = presence
             .read()
             .map_err(|_| anyhow!("mobile FIPS presence lock poisoned"))?;
         peers
             .into_iter()
-            .filter(|participant| {
+            .filter(|(participant, configured_transit)| {
                 let peer_presence = presence.get(participant);
                 mobile_peer_ping_due(
                     peer_presence.and_then(|value| value.last_seen_at),
                     peer_presence.and_then(|value| value.last_ping_sent_at),
+                    *configured_transit,
                     now,
                 )
             })
+            .map(|(participant, _)| participant)
             .collect::<Vec<_>>()
     };
     if participants.is_empty() {

@@ -27,7 +27,14 @@ fn paid_route_channel_open_frame(
                     "channel_id": "mobile-channel-1",
                     "balance": 0,
                     "signature": "s".repeat(2_000),
-                    "params": {"channel": "mobile-channel-1"},
+                    "params": {
+                        "channel": "mobile-channel-1",
+                        "mint": "https://mint.example",
+                        "unit": "sat",
+                        "capacity": 10,
+                        "expiry_timestamp": now_unix.saturating_add(600),
+                        "receiver_pubkey": seller_pubkey
+                    },
                     "funding_proofs": {"proofs": []}
                 }
             }
@@ -268,7 +275,10 @@ async fn mobile_paid_route_payment_and_ack_roundtrip() {
     ));
     let buyer_mesh_peers = Arc::new(RwLock::new(buyer_mobile.peers.clone()));
     let buyer_peer_identities =
-        Arc::new(RwLock::new(mobile_peer_identity_map(&buyer_mobile.peers)));
+        Arc::new(RwLock::new(mobile_peer_identity_map(
+            &buyer_mobile.peers,
+            &buyer_mobile.bootstrap_peers,
+        )));
     let buyer_peer_hints = Arc::new(RwLock::new(buyer_mobile.peer_hints.clone()));
     let buyer_presence = Arc::new(RwLock::new(HashMap::new()));
     let buyer_config_state = Arc::new(RwLock::new(buyer_mobile));

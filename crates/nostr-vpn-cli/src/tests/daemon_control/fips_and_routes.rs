@@ -26,6 +26,7 @@ fn fips_runtime_state_counts_direct_roster_and_other_peers() {
     let roster_peer = Keys::generate().public_key().to_hex();
     let routed_roster_peer = Keys::generate().public_key().to_hex();
     let other_peer = Keys::generate().public_key().to_hex();
+    config.select_public_paid_exit_node(&other_peer).unwrap();
     config.networks[0].devices = vec![roster_peer.clone(), routed_roster_peer.clone()];
     let tunnel_runtime = crate::CliTunnelRuntime::new("utun100");
     let fips_peer_statuses = [
@@ -94,7 +95,7 @@ fn fips_runtime_state_counts_direct_roster_and_other_peers() {
             error: None,
         },
         MeshPeerStatus {
-            pubkey: other_peer,
+            pubkey: other_peer.clone(),
             connected: true,
             endpoint_npub: "npub1other".to_string(),
             transport_addr: Some("203.0.113.9:9000".to_string()),
@@ -145,6 +146,11 @@ fn fips_runtime_state_counts_direct_roster_and_other_peers() {
     assert_eq!(state.connected_peer_count, 2);
     assert_eq!(state.fips_direct_roster_peer_count, 1);
     assert_eq!(state.fips_other_peer_count, 1);
+    let seller = state.peers.iter().find(|peer| peer.participant_pubkey == other_peer)
+        .expect("public paid seller connection must reach the UI");
+    assert!(seller.reachable);
+    assert_eq!(state.peers.len(), 3);
+    assert!(!config.participant_pubkeys_hex().contains(&other_peer));
     let rekey_peer = state
         .peers
         .iter()
@@ -227,10 +233,34 @@ fn daemon_runtime_state_marks_peers_unreachable_when_vpn_is_off() {
     assert!(!state.vpn_active);
     assert!(!state.vpn_enabled);
     assert_eq!(state.connected_peer_count, 0);
+    assert_eq!(state.fips_direct_roster_peer_count, 1);
+    assert_eq!(state.fips_other_peer_count, 0);
     assert!(!state.mesh_ready);
     assert_eq!(state.peers.len(), 1);
     assert!(!state.peers[0].reachable);
     assert!(state.peers[0].runtime_endpoint.is_none());
+
+    config.networks[0].devices.clear();
+    for vpn_enabled in [false, true] {
+        let pre_pairing = crate::build_daemon_runtime_state(crate::DaemonRuntimeStateInput {
+            app: &config,
+            vpn_enabled,
+            vpn_active: false,
+            expected_peers: 0,
+            tunnel_runtime: &tunnel_runtime,
+            fips_peer_statuses: &fips_peer_statuses,
+            fips_relay_statuses: &[],
+            fips_endpoint_peers: &[],
+            advertised_routes_by_participant: &std::collections::HashMap::new(),
+            vpn_status: "Waiting for approval",
+            network: &nostr_vpn_core::diagnostics::NetworkSummary::default(),
+            port_mapping: &nostr_vpn_core::diagnostics::PortMappingStatus::default(),
+        });
+        assert_eq!(pre_pairing.connected_peer_count, 0);
+        assert_eq!(pre_pairing.fips_direct_roster_peer_count, 0);
+        assert_eq!(pre_pairing.fips_other_peer_count, 1);
+        assert!(!pre_pairing.mesh_ready);
+    }
 }
 
 #[test]
@@ -301,7 +331,7 @@ fn macos_paid_exit_endpoint_bypass_targets_are_deterministic_host_routes() {
     ];
 
     assert_eq!(
-        crate::macos_network::macos_endpoint_bypass_targets_for_hosts(&hosts),
+        crate::macos_network::macos_endpoint_bypass_targets_for_hosts(&hosts, None, &[]),
         vec!["203.0.113.7/32", "65.109.48.91/32"]
     );
 }
@@ -349,4 +379,34 @@ fn macos_ipconfig_router_from_output_parses_ip_and_ip_mult_formats() {
 #[test]
 fn macos_tunnel_ipv4_netmask_uses_host_route() {
     assert_eq!(crate::macos_tunnel_ipv4_netmask(), "255.255.255.255");
+}
+
+#[test]
+fn port_mapping_parameters_ignore_roster_and_ui_edits() {
+    let before = AppConfig::generated();
+    let mut after = before.clone();
+    after.node_name = "renamed".to_string();
+    after.networks[0].devices.push(Keys::generate().public_key().to_hex());
+    assert_eq!(
+        port_mapping_parameters(&before, true, Some(51820)),
+        port_mapping_parameters(&after, true, Some(51820))
+    );
+}
+
+#[test]
+fn port_mapping_parameters_track_activation_port_and_policy_changes() {
+    let app = AppConfig::default();
+    let active = port_mapping_parameters(&app, true, Some(51820));
+    assert!(active.is_some());
+    assert_eq!(port_mapping_parameters(&app, false, Some(51820)), None);
+    assert_eq!(port_mapping_parameters(&app, true, None), None);
+    assert_ne!(active, port_mapping_parameters(&app, true, Some(51821)));
+    let mut changed = app.clone();
+    changed.nat.discovery_timeout_secs += 1;
+    assert_ne!(active, port_mapping_parameters(&changed, true, Some(51820)));
+    changed.nat.enabled = false;
+    assert_eq!(port_mapping_parameters(&changed, true, Some(51820)), None);
+    changed = app;
+    changed.fips_nostr_discovery_enabled = false;
+    assert_eq!(port_mapping_parameters(&changed, true, Some(51820)), None);
 }

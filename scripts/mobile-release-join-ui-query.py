@@ -17,6 +17,8 @@ def parser() -> argparse.ArgumentParser:
             "resource",
             "description",
             "text",
+            "checkbox-label",
+            "network-picker",
             "resource-prefix",
             "description-prefix",
         ),
@@ -33,6 +35,7 @@ def parser() -> argparse.ArgumentParser:
             "count",
             "width",
             "enabled",
+            "checked",
         ),
     )
     return result
@@ -73,7 +76,16 @@ def bounds(node: ET.Element) -> tuple[int, int, int, int]:
     return left, top, right, bottom
 
 
-def viewport(root: ET.Element, node: ET.Element) -> tuple[int, int, int, int]:
+def viewport(root: ET.Element, node: ET.Element) -> tuple[int, int, int, int, bool]:
+    parents = {child: parent for parent in root.iter() for child in parent}
+    parent = parents.get(node)
+    while parent is not None:
+        if (
+            parent.get("scrollable") == "true"
+            or parent.get("class", "").endswith("ScrollView")
+        ):
+            return (*bounds(parent), True)
+        parent = parents.get(parent)
     node_box = bounds(node)
     boxes: list[tuple[int, int, int, int]] = []
     for candidate in root.iter("node"):
@@ -90,13 +102,46 @@ def viewport(root: ET.Element, node: ET.Element) -> tuple[int, int, int, int]:
             boxes.append(box)
     if not boxes:
         raise ValueError("hierarchy has no valid viewport")
-    return max(boxes, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]))
+    return (*max(boxes, key=lambda box: (box[2] - box[0]) * (box[3] - box[1])), False)
 
 
 def main() -> int:
     args = parser().parse_args()
     root = ET.parse(args.xml).getroot()
-    found = [node for node in root.iter("node") if matches(node, args.kind, args.expected)]
+    if args.kind == "network-picker":
+        # The title is the clickable sibling immediately before the labelled
+        # VPN switch. Its decorative arrow can be absent for long titles.
+        found = []
+        for parent in root.iter("node"):
+            children = list(parent)
+            for title, toggle in zip(children, children[1:]):
+                if (
+                    title.get("clickable") == "true"
+                    and title.get("checkable") != "true"
+                    and any(node.get("text") for node in title.iter("node"))
+                    and toggle.get("checkable") == "true"
+                    and any(
+                        matches(node, "description-prefix", args.expected)
+                        for node in toggle.iter("node")
+                    )
+                ):
+                    found.append(title)
+        if len(found) != 1:
+            return 1
+    elif args.kind == "checkbox-label":
+        # Compose exposes each checkbox immediately before its label, with
+        # multiple settings flattened into the same parent accessibility node.
+        found = []
+        for parent in root.iter("node"):
+            children = list(parent)
+            for previous, label in zip(children, children[1:]):
+                if (
+                    matches(label, "text", args.expected)
+                    and previous.get("checkable") == "true"
+                ):
+                    found.append(previous)
+    else:
+        found = [node for node in root.iter("node") if matches(node, args.kind, args.expected)]
     if args.output == "count":
         print(len(found))
         return 0
@@ -106,13 +151,13 @@ def main() -> int:
     if args.output in ("center", "safe-center", "visible-center"):
         if args.output in ("safe-center", "visible-center"):
             try:
-                viewport_left, viewport_top, viewport_right, viewport_bottom = viewport(
+                viewport_left, viewport_top, viewport_right, viewport_bottom, scroll_viewport = viewport(
                     root, node
                 )
             except ValueError:
                 return 1
-            safe_top = viewport_top + 200
-            safe_bottom = viewport_bottom - 300
+            safe_top = viewport_top if scroll_viewport else viewport_top + 200
+            safe_bottom = viewport_bottom if scroll_viewport else viewport_bottom - 300
             left, top, right, bottom = bounds(node)
             if args.output == "visible-center":
                 left, top = max(left, viewport_left), max(top, safe_top)
@@ -135,8 +180,8 @@ def main() -> int:
         print(right - left)
     elif args.output == "description":
         print(html.unescape(node.attrib.get("content-desc", "")))
-    elif args.output == "enabled":
-        print(node.attrib.get("enabled", "false").lower())
+    elif args.output in ("enabled", "checked"):
+        print(node.attrib.get(args.output, "false").lower())
     else:
         print(html.unescape(node.attrib.get("text", "")))
     return 0

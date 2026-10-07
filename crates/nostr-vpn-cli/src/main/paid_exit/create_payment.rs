@@ -105,13 +105,18 @@ async fn paid_exit_create_payment_command(args: PaidExitCreatePaymentArgs) -> Re
                     .unwrap_or(session_record.session.payment.paid_msat),
                 keyset_id: args.keyset_id,
                 keyset_info_json,
+                client_request_id: Some(args.session.clone()),
+                route_created_at_unix: Some(channel_record.created_at_unix),
             }
         };
-        let opened = open_streaming_route_cashu_spilman_channel_from_wallet(
-            &paid_exit_wallet_data_dir(&config_path),
-            open_request,
-        )
-        .await?;
+        let opened: cashu_service::StreamingRouteOpenCashuSpilmanChannelFromWalletResult =
+            daemon_cashu_wallet_request(
+                &config_path,
+                crate::cashu_wallet_daemon::DaemonCashuWalletCommand::OpenSpilmanChannel {
+                    request: open_request,
+                },
+            )
+            .await?;
         let (result, attach) = update_paid_route_store(&store_path, |store| {
             let attach = store.attach_buyer_spilman_channel(
                 AttachPaidRouteBuyerSpilmanChannelRequest {

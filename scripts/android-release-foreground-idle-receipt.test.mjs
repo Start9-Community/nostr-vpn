@@ -1,20 +1,65 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   createAndroidForegroundIdleReceipt,
 } from './android-release-foreground-idle-receipt.mjs'
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex')
+
+test('Android retry preserves old idle evidence before any new measurement', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-android-idle-retry-'))
+  const raw = join(root, 'idle-cpu.json')
+  const receipt = join(root, 'receipt.json')
+  const prepare = () => spawnSync('/bin/bash', ['-c', `
+    set -euo pipefail
+    source "$TEST_LIBRARY"
+    android_idle_cpu_path() { printf '%s\\n' "$TEST_RAW"; }
+    android_release_prepare_idle_output
+  `], {
+    encoding: 'utf8',
+    env: { ...process.env, TEST_RAW: raw, NVPN_ANDROID_FOREGROUND_IDLE_RECEIPT: receipt,
+      TEST_LIBRARY: new URL('./lib-mobile-android-release-gate.sh', import.meta.url).pathname },
+  })
+  try {
+    writeFileSync(raw, 'old raw sample')
+    writeFileSync(receipt, 'old bound receipt')
+    const result = prepare()
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(existsSync(raw), false)
+    assert.equal(existsSync(receipt), false)
+    const [archive] = readdirSync(root)
+    assert.equal(readFileSync(join(root, archive, 'idle-cpu.json'), 'utf8'), 'old raw sample')
+    assert.equal(readFileSync(join(root, archive, 'receipt.json'), 'utf8'), 'old bound receipt')
+    assert.equal(prepare().status, 0)
+    assert.equal(readdirSync(root).length, 1, 'empty retry creates no archive')
+    writeFileSync(raw, 'new raw sample')
+    symlinkSync(join(root, archive, 'receipt.json'), receipt)
+    assert.notEqual(prepare().status, 0, 'symlink receipt must fail before moving raw evidence')
+    assert.equal(readFileSync(raw, 'utf8'), 'new raw sample')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('Release Android prepares idle outputs before touching the installed app', () => {
+  const script = readFileSync(new URL('./mobile-android-smoke.sh', import.meta.url), 'utf8')
+  assert.match(script, /if truthy "\$RELEASE_BLACKBOX_GATE"; then\s+if truthy "\$IDLE_CPU_GATE"; then\s+android_release_prepare_idle_output\s+fi\s+verify_android_release_install/)
+})
 
 function fixture(root) {
   const artifact = {
@@ -52,6 +97,37 @@ function fixture(root) {
   writeFileSync(rawPath, `${JSON.stringify(raw)}\n`)
   return { artifact, raw, artifactPath, rawPath, outputPath }
 }
+
+test('foreground-idle CLI writes evidence and rejects invalid commands through symlinked paths', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-android-idle-cli-'))
+  try {
+    const value = fixture(root)
+    const script = fileURLToPath(new URL('./android-release-foreground-idle-receipt.mjs', import.meta.url))
+    const scriptAlias = join(root, 'receipt-command.mjs')
+    const directoryAlias = join(root, 'scripts')
+    symlinkSync(script, scriptAlias)
+    symlinkSync(dirname(script), directoryAlias, 'dir')
+    for (const entry of [script, scriptAlias, join(directoryAlias, 'android-release-foreground-idle-receipt.mjs')]) {
+      const invalid = spawnSync(process.execPath, [entry, 'invalid-command'], { encoding: 'utf8' })
+      assert.equal(invalid.status, 1, `${entry}: ${invalid.stderr}`)
+      assert.match(invalid.stderr, /usage:/)
+      const result = spawnSync(process.execPath, [entry, 'create',
+        '--artifact-receipt', value.artifactPath,
+        '--raw-receipt', value.rawPath,
+        '--output', value.outputPath,
+        '--verified-live-context',
+      ], { encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+      assert.match(result.stdout, /Android foreground-idle receipt:/)
+      const receipt = JSON.parse(readFileSync(value.outputPath, 'utf8'))
+      assert.equal(receipt.artifactReceiptSha256, sha256(readFileSync(value.artifactPath)))
+      assert.equal(receipt.rawIdleCpuReceiptSha256, sha256(readFileSync(value.rawPath)))
+      assert.deepEqual(receipt.sample, value.raw)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('live Android foreground-idle receipt binds the raw sample to the exact artifact', () => {
   const root = mkdtempSync(join(tmpdir(), 'nvpn-android-idle-receipt-'))

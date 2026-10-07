@@ -133,6 +133,8 @@ pub struct NativeRelayState {
 pub struct NativePaidExitSellerState {
     pub supported: bool,
     pub enabled: bool,
+    #[serde(default)]
+    pub ready: bool,
     pub status_text: String,
     pub provider_link: String,
     pub upstream: String,
@@ -151,6 +153,7 @@ pub struct NativePaidExitSellerState {
     pub grace_units: u64,
     pub grace_text: String,
     pub country_code: String,
+    pub network_class: String,
     pub asn: u32,
     pub ipv4: bool,
     pub ipv6: bool,
@@ -191,6 +194,8 @@ pub struct NativePaidRouteWalletState {
     pub balance_known: bool,
     pub total_balance_msat: u64,
     pub total_balance_text: String,
+    pub channel_balance_msat: u64,
+    pub channel_balance_text: String,
     pub navigation_balance_text: String,
     pub fiat_currency: String,
     pub fiat_balance_text: String,
@@ -200,7 +205,29 @@ pub struct NativePaidRouteWalletState {
     pub exchange_rate_stale: bool,
     pub exchange_rate_updated_at_unix: u64,
     pub mints: Vec<NativePaidRouteWalletMintState>,
+    #[serde(default)]
+    pub history: NativePaidRouteWalletHistoryState,
     pub last_action: NativePaidRouteWalletActionState,
+}
+
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePaidRouteWalletHistoryState {
+    pub loaded: bool,
+    pub error: String,
+    pub entries: Vec<NativePaidRouteWalletActivityState>,
+}
+
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePaidRouteWalletActivityState {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub mint_url: String,
+    pub amount_sat: u64,
+    pub fee_sat: u64,
+    pub created_at_unix: u64,
 }
 
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -265,9 +292,12 @@ pub struct NativePaidRouteOfferState {
     pub grace_units: u64,
     pub grace_text: String,
     pub country_code: String,
+    pub network_class: String,
     pub asn: u32,
     pub ipv4: bool,
     pub ipv6: bool,
+    pub personal_rating: i64,
+    pub can_rate: bool,
     pub has_rating: bool,
     pub rating_score: i64,
     pub rating_updated_at_unix: u64,
@@ -327,9 +357,14 @@ pub struct NativePaidRouteChannelState {
     pub error: String,
 }
 
+// Independent capability flags are flattened for the native UI bindings.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePaidRouteSessionState {
+    pub seller_npub: String,
+    pub personal_rating: i64,
+    pub can_rate: bool,
     pub session_id: String,
     pub lease_id: String,
     pub channel_id: String,
@@ -349,6 +384,8 @@ pub struct NativePaidRouteSessionState {
     pub amount_due_text: String,
     pub paid_msat: u64,
     pub paid_text: String,
+    pub channel_balance_msat: u64,
+    pub channel_balance_text: String,
     pub unpaid_msat: u64,
     pub unpaid_text: String,
     pub active_millis: u64,
@@ -440,6 +477,7 @@ pub struct NativeAppState {
     pub exit_node_leak_protection: bool,
     pub exit_node_active: bool,
     pub exit_node_blocked: bool,
+    pub exit_node_needs_attention: bool,
     pub exit_node_status_text: String,
     pub exit_dns_mode: String,
     pub exit_dns_doh_provider: String,

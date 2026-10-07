@@ -1,9 +1,14 @@
+#[cfg(target_os = "macos")]
+use crate::macos_file_io as fs;
+#[cfg(not(target_os = "macos"))]
+use fs::OpenOptions;
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_os = "macos"))]
 use std::fs;
-use std::fs::OpenOptions;
+#[cfg(not(target_os = "macos"))]
 use std::io::Write;
 use std::net::IpAddr;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 

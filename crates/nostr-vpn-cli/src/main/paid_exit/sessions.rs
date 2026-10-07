@@ -1,4 +1,3 @@
-
 struct PaidExitBuyResult {
     store_path: PathBuf,
     session: OpenPaidRouteBuyerSessionResult,
@@ -57,6 +56,10 @@ fn paid_exit_buy_once(args: PaidExitBuyArgs) -> Result<PaidExitBuyResult> {
     let (selected_exit_node, daemon_reload_attempted) = if no_select_exit_node {
         (None, false)
     } else {
+        let endpoint_hints = load_paid_route_store(&store_path)?
+            .buyer_session_seller_fips_endpoints(&result.session_id)?;
+        app.add_fips_peer_endpoint_hints(&result.seller_npub, &endpoint_hints)?;
+        app.internet_source = InternetSource::PaidManual;
         let selected = app.select_public_paid_exit_node(&result.seller_npub)?;
         app.save(&config_path)?;
         let daemon_reload_attempted = !no_reload_daemon;
@@ -114,17 +117,25 @@ fn paid_exit_use_once(args: PaidExitUseArgs) -> Result<PaidExitUseResult> {
     let config_path = args.config.clone().unwrap_or_else(default_config_path);
     let mut app = load_or_default_config(&config_path)?;
     let store_path = paid_route_store_file_path(&config_path);
-    let store = load_paid_route_store(&store_path)?;
     let session_id = args.session.trim().to_string();
     if session_id.is_empty() {
         return Err(anyhow!("paid route session id is empty"));
     }
-    let seller_npub = store.buyer_session_seller_npub(&session_id)?;
-    if !store.buyer_session_allows_routing(&session_id, unix_timestamp())? {
-        return Err(anyhow!(
-            "paid route session is not ready to route yet; fund it or wait for seller admission"
-        ));
-    }
+    let now_unix = unix_timestamp();
+    let (seller_npub, endpoint_hints) = update_paid_route_store(&store_path, |store| {
+        store.retry_failed_funded_buyer_session(&session_id, now_unix)?;
+        if !store.buyer_session_allows_routing(&session_id, now_unix)? {
+            return Err(anyhow!(
+                "paid route session is not ready to route yet; fund it or wait for seller admission"
+            ));
+        }
+        store.begin_buyer_session_open_attempt(&session_id, now_unix)?;
+        let seller_npub = store.buyer_session_seller_npub(&session_id)?;
+        let endpoint_hints = store.buyer_session_seller_fips_endpoints(&session_id)?;
+        Ok((seller_npub, endpoint_hints))
+    })?;
+    app.add_fips_peer_endpoint_hints(&seller_npub, &endpoint_hints)?;
+    app.internet_source = InternetSource::PaidManual;
     let selected_exit_node = app.select_public_paid_exit_node(&seller_npub)?;
     app.save(&config_path)?;
     let daemon_reload_attempted = !args.no_reload_daemon;

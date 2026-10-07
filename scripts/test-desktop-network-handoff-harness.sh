@@ -96,9 +96,24 @@ require_tokens "$WINDOWS_HOST_ENTRY" "helper module" \
 require_tokens "$WINDOWS_GUEST_ENTRY" "helper module" \
   'desktop-windows-underlay-change-e2e.lib.ps1' \
   'desktop-windows-underlay-crash-recovery.lib.ps1'
+require_tokens "$WINDOWS_GUEST_CRASH_LIB" "granular Direct startup-recovery evidence" \
+  'best route interface' \
+  'native WireGuard adapter remains' \
+  'native WireGuard service remains' \
+  'endpoint bypass route remains' \
+  'secure DNS policy remains' \
+  'paid-exit default route remains in cleanup journal' \
+  'paid-exit endpoint route remains in cleanup journal' \
+  'native WireGuard ownership remains in cleanup journal' \
+  'secure DNS ownership remains in cleanup journal' \
+  'public DNS is unavailable' \
+  'verified HTTPS is unavailable'
 require_tokens "$WINDOWS_HOST_ENTRY" "native WireGuard ownership regression harness" \
   'test-desktop-windows-wireguard-ownership.ps1' \
   'windows-wireguard-ownership-harness.log'
+require_tokens "$WINDOWS_HOST_ENTRY" "bounded post-recovery stability audit" \
+  'wait_for_guest_marker secondary.receipt.json 45' \
+  'wait_for_guest_marker primary.receipt.json 45'
 require_tokens "$WINDOWS_OWNERSHIP_HARNESS" "fail-closed owner-token fixtures" \
   'current owner-token layout' \
   'legacy flat config path' \
@@ -313,7 +328,8 @@ grep -Fq '$(rebind_count) == rebind_before + 1' "$LINUX_GUEST" \
   || fail "Linux host does not independently require one rebind for both switches"
 
 require_tokens "$WINDOWS_GUEST" "PID-bound continuous payload" \
-  'Get-DaemonPid' '[Net.NetworkInformation.Ping]::new()'
+  'Get-DaemonPid' \
+  'Invoke-BoundedIcmpProbe $PeerTunnelIp 750'
 require_tokens "$LINUX_GUEST" "PID-bound continuous payload" \
   'daemon_pid()' 'ping -D -n -i 0.1'
 require_tokens "$LINUX_GUEST" "production SIGKILL/startup-repair evidence" \
@@ -403,11 +419,39 @@ require_tokens "$LINUX_HOST_ENTRY" "host-coordinated DNS counter snapshot" \
   'after="$(stable_dns_counters)"' \
   'signal_guest "dns-$name.snapshotted"' \
   'wait_for_guest_marker "dns-$name.resumed" 30'
-require_tokens "$LINUX_HOST_ENTRY" "sustained DNS counter quiescence" \
-  'stable_samples=0' \
-  'for attempt in $(seq 1 100)' \
-  'if ((stable_samples >= 20))' \
-  'stable_samples=0'
+# Exercise the real polling function with a simulated clock: remote-call
+# latency must not turn a four-second quiet window into twenty SSH samples.
+counter_poll="$(sed -n '/^stable_dns_counters() {$/,/^}$/p' "$LINUX_HOST_ENTRY")"
+for scenario in quiet delayed changing unavailable; do
+  (
+    eval "$counter_poll"
+    # Unset Bash's special timer so this fixture advances only via sleep().
+    unset SECONDS
+    SECONDS=0
+    sleep() { SECONDS=$((SECONDS + 1)); }
+    fail() { return 1; }
+    peer_command() {
+      [[ "$1" == counters ]] || return 1
+      case "$scenario" in
+        quiet) printf 'packets=0\n' ;;
+        delayed) printf 'packets=%s\n' "$((SECONDS >= 4))" ;;
+        changing) printf 'packets=%s\n' "$SECONDS" ;;
+        unavailable) return 1 ;;
+      esac
+    }
+    if stable_dns_counters >"$COMBINED_DIR/counters-$scenario.txt"; then
+      case "$scenario:$SECONDS" in
+        quiet:5|delayed:9) ;;
+        *) exit 1 ;;
+      esac
+    else
+      case "$scenario:$SECONDS" in
+        changing:20|unavailable:0) ;;
+        *) exit 1 ;;
+      esac
+    fi
+  ) || fail "DNS counter polling did not honor its elapsed-time window: $scenario"
+done
 direct_restore="$(
   sed -n '/^run_dns_matrix_and_direct_restore() {$/,/^}$/p' "$LINUX_HOST_ENTRY"
 )"
@@ -440,13 +484,31 @@ require_tokens "$WINDOWS_GUEST" "independent cleanup evidence" \
   "WireGuardTunnel$" \
   '"WireGuardProbe"' \
   'Test-WireGuardHandshake' \
-  'Assert-WireGuardEndpointRoute'
+  'Assert-WireGuardEndpointRoute' \
+  'Wait-Process -Id $processId -Timeout 5 -ErrorAction SilentlyContinue'
+require_tokens "$WINDOWS_GUEST" "bounded real payload probes" \
+  'function Invoke-BoundedIcmpProbe {' \
+  '[System.Net.NetworkInformation.Ping]::new()' \
+  '$ping.Send($Target, $TimeoutMilliseconds, $buffer, $options)' \
+  '$reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success' \
+  'Invoke-BoundedIcmpProbe $PeerTunnelIp 750' \
+  'Invoke-BoundedIcmpProbe $WireGuardServerIp 750'
+bounded_windows_probe="$({
+  sed -n '/^function Invoke-BoundedIcmpProbe {$/,/^}$/p' \
+    "$WINDOWS_GUEST_ENTRY"
+})"
+if grep -Fq 'Start-Process' <<<"$bounded_windows_probe" \
+  || grep -Fq 'PING.EXE' "$WINDOWS_GUEST_ENTRY"; then
+  fail "Windows payload probe still spawns an external ping process"
+fi
 require_tokens "$WINDOWS_GUEST" "power-loss startup recovery evidence" \
   'Stop-Process -Id $crashedPid -Force' \
   '$CleanupJournalPath = Join-Path $StateDir "daemon.cleanup.json"' \
   'cleanup_journal_present_before_crash' \
   'cleanup_journal_survived_forced_termination' \
-  'cleanup_journal_removed_after_restart' \
+  'paid_exit_cleanup_ownership_removed_after_restart' \
+  'crash_cleanup_journal_replaced_after_restart' \
+  'active_direct_cleanup_route_count' \
   'Read-CandidateNativeWireGuardOwnership' \
   '$markerPath = "$configPath.nvpn-owner"' \
   'native WireGuard config is not in its exact owner directory' \
@@ -535,7 +597,8 @@ require_tokens "$WINDOWS_HOST" "power-loss receipt enforcement" \
   '.replacement_daemon_pid != .crashed_daemon_pid' \
   '.daemon_process_count == 1' \
   '.startup_recovery_milliseconds <= 30000' \
-  '.cleanup_journal_removed_after_restart == true' \
+  '.paid_exit_cleanup_ownership_removed_after_restart == true' \
+  '.crash_cleanup_journal_replaced_after_restart == true' \
   '.native_wireguard_owner_directory_layout == true' \
   '.native_wireguard_owned_files_survived_forced_termination == true' \
   '.native_wireguard_owned_files_removed_after_restart == true' \
@@ -647,6 +710,22 @@ complete = owned.index('Write-Marker "cleanup.complete"', native_cleanup)
 release = owned.index("$lock.Dispose()", complete)
 if not descendants < native_cleanup < complete < release:
     raise SystemExit("Windows cleanup completes before owned descendants stop")
+if "taskkill.exe /PID $processId /T /F" not in owned:
+    raise SystemExit("Windows cleanup cannot terminate a probe's native child tree")
+for identity_proof in (
+    "Get-CimInstance Win32_Process",
+    'recordedProcess.Name -notmatch \'^powershell(\\.exe)?$\'',
+    "recordedProcess.CommandLine -notmatch",
+    "Never terminate the unrelated replacement process",
+):
+    if identity_proof not in owned:
+        raise SystemExit(
+            "Windows cleanup can terminate a reused PID without identity proof"
+        )
+if owned.index("taskkill.exe /PID $processId /T /F") > owned.rindex(
+    "Remove-Item -LiteralPath $processPath"
+):
+    raise SystemExit("Windows cleanup removes a child marker before termination")
 if "runner-cleanup." in text:
     raise SystemExit("Windows retains duplicate runner cleanup markers")
 for marker in ("probe.pid", "wireguard-probe.pid"):
@@ -655,6 +734,23 @@ for marker in ("probe.pid", "wireguard-probe.pid"):
 if run.index("throw $runError") > run.index("throw $cleanupError"):
     raise SystemExit("Windows cleanup error can mask the original run failure")
 crash = text[text.index("function Invoke-CrashRecovery {"):]
+if text.count("function Get-CleanupJournalSha256 {") != 1:
+    raise SystemExit("Windows crash gate lacks one bounded journal hash reader")
+journal_hash = text[
+    text.index("function Get-CleanupJournalSha256 {"):
+    text.index("function Start-CandidateDaemon {")
+]
+for proof in (
+    "AddSeconds(5)",
+    "Get-FileHash -Algorithm SHA256",
+    "-ErrorAction Stop",
+    "Start-Sleep -Milliseconds 25",
+    "timed out reading the durable cleanup journal hash",
+):
+    if proof not in journal_hash:
+        raise SystemExit("Windows journal hash retry lost bounded-read proof")
+if text.count("Get-FileHash -Algorithm SHA256") != 1:
+    raise SystemExit("Windows crash gate retains an unbounded journal hash read")
 ownership = crash.index("Read-CandidateNativeWireGuardOwnership")
 termination = crash.index("Stop-Process -Id $crashedPid -Force")
 if ownership >= termination:
@@ -685,13 +781,19 @@ done
 require_tokens "$WINDOWS_GUEST" "timestamped recovery receipt" \
   'One deadline-edge read accepts a delayed log write' \
   'source_address = [string]$routeDecision.source_address'
-python3 - "$WINDOWS_GUEST" "$WINDOWS_HOST_ENTRY" "$WINDOWS_HOST_LIB" <<'PY'
+require_tokens "$WINDOWS_GUEST" "selected physical-route readiness" \
+  'function Get-SelectedPhysicalDefaultInterfaceIndex {' \
+  '$selectedPhysicalIndex = Get-SelectedPhysicalDefaultInterfaceIndex' \
+  '$selectedPhysicalIndex -eq $InterfaceIndex'
+python3 - "$WINDOWS_GUEST" "$WINDOWS_HOST_ENTRY" "$WINDOWS_HOST_LIB" \
+  "$WINDOWS_GUEST_LIB" <<'PY'
 import pathlib
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 host = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 host_lib = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+guest_lib = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 observe = text[text.index("function Observe-Recovery {"):text.index("function Run-DnsSettingCase {")]
 evidence = observe.index("$evidence = Wait-ForRecoveryEvidence")
 audit = observe.index("Assert-ActiveExit")
@@ -791,6 +893,23 @@ for proof in (
 ):
     if proof not in management:
         raise SystemExit(f"Windows cleanup management lost tri-state proof: {proof}")
+native_restore = guest_lib[
+    guest_lib.index("function Assert-NativeNetworkRestoredBeforeRepair {"):
+    guest_lib.index("\nfunction Test-WireGuardHandshake {")
+]
+for proof in (
+    "$state.primary_interface_index",
+    "$state.secondary_interface_index",
+    "Get-SelectedPhysicalDefaultInterfaceIndex",
+    "$allowedPhysicalIndices -notcontains $selectedPhysicalIndex",
+    "[int]$route.InterfaceIndex -ne $selectedPhysicalIndex",
+):
+    if proof not in native_restore:
+        raise SystemExit(
+            f"Windows cleanup does not accept the selected physical underlay: {proof}"
+        )
+if "primary route was not restored" in native_restore:
+    raise SystemExit("Windows cleanup still requires the original cut underlay")
 if 'run_ps_cleanup_management \\\n' not in cleanup or " 180 " not in cleanup:
     raise SystemExit("Windows claimed cleanup lacks a bounded management channel")
 quarantine = cleanup.index("QUARANTINE_GUEST_NETWORK=1", ownership)
@@ -824,7 +943,7 @@ then
 fi
 require_tokens "$WINDOWS_HOST" "exact provenance/artifact-import contract" \
   'the exact FIPS release-gate checkout must be committed and clean' \
-  'checkout --detach' \
+  'NVPN_WINDOWS_SYNC_PATH_DEPS=0' \
   'target-version.txt' \
   'peer-version.txt' \
   'Windows underlay CLI differs from the exact installed-and-launched installer payload' \
@@ -864,6 +983,40 @@ require_tokens "$MACOS_WIREGUARD" "real imported macOS network gate" \
   'DNS_CASE_PROBE_HOST="measure-$PPID-$RANDOM.$transition_probe_host"' \
   'mobile_wg_fixture_assert_dns_case_evidence' \
   'mobile_wg_fixture_cleanup'
+require_tokens "$MACOS_WIREGUARD" "bounded idempotent DNS transport retry" \
+  'run_dns_case() {' \
+  'if remote_phase primary dns-case; then' \
+  '[[ "$status" -eq 255 ]] || return "$status"' \
+  'SSH transport dropped; retrying the idempotent case once'
+[[ "$(grep -Ec '^  run_dns_case$' "$MACOS_WIREGUARD")" -eq 2 ]] \
+  || fail "macOS DNS transport retry does not wrap exactly the two idempotent case calls"
+require_tokens "$MACOS_WIREGUARD" "installed macOS service isolation" \
+  'remote_phase primary quiesce-installed-state' \
+  'remote_phase "$lane" restore-installed-state'
+require_tokens "$MACOS_WIREGUARD" "privileged private-state cleanup" \
+  '/tmp/nvpn-macos-release-network.*)' \
+  'test -d $quoted && test ! -L $quoted' \
+  'sudo -n /bin/rm -rf -- $quoted' \
+  'test ! -e $quoted'
+python3 - "$MACOS_WIREGUARD" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+if source.index("remote_phase primary quiesce-installed-state") > source.index(
+    'remote_phase primary initialize'
+):
+    raise SystemExit("macOS network gate initializes before quiescing installed state")
+cleanup = source.split("cleanup() {", 1)[1].split("\n}\ntrap cleanup", 1)[0]
+if cleanup.index('remote_phase "$lane" cleanup') > cleanup.index(
+    'remote_phase "$lane" restore-installed-state'
+):
+    raise SystemExit("macOS network gate restores installed state before owned cleanup")
+if cleanup.index('remote_phase "$lane" restore-installed-state') > cleanup.index(
+    "copy_guest_results"
+):
+    raise SystemExit("macOS network gate copies results before restoration evidence")
+PY
 if grep -Fq 'requires the remote Vader fixture' "$MACOS_WIREGUARD" \
   || grep -Fq 'discover_remote_fixture_ipv4' "$MACOS_WIREGUARD" \
   || grep -Fq 'mobile_wg_remote_exec' "$MACOS_WIREGUARD" \
@@ -895,6 +1048,12 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'Ethernet' \
   'Roaming Underlay' \
   'NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS:-4000' \
+  'NVPN_MACOS_UNDERLAY_ACTIVATION_DEADLINE_MS:-10000' \
+  'physical_underlay_selected "$expected_iface"' \
+  'activation_elapsed=$((physical_ready_ms - requested_ms))' \
+  'product_elapsed=$((now - physical_ready_ms))' \
+  'primary_to_secondary_activation_ms=' \
+  'primary_to_secondary_total_ms=' \
   'FIPS underlay carrier(s) rebound' \
   'runtime_wireguard_state_is false true' \
   'runtime_wireguard_state_is false false' \
@@ -917,6 +1076,79 @@ require_tokens "$MACOS_NETWORK_GUEST" "production macOS transition evidence" \
   'forwarded_probe_live=true' \
   'endpoint_route_interface' \
   'MACOS_RELEASE_NETWORK_DIRECT_OK'
+require_tokens "$MACOS_WIREGUARD" "macOS SSH-loss reconciliation" \
+  'poll_remote_prepare_status' \
+  'results/prepare.txt' \
+  'run_prepare' \
+  'UNDERLAY_STARTED=1' \
+  'preserving macOS guest state after incomplete cleanup'
+require_tokens "$MACOS_NETWORK_GUEST" "underlay timeout diagnostics" \
+  'capture_underlay_recovery_failure' \
+  'underlay-failure-$label.txt' \
+  'underlay-failure-$label-daemon.log' \
+  'expected_carrier_rebinds=' \
+  'actual_carrier_rebinds=' \
+  'expected_wireguard_rebinds=' \
+  'actual_wireguard_rebinds=' \
+  'endpoint_route_state_valid=' \
+  'payload_after_cut=' \
+  'runtime_dns_state_matches=' \
+  'wireguard_last_rebind_target_matches=' \
+  'capture_underlay_recovery_failure \
+        "$label" "$expected_iface" "$requested_ms"' \
+  'capture_underlay_routes'
+underlay_recovered_body="$(
+  sed -n '/^underlay_recovered() {$/,/^}$/p' "$MACOS_NETWORK_GUEST"
+)"
+if grep -Fq 'runtime_dns_state_matches' <<<"$underlay_recovered_body" \
+  || grep -Fq 'runtime_has_no_fips_peers' <<<"$underlay_recovered_body"
+then
+  fail "macOS timed underlay probe still includes diagnostic CLI snapshots"
+fi
+run_underlay_body="$(
+  sed -n '/^run_underlay_gate() {$/,/^}$/p' "$MACOS_NETWORK_GUEST"
+)"
+[[ "$(grep -Fc 'verify_underlay_runtime_invariants' <<<"$run_underlay_body")" -eq 2 ]] \
+  || fail "macOS underlay gate does not validate runtime invariants after both timed transitions"
+require_tokens "$MACOS_NETWORK_GUEST" "preexisting installed-state isolation" \
+  'lib-macos-owned-test-app.sh' \
+  'quiesce_installed_state' \
+  'restore_installed_state' \
+  'macos_stop_exact_test_app "$INSTALLED_APP"' \
+  'sudo -n /bin/launchctl bootout "$SYSTEM_SERVICE_LABEL"' \
+  'sudo -n /bin/launchctl bootstrap system "$SYSTEM_SERVICE_PLIST"' \
+  'sudo -n /bin/launchctl kickstart -k "$SYSTEM_SERVICE_LABEL"' \
+  'snapshot_resolver_file "$MAGIC_RESOLVER"' \
+  'resolver_file_matches_snapshot "$MAGIC_RESOLVER"' \
+  'installed-state-restoration.json' \
+  'preexistingResolverStateRestored'
+endpoint_route_body="$(
+  sed -n '/^wireguard_endpoint_route_state_valid() {$/,/^}$/p' \
+    "$MACOS_NETWORK_GUEST"
+)"
+grep -Fq '[[ "$physical_default_iface" == "$expected_underlay"' \
+  <<<"$endpoint_route_body" \
+  || fail "macOS network gate does not bind IPv4 bypass ownership to the selected default"
+grep -Fq 'routes == 1 && matching == 1' <<<"$endpoint_route_body" \
+  || fail "macOS network gate does not require one exact global endpoint bypass"
+ipv4_endpoint_route_body="$(
+  sed -n '/physical_default_iface=/,$p' <<<"$endpoint_route_body"
+)"
+if grep -Fq '"$endpoint_iface" == "$expected_underlay"' \
+  <<<"$ipv4_endpoint_route_body"; then
+  fail "macOS IPv4 recovery still depends on the stale route-get lookup cache"
+fi
+grep -Fq '[[ "$ENDPOINT_HOST" == "$expected_gateway" ]]' \
+  <<<"$endpoint_route_body" \
+  || fail "macOS network gate does not recognize a direct gateway endpoint route"
+grep -Fq 'direct_gateway_endpoint' <<<"$endpoint_route_body" \
+  || fail "macOS network gate does not distinguish direct gateway endpoints"
+grep -Fq 'direct_gateway_endpoint == "true" && matching >= 1' \
+  <<<"$endpoint_route_body" \
+  || fail "macOS network gate rejects preexisting direct gateway neighbor routes"
+if grep -Fq '"$endpoint_iface" == "$wg_iface"' <<<"$endpoint_route_body"; then
+  fail "macOS network gate still expects the obsolete scoped endpoint bypass"
+fi
 crash_restart_transport_body="$(
   sed -n '/^crash_restart_transport_live() {$/,/^}$/p' \
     "$MACOS_NETWORK_GUEST"
@@ -947,9 +1179,87 @@ do
 done
 [[ "$(grep -Fc 'connected_peer_count") == "0"' "$NETWORK_EVIDENCE")" == 2 ]] \
   || fail "macOS release evidence does not preserve the isolated zero-peer runtime contract"
+require_tokens "$NETWORK_EVIDENCE" "macOS split underlay timing evidence" \
+  'primary_to_secondary_activation_ms' \
+  'secondary_to_primary_activation_ms' \
+  'first_total == first_activation + first' \
+  'second_total == second_activation + second' \
+  '"underlayActivationMilliseconds"' \
+  '"handoffTransitionMilliseconds"'
 
 MACOS_DEFINITIONS="$COMBINED_DIR/macos-network-definitions.sh"
-sed '/^validate_inputs$/,$d' "$MACOS_NETWORK_GUEST" >"$MACOS_DEFINITIONS"
+printf 'export NVPN_MACOS_NETWORK_ROOT=%q\n' "$ROOT" >"$MACOS_DEFINITIONS"
+sed '/^validate_inputs$/,$d' "$MACOS_NETWORK_GUEST" >>"$MACOS_DEFINITIONS"
+
+TIMING_PROBE_DIR="$COMBINED_DIR/macos-underlay-timing"
+mkdir -p "$TIMING_PROBE_DIR"
+bash -s -- "$MACOS_DEFINITIONS" "$TIMING_PROBE_DIR" <<'BASH'
+set -euo pipefail
+definitions="$1"
+probe_dir="$2"
+set -- definitions-only
+# shellcheck disable=SC1090
+source "$definitions"
+RECOVERY_DEADLINE_MS=4000
+ACTIVATION_DEADLINE_MS=10000
+capture_underlay_recovery_failure() { return 0; }
+sleep() { return 0; }
+next_value() {
+  local values="$1" cursor="$2" index value
+  index="$(<"$cursor")"
+  value="$(sed -n "$((index + 1))p" "$values")"
+  [[ -n "$value" ]] || return 1
+  printf '%s\n' "$((index + 1))" >"$cursor"
+  printf '%s\n' "$value"
+}
+run_success_case() {
+  printf '100\n5100\n8500\n8600\n' >"$probe_dir/times"
+  printf '0\n' >"$probe_dir/time-cursor"
+  printf '0\n' >"$probe_dir/physical-cursor"
+  printf '0\n' >"$probe_dir/recovery-cursor"
+  monotonic_ms() {
+    next_value "$probe_dir/times" "$probe_dir/time-cursor"
+  }
+  physical_underlay_selected() {
+    local count
+    count="$(<"$probe_dir/physical-cursor")"
+    printf '%s\n' "$((count + 1))" >"$probe_dir/physical-cursor"
+    ((count >= 1))
+  }
+  underlay_recovered() {
+    local count
+    count="$(<"$probe_dir/recovery-cursor")"
+    printf '%s\n' "$((count + 1))" >"$probe_dir/recovery-cursor"
+    ((count >= 1))
+  }
+  [[ "$(wait_for_underlay_recovery handoff en0 100 1 1)" \
+    == $'3500\t5000\t8500' ]]
+}
+run_product_timeout_case() {
+  printf '100\n5100\n9201\n' >"$probe_dir/times"
+  printf '0\n' >"$probe_dir/time-cursor"
+  printf '0\n' >"$probe_dir/physical-cursor"
+  monotonic_ms() {
+    next_value "$probe_dir/times" "$probe_dir/time-cursor"
+  }
+  physical_underlay_selected() {
+    local count
+    count="$(<"$probe_dir/physical-cursor")"
+    printf '%s\n' "$((count + 1))" >"$probe_dir/physical-cursor"
+    ((count >= 1))
+  }
+  underlay_recovered() { return 1; }
+  if wait_for_underlay_recovery handoff en0 100 1 1 \
+    >"$probe_dir/timeout.out" 2>"$probe_dir/timeout.err"
+  then
+    return 1
+  fi
+  grep -Fq 'within 4000ms after macOS selected it' \
+    "$probe_dir/timeout.err"
+}
+run_success_case
+run_product_timeout_case
+BASH
 
 SCUTIL_FIXTURES="$COMBINED_DIR/scutil"
 mkdir -p "$SCUTIL_FIXTURES"
@@ -1130,7 +1440,7 @@ text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 linux_start = text.index("run_linux_exclusive_desktop_gates() {")
 windows_start = text.index("run_windows_exclusive_desktop_gates() {")
 macos_start = text.index("run_macos_exclusive_desktop_gates() {")
-serial_end = text.index("\nrelease_gate_perf_output_dir() {", macos_start)
+serial_end = text.index("\nrun_macos_post_build_lane() {", macos_start)
 linux = text[linux_start:windows_start]
 windows = text[windows_start:macos_start]
 macos = text[macos_start:serial_end]
@@ -1156,36 +1466,42 @@ main_end = text.rindex('\nmain "$@"')
 main = text[main_start:main_end]
 prep = [
     '"Windows platform"',
-    '"macOS platform UI"',
     '"Linux platform UI"',
 ]
 prep_positions = [main.index(item) for item in prep]
 host_validation = main.index('"Host static and Rust validation"')
 if any(position >= host_validation for position in prep_positions):
     raise SystemExit("an isolated desktop lane starts after host validation")
+macos_post_build = main.index(
+    '"macOS post-build UI, idle CPU, and desktop network"'
+)
 join_positions = [
     main.index(
         'release_gate_parallel_wait_group "${concurrent_validation_lanes[@]}"'
     )
 ]
+if macos_post_build <= max(join_positions):
+    raise SystemExit("macOS accessibility lane still overlaps cold build lanes")
 order = [
-    "run_desktop_app_launch_smokes",
     "run_linux_exclusive_desktop_gates",
     "run_windows_exclusive_desktop_gates",
-    "run_macos_exclusive_desktop_gates",
+    "verify_paid_exit_seller_ui_gates",
+    "run_mobile_idle_cpu_gates",
+    "run_mobile_wireguard_exit_gates",
+    "run_android_legacy_replacement_gate",
+    "run_mobile_underlay_change_gates",
+    "run_mobile_join_e2e_gate",
+    "seal_frozen_ios_release_gate",
+    "run_windows_release_mobile_join_e2e_gate",
+    "run_linux_release_mobile_join_e2e_gate",
     "run_mobile_qr_join_latency_gate",
-    "run_public_fips_transit_gate",
+    "run_local_fips_transit_gate",
     "run_docker_signal_gates",
     "run_docker_isolated_functional_gates",
     "run_docker_perf_gate",
     "./scripts/release-gate-host-pair-latency.sh",
     "./scripts/release-gate-host-pair-loaded-latency.sh",
     "run_macos_daemon_idle_cpu_gate",
-    "run_mobile_idle_cpu_gates",
-    "run_mobile_wireguard_exit_gates",
-    "run_android_legacy_replacement_gate",
-    "run_mobile_underlay_change_gates",
-    "run_mobile_join_e2e_gate",
 ]
 positions = [main.index(item) for item in order]
 if max(join_positions) >= positions[0] or positions != sorted(positions):
@@ -1216,6 +1532,22 @@ for host_gate in "$WINDOWS_HOST_ENTRY" "$LINUX_HOST_ENTRY"; do
     fail "$(basename "$host_gate") still compiles its peer on Vader"
   fi
 done
+for isolated_ssh in \
+  "$WINDOWS_HOST_ENTRY" "$WINDOWS_HOST_LIB" \
+  "$LINUX_HOST_ENTRY" "$LINUX_HOST_LIB" \
+  "$HOST_PEER_IMPORT" "$LINUX_SYNC" "$WINDOWS_SYNC"
+do
+  require_tokens "$isolated_ssh" "release SSH process ownership" \
+    'ControlMaster=no' \
+    'ControlPersist=no' \
+    'ControlPath=none'
+done
+if grep -Fq '+=(-J ' \
+  "$WINDOWS_HOST_LIB" "$LINUX_HOST_LIB" "$LINUX_HOST_ENTRY" \
+  "$LINUX_SYNC" "$WINDOWS_SYNC"
+then
+  fail "release SSH still uses a jump shorthand that can escape its lane"
+fi
 require_tokens "$HOST_PEER_IMPORT" "immutable Mac-to-Vader peer import" \
   'prepare-macos-release-fips-peer.sh' \
   'verify-host-linux-peer-artifact.py' \
@@ -1412,8 +1744,7 @@ require_tokens "$LINUX_HOST" "detached guest-runner lifecycle" \
   'wait_for_guest_runner_success' \
   'stop_guest_runner_unit'
 require_tokens "$LINUX_HOST" "fail-closed runtime evidence capture" \
-  'capture_guest_state secondary' \
-  'capture_guest_state primary' \
+  'capture_guest_state && guest_capture_succeeded=1' \
   'guest_capture_required=' \
   'guest_capture_succeeded=1' \
   'peer_capture_required=' \

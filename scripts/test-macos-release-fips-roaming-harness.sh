@@ -27,6 +27,24 @@ require_tokens() {
 bash -n "$CONTROLLER"
 bash -n "$GUEST"
 
+PREPARE_RECOVERY_DEFINITIONS="$TMP_ROOT/prepare-recovery-definitions.sh"
+sed -n '/^poll_remote_prepare_status() {$/,/^}$/p' "$CONTROLLER" \
+  >"$PREPARE_RECOVERY_DEFINITIONS"
+sed -n '/^run_prepare() {$/,/^}$/p' "$CONTROLLER" \
+  >>"$PREPARE_RECOVERY_DEFINITIONS"
+bash -s -- "$PREPARE_RECOVERY_DEFINITIONS" "$TMP_ROOT" <<'BASH'
+set -euo pipefail
+# shellcheck disable=SC1090
+source "$1"
+recovery_log="$2/prepare-recovery.log"
+remote_phase() { return 255; }
+poll_remote_prepare_status() { printf 'pass\n'; }
+run_prepare 2>"$recovery_log"
+grep -Fq \
+  'macOS prepare SSH transport dropped after the verified remote action completed' \
+  "$recovery_log"
+BASH
+
 require_tokens "$CONTROLLER" "host-local exit fixture" \
   'FIXTURE_HOST="${NVPN_MACOS_WG_FIXTURE_HOST_IP:-}"' \
   'unset NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST' \
@@ -42,7 +60,17 @@ require_tokens "$CONTROLLER" "host-local exit fixture" \
   'mobile_wg_fixture_dns_evidence_snapshot' \
   'mobile_wg_fixture_assert_dns_case_evidence' \
   'wait_for_fixture_dns_quiet' \
+  'RUST_LOG=info,nvpn::secure_dns_runtime=debug' \
+  'NVPN_MACOS_UNDERLAY_ACTIVATION_DEADLINE_MS=$ACTIVATION_DEADLINE_MS' \
   'MACOS_VM_WIREGUARD_EXIT_E2E_OK'
+require_tokens "$CONTROLLER" "transport-safe prepare and cleanup" \
+  'run_prepare' \
+  'poll_remote_prepare_status' \
+  'results/prepare.txt' \
+  'macOS prepare SSH transport dropped after the verified remote action completed' \
+  'UNDERLAY_STARTED=1' \
+  '[[ "$UNDERLAY_STARTED" -eq 1 ]] && lane=secondary' \
+  'preserving macOS guest state after incomplete cleanup'
 
 for forbidden in \
   NVPN_MOBILE_WG_EXIT_FIXTURE_SSH_HOST= \
@@ -87,7 +115,13 @@ require_tokens "$GUEST" "production WireGuard lifecycle" \
   'wireguard_endpoint_route_state_valid' \
   'wireguard_routes_live' \
   'runtime_dns_state_matches' \
+  'capture_dns_case_failure' \
+  'dns-$DNS_LABEL-daemon.log' \
+  'dns-$DNS_LABEL-status.json' \
   'payload_after "$requested_ms"' \
+  'physical_underlay_selected "$expected_iface"' \
+  'activation_elapsed=$((physical_ready_ms - requested_ms))' \
+  'product_elapsed=$((now - physical_ready_ms))' \
   'wireguard_last_rebind_target_is "$expected_iface"' \
   'wait_for_crash_live_precondition' \
   'crash_fail_closed_after_sigkill' \

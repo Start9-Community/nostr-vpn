@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
@@ -30,6 +30,7 @@ WG_LISTEN_PORT=51821
 PAID_EXIT_RESALE_TARGET="${NVPN_E2E_PAID_EXIT_RESALE_TARGET:-203.0.113.100}"
 PAID_EXIT_MODE="${NVPN_EXIT_NODE_E2E_PAID:-0}"
 PAID_EXIT_PAYMENT_MODE="${NVPN_EXIT_NODE_E2E_PAYMENT_MODE:-spilman}"
+PAID_EXIT_SELECTION_MODE="${NVPN_EXIT_NODE_E2E_SELECTION_MODE:-manual}"
 PAID_EXIT_MINT="${NVPN_EXIT_NODE_E2E_MINT:-}"
 PAID_EXIT_PRICE_MSAT_PER_GB="${NVPN_EXIT_NODE_E2E_PRICE_MSAT_PER_GB:-1000000}"
 PAID_EXIT_TOKEN_AMOUNT_SAT="${NVPN_EXIT_NODE_E2E_TOKEN_AMOUNT_SAT:-10}"
@@ -43,10 +44,23 @@ PAID_EXIT_SPILMAN_WALLET_TOPUP_SAT="${NVPN_EXIT_NODE_E2E_SPILMAN_WALLET_TOPUP_SA
 PAID_EXIT_SPILMAN_FREE_PROBE_UNITS="${NVPN_EXIT_NODE_E2E_SPILMAN_FREE_PROBE_UNITS:-0}"
 PAID_EXIT_SPILMAN_GRACE_UNITS="${NVPN_EXIT_NODE_E2E_SPILMAN_GRACE_UNITS:-65536}"
 PAID_EXIT_PROBE_PORT="${NVPN_EXIT_NODE_E2E_PROBE_PORT:-8080}"
+PAID_EXIT_MINT_OUTAGE="${NVPN_EXIT_NODE_E2E_MINT_OUTAGE:-0}"
 FIXTURE_READY_DEADLINE_SECS=30
 FIXTURE_CONNECT_TIMEOUT_SECS=2
 PAID_EXIT_SESSION_ID=""
 PAID_EXIT_PROBE_JSON=""
+
+case "$PAID_EXIT_SELECTION_MODE" in
+  manual|automatic) ;;
+  *)
+    echo "exit-node docker e2e failed: unsupported paid-exit selection mode '$PAID_EXIT_SELECTION_MODE'" >&2
+    exit 2
+    ;;
+esac
+if [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" && "$PAID_EXIT_PAYMENT_MODE" != "spilman" ]]; then
+  echo "exit-node docker e2e failed: automatic paid-exit selection requires the production Spilman wallet path" >&2
+  exit 2
+fi
 
 cleanup() {
   COMPOSE_PROFILES=paid-exit \
@@ -60,6 +74,9 @@ cleanup() {
       sleep 1
     done
   done
+  if [[ -n "${HOST_LOG_DIR:-}" ]]; then
+    rm -rf "$HOST_LOG_DIR"
+  fi
 }
 
 dump_debug() {
@@ -98,6 +115,14 @@ on_exit() {
   cleanup
   exit "$exit_code"
 }
+on_error() {
+  local exit_code=$?
+  local line="$1"
+  local command="$2"
+  printf 'exit-node docker e2e command failed at line %s (exit %s): %s\n' \
+    "$line" "$exit_code" "$command" >&2
+}
+trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 trap on_exit EXIT
 
 compact_json() {
@@ -123,6 +148,17 @@ nostr_pubkey_from_config() {
       }
     ' '$CONFIG_PATH'
   " | tr -d '\r\"'
+}
+
+use_fips_only_control_pubsub() {
+  local node="$1"
+  "${COMPOSE[@]}" exec -T "$node" sh -lc "
+    cat >> '$CONFIG_PATH' <<'EOF'
+
+[nostr.pubsub]
+mode = \"client\"
+EOF
+  "
 }
 
 wait_for_service() {
@@ -198,6 +234,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/ip':
             self.send_json({'ip': EXIT_IP})
             return
+        if parsed.path == '/source-ip':
+            self.send_json({'ip': self.client_address[0]})
+            return
         if parsed.path.startswith('/geoip/'):
             self.send_json({'country_code': COUNTRY, 'asn': ASN})
             return
@@ -263,6 +302,71 @@ assert_exact_paid_exit_offer() {
   exit 1
 }
 
+buyer_paid_session_persisted() {
+  local status="$1"
+  local session_id="$2"
+  local realized_ip="$3"
+  local initial_paid_msat="$4"
+  jq -e \
+    --arg sid "$session_id" \
+    --arg ip "$realized_ip" \
+    --argjson initial_paid_msat "$initial_paid_msat" '
+      any(.sessions[]?;
+        .session_id == $sid
+        and .realized_exit_ip == $ip
+        and .observed_country_code == "FI"
+        and .observed_asn == 64500
+        and .country_claim.status == "match"
+        and .country_claim.matches == true
+        and ((.quality.latency_ms | type) == "number")
+        and ((.quality.jitter_ms | type) == "number")
+        and .quality.packet_loss_ppm == 0
+        and ((.quality.down_bps // 0) > 0)
+        and ((.quality.up_bps // 0) > 0)
+        and .payment.paid_msat > $initial_paid_msat
+        and .payment.cashu_spilman != null
+        and .routing.state == "paid"
+        and .routing.allow_routing == true
+      )
+    ' <<<"$status" >/dev/null
+}
+
+automatic_buyer_paid_session_persisted() {
+  local status="$1"
+  local session_id="$2"
+  local initial_paid_msat="$3"
+  jq -e \
+    --arg sid "$session_id" \
+    --argjson initial_paid_msat "$initial_paid_msat" '
+      any(.sessions[]?;
+        .session_id == $sid
+        and (.realized_exit_ip | type) == "string"
+        and (.realized_exit_ip | length) > 0
+        and ((.quality.latency_ms | type) == "number")
+        and ((.quality.jitter_ms | type) == "number")
+        and .quality.packet_loss_ppm == 0
+        and .payment.paid_msat > $initial_paid_msat
+        and .payment.cashu_spilman.has_funding == true
+        and .payment.cashu_spilman.has_signature == true
+        and .routing.state == "paid"
+        and .routing.allow_routing == true
+      )
+    ' <<<"$status" >/dev/null
+}
+
+automatic_buyer_session_funded() {
+  local status="$1"
+  local session_id="$2"
+  jq -e --arg sid "$session_id" '
+    any(.sessions[]?;
+      .session_id == $sid
+      and .payment.cashu_spilman.has_funding == true
+      and .payment.cashu_spilman.has_signature == true
+      and .routing.allow_routing == true
+    )
+  ' <<<"$status" >/dev/null
+}
+
 ping_until_success() {
   local node="$1"
   local target="$2"
@@ -300,6 +404,37 @@ assert_buyer_egress_source() {
     cat "$capture" >&2 || true
     exit 1
   fi
+  "${COMPOSE[@]}" exec -T node-b python3 - "$PAID_EXIT_RESALE_TARGET" "$PAID_EXIT_PROBE_PORT" "$expected_source" <<'PY'
+import json
+import ipaddress
+import pathlib
+import subprocess
+import sys
+import time
+import urllib.request
+
+host, port, expected_source = sys.argv[1:]
+base = f'http://{host}:{port}'
+store_path = pathlib.Path('/root/.config/nvpn/paid-routes.json')
+def billable_bytes():
+    store = json.loads(store_path.read_text())
+    return sum(record['session']['usage'].get('billable_bytes', 0) for record in store['sessions'].values())
+before = billable_bytes()
+with urllib.request.urlopen(base + '/source-ip', timeout=10) as response:
+    source = json.load(response)['ip']
+assert source == expected_source, f'TCP used {source}, expected {expected_source}'
+with urllib.request.urlopen(base + '/down?bytes=131072', timeout=10) as response:
+    assert response.read() == b'0' * 131072, 'resold download was corrupted'
+with urllib.request.urlopen(base + '/up', data=b'resold-uplink' * 4096, timeout=10) as response:
+    assert response.read() == b'ok', 'resold upload failed'
+answer = subprocess.check_output(['dig', '+short', '+time=3', '+tries=1', 'example.com', 'A'], text=True, timeout=5).strip()
+assert answer and ipaddress.ip_address(answer.splitlines()[-1]).version == 4, 'resold DNS failed'
+deadline = time.monotonic() + 15
+while billable_bytes() <= before and time.monotonic() < deadline:
+    time.sleep(0.25)
+assert billable_bytes() > before, 'resold traffic was not metered'
+PY
+  echo "Paid buyer $label uplink: ICMP and TCP egress, upload, download, DNS, metering passed"
 }
 
 assert_buyer_egress_blocked() {
@@ -312,6 +447,20 @@ assert_buyer_egress_blocked() {
     else
       consecutive_failures="$((consecutive_failures + 1))"
       if ((consecutive_failures >= 3)); then
+        "${COMPOSE[@]}" exec -T node-b python3 - "$PAID_EXIT_RESALE_TARGET" "$PAID_EXIT_PROBE_PORT" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+try:
+    urllib.request.urlopen(f'http://{sys.argv[1]}:{sys.argv[2]}/source-ip', timeout=5)
+except urllib.error.HTTPError:
+    raise SystemExit('TCP response received after the seller upstream failed')
+except OSError:
+    pass
+else:
+    raise SystemExit('TCP traffic leaked after the seller upstream failed')
+PY
         return 0
       fi
     fi
@@ -388,6 +537,11 @@ run_spilman_resale_matrix() {
   "${COMPOSE[@]}" exec -T node-a ip route get "$PAID_EXIT_RESALE_TARGET" | grep -Fq 'dev nvpn-wg-exit'
   assert_buyer_egress_source "$WG_UPSTREAM_IP" wireguard
 
+  "${COMPOSE[@]}" exec -T wireguard-upstream ip link del wg0
+  assert_buyer_egress_blocked WireGuard
+
+  configure_paid_exit_wireguard_upstream
+  assert_buyer_egress_source "$WG_UPSTREAM_IP" wireguard-restored
   "${COMPOSE[@]}" exec -T wireguard-upstream ip link del wg0
   assert_buyer_egress_blocked WireGuard
 
@@ -514,9 +668,9 @@ assert_secure_exit_dns() {
     exit 1
   fi
 
-  printf '%s\n' "$dns_result" >/tmp/nvpn-exit-node-secure-dns.log
-  printf 'HTTPS status: %s\n' "$https_status" >>/tmp/nvpn-exit-node-secure-dns.log
-  printf '%s\n' "$doh_packets" >>/tmp/nvpn-exit-node-secure-dns.log
+  printf '%s\n' "$dns_result" >"$SECURE_DNS_LOG"
+  printf 'HTTPS status: %s\n' "$https_status" >>"$SECURE_DNS_LOG"
+  printf '%s\n' "$doh_packets" >>"$SECURE_DNS_LOG"
 }
 
 truthy() {
@@ -634,6 +788,10 @@ if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]] && !
 fi
 
 cleanup
+HOST_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-exit-node.XXXXXX")"
+PUBLIC_PING_LOG="$HOST_LOG_DIR/public-ping.log"
+REALIZED_IP_LOG="$HOST_LOG_DIR/realized-ip.log"
+SECURE_DNS_LOG="$HOST_LOG_DIR/secure-dns.log"
 
 if truthy "$PAID_EXIT_MODE"; then
   export NVPN_EXIT_NODE_E2E_DOCKERFILE="${NVPN_EXIT_NODE_E2E_DOCKERFILE:-Dockerfile.paid-exit-e2e}"
@@ -651,7 +809,9 @@ if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; the
 fi
 
 if ! truthy "${NVPN_EXIT_NODE_E2E_SKIP_BUILD:-0}"; then
-  "${COMPOSE[@]}" build "${SERVICES[@]}" node-b >/dev/null
+  # Every service in this topology uses the same image. Building several
+  # services concurrently makes BuildKit race while exporting that shared tag.
+  "${COMPOSE[@]}" build node-a >/dev/null
 fi
 
 "${COMPOSE[@]}" up -d "${SERVICES[@]}" >/dev/null
@@ -677,6 +837,7 @@ block_docker_nat_shortcuts
 
 for node in node-a node-b; do
   "${COMPOSE[@]}" exec -T "$node" nvpn init --force >/dev/null
+  use_fips_only_control_pubsub "$node"
 done
 
 ALICE_NPUB="$(nostr_pubkey_from_config node-a)"
@@ -771,6 +932,11 @@ if truthy "$PAID_EXIT_MODE"; then
     exit 1
   fi
 
+  "${COMPOSE[@]}" exec -T node-a nvpn start --daemon --connect \
+    --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
+  "${COMPOSE[@]}" exec -T node-b nvpn start --daemon --connect \
+    --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
+
   "${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit wallet \
     --config "$CONFIG_PATH" \
     --json \
@@ -785,67 +951,90 @@ if truthy "$PAID_EXIT_MODE"; then
     wait_for_paid_exit_wallet_balance node-b "$PAID_EXIT_MINT" "$PAID_EXIT_SPILMAN_WALLET_TOPUP_SAT" >/dev/null
   fi
 
-  # Exercise a provider-link import over the production FIPS pubsub path. The
-  # link only constrains the seller, ceiling, and mint; the signed offer remains
-  # authoritative for the receiver and channel terms used below.
-  "${COMPOSE[@]}" exec -T node-a nvpn start --daemon --connect \
-    --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
-  "${COMPOSE[@]}" exec -T node-b nvpn start --daemon --connect \
-    --mesh-refresh-interval-secs "$MESH_REFRESH_SECS" >/dev/null
-  DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
-    --config "$CONFIG_PATH" \
-    --duration-secs 20 \
-    --json | tr -d '\r')"
-  assert_exact_paid_exit_offer marketplace "$DISCOVER_JSON"
+  if [[ "$PAID_EXIT_SELECTION_MODE" != "automatic" ]]; then
+    # Exercise a provider-link import over the production FIPS pubsub path. The
+    # link only constrains the seller, ceiling, and mint; the signed offer remains
+    # authoritative for the receiver and channel terms used below.
+    DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
+      --config "$CONFIG_PATH" \
+      --duration-secs 20 \
+      --json | tr -d '\r')"
+    assert_exact_paid_exit_offer marketplace "$DISCOVER_JSON"
 
-  PAID_EXIT_REJECT_MAX_MSAT_PER_GB="$((PAID_EXIT_PRICE_MSAT_PER_GB - 1))"
-  PAID_EXIT_REJECT_PROVIDER_LINK="${PAID_EXIT_PROVIDER_LINK/maxMsatPerGb=${PAID_EXIT_PRICE_MSAT_PER_GB}/maxMsatPerGb=${PAID_EXIT_REJECT_MAX_MSAT_PER_GB}}"
-  if [[ "$PAID_EXIT_REJECT_PROVIDER_LINK" == "$PAID_EXIT_PROVIDER_LINK" ]]; then
-    echo "exit-node docker e2e failed: provider link omitted its price ceiling" >&2
-    printf '%s\n' "$PAID_EXIT_PROVIDER_LINK" >&2
-    exit 1
+    PAID_EXIT_REJECT_MAX_MSAT_PER_GB="$((PAID_EXIT_PRICE_MSAT_PER_GB - 1))"
+    PAID_EXIT_REJECT_PROVIDER_LINK="${PAID_EXIT_PROVIDER_LINK/maxMsatPerGb=${PAID_EXIT_PRICE_MSAT_PER_GB}/maxMsatPerGb=${PAID_EXIT_REJECT_MAX_MSAT_PER_GB}}"
+    if [[ "$PAID_EXIT_REJECT_PROVIDER_LINK" == "$PAID_EXIT_PROVIDER_LINK" ]]; then
+      echo "exit-node docker e2e failed: provider link omitted its price ceiling" >&2
+      printf '%s\n' "$PAID_EXIT_PROVIDER_LINK" >&2
+      exit 1
+    fi
+    DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
+      --config "$CONFIG_PATH" \
+      --duration-secs 20 \
+      --provider "$PAID_EXIT_REJECT_PROVIDER_LINK" \
+      --json | tr -d '\r')"
+    if ! jq -e '.offers | length == 0' <<<"$DISCOVER_JSON" >/dev/null; then
+      echo "exit-node docker e2e failed: targeted import accepted an offer above its price ceiling" >&2
+      printf '%s\n' "$DISCOVER_JSON" >&2
+      exit 1
+    fi
+    DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
+      --config "$CONFIG_PATH" \
+      --duration-secs 0 \
+      --provider "$PAID_EXIT_PROVIDER_LINK" \
+      --json | tr -d '\r')"
+    assert_exact_paid_exit_offer provider-link "$DISCOVER_JSON"
   fi
-  DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
-    --config "$CONFIG_PATH" \
-    --duration-secs 20 \
-    --provider "$PAID_EXIT_REJECT_PROVIDER_LINK" \
-    --json | tr -d '\r')"
-  if ! jq -e '.offers | length == 0' <<<"$DISCOVER_JSON" >/dev/null; then
-    echo "exit-node docker e2e failed: targeted import accepted an offer above its price ceiling" >&2
-    printf '%s\n' "$DISCOVER_JSON" >&2
-    exit 1
-  fi
-  DISCOVER_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit discover \
-    --config "$CONFIG_PATH" \
-    --duration-secs 0 \
-    --provider "$PAID_EXIT_PROVIDER_LINK" \
-    --json | tr -d '\r')"
-  assert_exact_paid_exit_offer provider-link "$DISCOVER_JSON"
   PAID_BUY_CAPACITY_SAT="$PAID_EXIT_TOKEN_AMOUNT_SAT"
   if [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; then
     PAID_BUY_CAPACITY_SAT="$PAID_EXIT_SPILMAN_CHANNEL_CAPACITY_SAT"
   fi
-  BUY_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit buy \
-    --config "$CONFIG_PATH" \
-    --mint "$PAID_EXIT_MINT" \
-    --channel-capacity-sat "$PAID_BUY_CAPACITY_SAT" \
-    --initial-paid-msat "$PAID_EXIT_SPILMAN_OPEN_PAID_MSAT" \
-    --json \
-    "$ALICE_NPUB:internet-exit" | tr -d '\r')"
-  if ! PAID_EXIT_SESSION_ID="$(jq -r '.session.session_id // empty' <<<"$BUY_JSON" 2>/dev/null)"; then
-    echo "exit-node docker e2e failed: buyer session output was not valid JSON" >&2
-    printf '%s\n' "$BUY_JSON" >&2
-    exit 1
-  fi
-  PAID_EXIT_CHANNEL_ID="$(jq -r '.session.channel_id // empty' <<<"$BUY_JSON")"
-  PAID_EXIT_LEASE_ID="$(jq -r '.session.lease_id // empty' <<<"$BUY_JSON")"
-  if [[ -z "$PAID_EXIT_SESSION_ID" || -z "$PAID_EXIT_CHANNEL_ID" || -z "$PAID_EXIT_LEASE_ID" ]]; then
-    echo "exit-node docker e2e failed: buyer session identifiers were not created" >&2
-    printf '%s\n' "$BUY_JSON" >&2
-    exit 1
+  if [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]]; then
+    BUYER_BEFORE_AUTOMATIC="$("${COMPOSE[@]}" exec -T node-b nvpn paid-exit status --json | tr -d '\r')"
+    jq -e '.offers | length == 0' <<<"$BUYER_BEFORE_AUTOMATIC" >/dev/null || {
+      echo "exit-node docker e2e failed: automatic buyer must begin without imported offers" >&2
+      exit 1
+    }
+    if truthy "$PAID_EXIT_MINT_OUTAGE"; then
+      "${COMPOSE[@]}" pause cashu-mint
+    fi
+    "${COMPOSE[@]}" exec -T node-b nvpn set \
+      --config "$CONFIG_PATH" \
+      --internet-source paid_automatic >/dev/null
+    if truthy "$PAID_EXIT_MINT_OUTAGE"; then
+      "${COMPOSE[@]}" exec -T node-b python3 - outage \
+        "http://$PUBLIC_INTERNET_TARGET:$PAID_EXIT_PROBE_PORT" "$NAT_B_PUBLIC_IP" \
+        < "$ROOT_DIR/scripts/e2e-paid-exit-mint-outage.py"
+      "${COMPOSE[@]}" unpause cashu-mint
+      "${COMPOSE[@]}" exec -T node-b python3 - recovered \
+        "http://$PUBLIC_INTERNET_TARGET:$PAID_EXIT_PROBE_PORT" "$NODE_A_PUBLIC_IP" \
+        < "$ROOT_DIR/scripts/e2e-paid-exit-mint-outage.py"
+    fi
+  else
+    BUY_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit buy \
+      --config "$CONFIG_PATH" \
+      --mint "$PAID_EXIT_MINT" \
+      --channel-capacity-sat "$PAID_BUY_CAPACITY_SAT" \
+      --initial-paid-msat "$PAID_EXIT_SPILMAN_OPEN_PAID_MSAT" \
+      --json \
+      "$ALICE_NPUB:internet-exit" | tr -d '\r')"
+    if ! PAID_EXIT_SESSION_ID="$(jq -r '.session.session_id // empty' <<<"$BUY_JSON" 2>/dev/null)"; then
+      echo "exit-node docker e2e failed: buyer session output was not valid JSON" >&2
+      printf '%s\n' "$BUY_JSON" >&2
+      exit 1
+    fi
+    PAID_EXIT_CHANNEL_ID="$(jq -r '.session.channel_id // empty' <<<"$BUY_JSON")"
+    PAID_EXIT_LEASE_ID="$(jq -r '.session.lease_id // empty' <<<"$BUY_JSON")"
+    if [[ -z "$PAID_EXIT_SESSION_ID" || -z "$PAID_EXIT_CHANNEL_ID" || -z "$PAID_EXIT_LEASE_ID" ]]; then
+      echo "exit-node docker e2e failed: buyer session identifiers were not created" >&2
+      printf '%s\n' "$BUY_JSON" >&2
+      exit 1
+    fi
   fi
 
-  if [[ "$PAID_EXIT_PAYMENT_MODE" == "token" ]]; then
+  if [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]]; then
+    : # The running daemon performs selection, health proof, and wallet funding.
+  elif [[ "$PAID_EXIT_PAYMENT_MODE" == "token" ]]; then
     PAID_SENT_AT="$("${COMPOSE[@]}" exec -T node-a date +%s | tr -d '\r')"
     PAID_EXPIRES_AT="$((PAID_SENT_AT + 3600))"
     PAID_ENVELOPE="$(
@@ -889,7 +1078,10 @@ EOF
     PAID_COMPACT="$(printf '%s' "$PAID_STATUS" | compact_json)"
     grep -q '"mode":"cashu_spilman"' <<<"$PAID_COMPACT"
   fi
-  if jq -e 'any(.seller_admissions[]?; .allow_routing == true)' <<<"$PAID_STATUS" >/dev/null; then
+  if [[ "$PAID_EXIT_SELECTION_MODE" != "automatic" ]] \
+    && jq -e 'any(.seller_admissions[]?; .allow_routing == true)' \
+      <<<"$PAID_STATUS" >/dev/null
+  then
     echo "exit-node docker e2e failed: seller admitted a paid route before binding the buyer tunnel address" >&2
     printf '%s\n' "$PAID_STATUS" >&2
     exit 1
@@ -913,6 +1105,27 @@ if truthy "$PAID_EXIT_MODE"; then
     printf '%s\n' "$PAID_STATUS" >&2
     exit 1
   fi
+  if [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]]; then
+    BUYER_PAID_STATUS="$("${COMPOSE[@]}" exec -T node-b nvpn paid-exit status --json | tr -d '\r')"
+    assert_exact_paid_exit_offer automatic "$BUYER_PAID_STATUS"
+    PAID_EXIT_SESSION_ID="$(jq -r \
+      --arg seller "$ALICE_NPUB" \
+      '[.sessions[]? as $session
+        | .channels[]?
+        | select(
+            .channel_id == $session.channel_id
+            and .role == "buyer"
+            and .counterparty_npub == $seller
+          )
+        | $session
+      ] | last | .session_id // empty' \
+      <<<"$BUYER_PAID_STATUS")"
+    if [[ -z "$PAID_EXIT_SESSION_ID" ]]; then
+      echo "exit-node docker e2e failed: automatic selection admitted traffic without a persisted buyer session" >&2
+      printf '%s\n' "$BUYER_PAID_STATUS" >&2
+      exit 1
+    fi
+  fi
 fi
 
 ALICE_STATUS=""
@@ -933,10 +1146,10 @@ for _ in $(seq 1 80); do
   fi
   FIPS_PEERS_READY=0
   if truthy "$PAID_EXIT_MODE"; then
-    if jq -e '.daemon.state.mesh_ready == true and .daemon.state.fips_other_peer_count > 0' \
-      <<<"$BOB_STATUS" >/dev/null; then
-      FIPS_PEERS_READY=1
-    fi
+    # The authenticated paid session and seller admission above are the paid
+    # route readiness proof. Private-roster mesh readiness is intentionally
+    # unrelated to a marketplace-selected exit.
+    FIPS_PEERS_READY=1
   elif grep -q '"mesh_ready":true' <<<"$ALICE_COMPACT" \
     && grep -q '"mesh_ready":true' <<<"$BOB_COMPACT" \
     && grep -q '"connected_peer_count":1' <<<"$ALICE_COMPACT" \
@@ -974,10 +1187,31 @@ if grep -q 'FIPS route refresh failed' <<<"$ALICE_STATUS$BOB_STATUS"; then
   exit 1
 fi
 if truthy "$PAID_EXIT_MODE"; then
-  jq -e '.daemon.state.mesh_ready == true and .daemon.state.fips_other_peer_count > 0' \
-    <<<"$BOB_STATUS" >/dev/null
-  PAID_STATUS="$("${COMPOSE[@]}" exec -T node-a nvpn paid-exit status --json | tr -d '\r')"
-  jq -e 'any(.seller_admissions[]?; .allow_routing == true)' <<<"$PAID_STATUS" >/dev/null
+  if [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]]; then
+    jq -e '.internet_source == "paid_automatic"' <<<"$BOB_STATUS" >/dev/null || {
+      echo "exit-node docker e2e failed: automatic mode was not retained" >&2
+      printf '%s\n' "$BOB_STATUS" >&2
+      exit 1
+    }
+  fi
+  # Automatic selection may replace its first authenticated session while it
+  # persists funding and moves the default route. Do not turn that expected,
+  # brief handoff into a silent `set -e` failure after route readiness.
+  PAID_STATUS=""
+  for _ in $(seq 1 30); do
+    PAID_STATUS="$("${COMPOSE[@]}" exec -T node-a nvpn paid-exit status --json | tr -d '\r')"
+    if jq -e 'any(.seller_admissions[]?; .allow_routing == true)' \
+      <<<"$PAID_STATUS" >/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if ! jq -e 'any(.seller_admissions[]?; .allow_routing == true)' \
+    <<<"$PAID_STATUS" >/dev/null; then
+    echo "exit-node docker e2e failed: paid admission disappeared after route readiness" >&2
+    printf '%s\n' "$PAID_STATUS" >&2
+    exit 1
+  fi
 else
   grep -q '"mesh_ready":true' <<<"$ALICE_COMPACT"
   grep -q '"mesh_ready":true' <<<"$BOB_COMPACT"
@@ -997,7 +1231,39 @@ if [[ -z "$ALICE_TUNNEL_IP" || -z "$BOB_TUNNEL_IP" ]]; then
   exit 1
 fi
 
-DEFAULT_ROUTE="$("${COMPOSE[@]}" exec -T node-b sh -lc "ip route show default | head -n1 | tr -d '\r'")"
+if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]]; then
+  # The free trial route is withdrawn while the wallet funds the channel.
+  # Wait for paid admission before checking the route and capturing its egress.
+  AUTOMATIC_FUNDED_STATUS=""
+  for _ in $(seq 1 30); do
+    AUTOMATIC_FUNDED_STATUS="$("${COMPOSE[@]}" exec -T node-b nvpn paid-exit status --json | tr -d '\r')"
+    if automatic_buyer_session_funded \
+      "$AUTOMATIC_FUNDED_STATUS" "$PAID_EXIT_SESSION_ID"; then
+      break
+    fi
+    sleep 1
+  done
+  if ! automatic_buyer_session_funded \
+    "$AUTOMATIC_FUNDED_STATUS" "$PAID_EXIT_SESSION_ID"; then
+    echo "exit-node docker e2e failed: automatic session was admitted but not funded and signed" >&2
+    printf '%s\n' "$AUTOMATIC_FUNDED_STATUS" >&2
+    exit 1
+  fi
+fi
+
+DEFAULT_ROUTE=""
+PUBLIC_ROUTE=""
+for _ in $(seq 1 30); do
+  DEFAULT_ROUTE="$("${COMPOSE[@]}" exec -T node-b sh -lc \
+    "ip route show default | head -n1 | tr -d '\r'" 2>/dev/null || true)"
+  PUBLIC_ROUTE="$("${COMPOSE[@]}" exec -T node-b sh -lc \
+    "ip route get $PUBLIC_INTERNET_TARGET | tr -d '\r'" 2>/dev/null || true)"
+  if grep -q 'dev utun100' <<<"$DEFAULT_ROUTE" \
+    && grep -q 'dev utun100' <<<"$PUBLIC_ROUTE"; then
+    break
+  fi
+  sleep 1
+done
 
 if ! grep -q 'dev utun100' <<<"$DEFAULT_ROUTE"; then
   echo "exit-node docker e2e failed: default route did not switch to the tunnel" >&2
@@ -1005,25 +1271,22 @@ if ! grep -q 'dev utun100' <<<"$DEFAULT_ROUTE"; then
   exit 1
 fi
 
-PUBLIC_ROUTE="$("${COMPOSE[@]}" exec -T node-b sh -lc "ip route get $PUBLIC_INTERNET_TARGET | tr -d '\r'")"
-
 if ! grep -q 'dev utun100' <<<"$PUBLIC_ROUTE"; then
   echo "exit-node docker e2e failed: public internet route did not switch to the tunnel" >&2
   echo "$PUBLIC_ROUTE"
   exit 1
 fi
 
-REALIZED_IP_LOG="/tmp/nvpn-exit-node-realized-ip.log"
 "${COMPOSE[@]}" exec -T internet-target sh -lc \
   "timeout 12 tcpdump -ni any -c 1 'icmp and src host $NODE_A_PUBLIC_IP and dst host $PUBLIC_INTERNET_TARGET'" \
   >"$REALIZED_IP_LOG" 2>&1 &
 TCPDUMP_PID=$!
 sleep 1
 
-if ! ping_until_success node-b "$PUBLIC_INTERNET_TARGET" /tmp/nvpn-exit-node-public-ping.log; then
+if ! ping_until_success node-b "$PUBLIC_INTERNET_TARGET" "$PUBLIC_PING_LOG"; then
   echo "exit-node docker e2e failed: unable to reach public internet target '$PUBLIC_INTERNET_TARGET' through exit node" >&2
-  if [[ -f /tmp/nvpn-exit-node-public-ping.log ]]; then
-    cat /tmp/nvpn-exit-node-public-ping.log
+  if [[ -f "$PUBLIC_PING_LOG" ]]; then
+    cat "$PUBLIC_PING_LOG"
   fi
   exit 1
 fi
@@ -1040,59 +1303,110 @@ fi
 if truthy "$PAID_EXIT_MODE"; then
   if [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; then
     PROBE_BASE_URL="http://$PUBLIC_INTERNET_TARGET:$PAID_EXIT_PROBE_PORT"
-    PAID_EXIT_PROBE_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit probe \
-      --config "$CONFIG_PATH" \
-      "$PAID_EXIT_SESSION_ID" \
-      --no-stun \
-      --ip-url "$PROBE_BASE_URL/ip" \
-      --geoip-url-template "$PROBE_BASE_URL/geoip/{ip}" \
-      --download-url "$PROBE_BASE_URL/down?bytes={bytes}" \
-      --upload-url "$PROBE_BASE_URL/up" \
-      --bandwidth-bytes 1024 \
-      --samples 2 \
-      --timeout-secs 5 \
-      --no-reload-daemon \
-      --json | tr -d '\r')"
-    if ! jq -e --arg ip "$NODE_A_PUBLIC_IP" '
-      .measurement.realized_exit_ip == $ip
-      and .measurement.observed_country_code == "FI"
-      and .measurement.observed_asn == 64500
-      and ((.measurement.quality.latency_ms | type) == "number")
-      and ((.measurement.quality.jitter_ms | type) == "number")
-      and .measurement.quality.packet_loss_ppm == 0
-      and ((.measurement.quality.down_bps // 0) > 0)
-      and ((.measurement.quality.up_bps // 0) > 0)
-      and .geoip_error == null
-      and .bandwidth_error == null
-      and .probe.changed == true
-    ' <<<"$PAID_EXIT_PROBE_JSON" >/dev/null; then
-      echo "exit-node docker e2e failed: buyer paid-exit probe did not measure realized IP, GeoIP, and bandwidth" >&2
-      printf '%s\n' "$PAID_EXIT_PROBE_JSON" >&2
-      exit 1
+    if [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]]; then
+      "${COMPOSE[@]}" exec -T node-b python3 -c '
+import sys
+import time
+import urllib.request
+
+for _ in range(64):
+    with urllib.request.urlopen(sys.argv[1], timeout=15) as response:
+        body = response.read()
+    if len(body) != 32768:
+        raise SystemExit(f"unexpected paid-exit download length: {len(body)}")
+    time.sleep(0.25)
+' "$PROBE_BASE_URL/down?bytes=32768"
+
+      # Confirm the GUI sees the funded connection after its periodic status
+      # snapshot catches up with automatic selection and payment processing.
+      BUYER_RUNTIME_STATE=""
+      for _ in $(seq 1 30); do
+        BUYER_RUNTIME_STATE="$("${COMPOSE[@]}" exec -T node-b cat /root/.config/nvpn/daemon.state.json)"
+        if jq -e --arg seller "$ALICE_NPUB" '
+          .vpn_active == true and .expected_peer_count > 0
+          and any(.peers[]?; .fips_endpoint_npub == $seller and .reachable == true)
+        ' <<<"$BUYER_RUNTIME_STATE" >/dev/null; then
+          break
+        fi
+        sleep 1
+      done
+      jq -e --arg seller "$ALICE_NPUB" '
+        .vpn_active == true and .expected_peer_count > 0
+        and any(.peers[]?; .fips_endpoint_npub == $seller and .reachable == true)
+      ' <<<"$BUYER_RUNTIME_STATE" >/dev/null || {
+        echo "exit-node docker e2e failed: automatic seller route is not active in GUI runtime state" >&2
+        exit 1
+      }
+    else
+      PAID_EXIT_PROBE_JSON="$("${COMPOSE[@]}" exec -T node-b env RUST_LOG=warn nvpn paid-exit probe \
+        --config "$CONFIG_PATH" \
+        "$PAID_EXIT_SESSION_ID" \
+        --no-stun \
+        --ip-url "$PROBE_BASE_URL/ip" \
+        --geoip-url-template "$PROBE_BASE_URL/geoip/{ip}" \
+        --download-url "$PROBE_BASE_URL/down?bytes={bytes}" \
+        --upload-url "$PROBE_BASE_URL/up" \
+        --bandwidth-bytes 1024 \
+        --samples 2 \
+        --timeout-secs 5 \
+        --no-reload-daemon \
+        --json | tr -d '\r')"
+      if ! jq -e --arg ip "$NODE_A_PUBLIC_IP" '
+        .measurement.realized_exit_ip == $ip
+        and .measurement.observed_country_code == "FI"
+        and .measurement.observed_asn == 64500
+        and ((.measurement.quality.latency_ms | type) == "number")
+        and ((.measurement.quality.jitter_ms | type) == "number")
+        and .measurement.quality.packet_loss_ppm == 0
+        and ((.measurement.quality.down_bps // 0) > 0)
+        and ((.measurement.quality.up_bps // 0) > 0)
+        and .geoip_error == null
+        and .bandwidth_error == null
+        and .probe.changed == true
+      ' <<<"$PAID_EXIT_PROBE_JSON" >/dev/null; then
+        echo "exit-node docker e2e failed: buyer paid-exit probe did not measure realized IP, GeoIP, and bandwidth" >&2
+        printf '%s\n' "$PAID_EXIT_PROBE_JSON" >&2
+        exit 1
+      fi
     fi
 
-    BUYER_PAID_STATUS="$("${COMPOSE[@]}" exec -T node-b nvpn paid-exit status --json | tr -d '\r')"
-    if ! jq -e --arg sid "$PAID_EXIT_SESSION_ID" --arg ip "$NODE_A_PUBLIC_IP" \
-      --argjson initial_paid_msat "$PAID_EXIT_SPILMAN_OPEN_PAID_MSAT" '
-      any(.sessions[]?;
-        .session_id == $sid
-        and .realized_exit_ip == $ip
-        and .observed_country_code == "FI"
-        and .observed_asn == 64500
-        and .country_claim.status == "match"
-        and .country_claim.matches == true
-        and ((.quality.latency_ms | type) == "number")
-        and ((.quality.jitter_ms | type) == "number")
-        and .quality.packet_loss_ppm == 0
-        and ((.quality.down_bps // 0) > 0)
-        and ((.quality.up_bps // 0) > 0)
-        and .payment.paid_msat > $initial_paid_msat
-        and .payment.cashu_spilman != null
-        and .routing.state == "paid"
-        and .routing.allow_routing == true
-      )
-    ' <<<"$BUYER_PAID_STATUS" >/dev/null; then
-      echo "exit-node docker e2e failed: buyer paid-exit status did not persist realized IP and quality" >&2
+    BUYER_PAID_STATUS=""
+    for _ in $(seq 1 30); do
+      BUYER_PAID_STATUS="$("${COMPOSE[@]}" exec -T node-b nvpn paid-exit status --json | tr -d '\r')"
+      if [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]] \
+        && automatic_buyer_paid_session_persisted \
+          "$BUYER_PAID_STATUS" \
+          "$PAID_EXIT_SESSION_ID" \
+          "$PAID_EXIT_SPILMAN_OPEN_PAID_MSAT"; then
+        break
+      fi
+      if [[ "$PAID_EXIT_SELECTION_MODE" != "automatic" ]] \
+        && buyer_paid_session_persisted \
+          "$BUYER_PAID_STATUS" \
+          "$PAID_EXIT_SESSION_ID" \
+          "$NODE_A_PUBLIC_IP" \
+          "$PAID_EXIT_SPILMAN_OPEN_PAID_MSAT"; then
+        break
+      fi
+      sleep 1
+    done
+    BUYER_PAID_SESSION_READY=0
+    if [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]] \
+      && automatic_buyer_paid_session_persisted \
+        "$BUYER_PAID_STATUS" \
+        "$PAID_EXIT_SESSION_ID" \
+        "$PAID_EXIT_SPILMAN_OPEN_PAID_MSAT"; then
+      BUYER_PAID_SESSION_READY=1
+    elif [[ "$PAID_EXIT_SELECTION_MODE" != "automatic" ]] \
+      && buyer_paid_session_persisted \
+        "$BUYER_PAID_STATUS" \
+        "$PAID_EXIT_SESSION_ID" \
+        "$NODE_A_PUBLIC_IP" \
+        "$PAID_EXIT_SPILMAN_OPEN_PAID_MSAT"; then
+      BUYER_PAID_SESSION_READY=1
+    fi
+    if [[ "$BUYER_PAID_SESSION_READY" != 1 ]]; then
+      echo "exit-node docker e2e failed: buyer session did not persist health, funding, and paid routing" >&2
       printf '%s\n' "$BUYER_PAID_STATUS" >&2
       exit 1
     fi
@@ -1139,6 +1453,20 @@ if truthy "$PAID_EXIT_MODE"; then
   fi
 fi
 
+# The all-mode matrix needs Automatic-eligible pricing and its larger wallet.
+# Keep the manual fixture's expensive, tightly funded billing checks separate.
+if truthy "$PAID_EXIT_MODE" \
+  && [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" \
+    && "$PAID_EXIT_SELECTION_MODE" == "automatic" ]]; then
+  source "$ROOT_DIR/scripts/e2e-internet-mode-switches.sh"
+  run_internet_mode_switch_matrix
+fi
+
+if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]]; then
+  "${COMPOSE[@]}" exec -T node-b python3 - "$PROBE_BASE_URL" "$PAID_EXIT_PRICE_MSAT_PER_GB" \
+    < "$ROOT_DIR/scripts/e2e-paid-exit-renewal.py"
+fi
+
 if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; then
   run_spilman_resale_matrix
 fi
@@ -1148,10 +1476,10 @@ echo "$DEFAULT_ROUTE"
 echo "--- Public internet route ---"
 echo "$PUBLIC_ROUTE"
 echo "--- Public internet ping ---"
-cat /tmp/nvpn-exit-node-public-ping.log
+cat "$PUBLIC_PING_LOG"
 if ! truthy "$PAID_EXIT_MODE"; then
   echo "--- Secure DNS through exit ---"
-  cat /tmp/nvpn-exit-node-secure-dns.log
+  cat "$SECURE_DNS_LOG"
 fi
 echo "--- Realized exit IP capture ---"
 cat "$REALIZED_IP_LOG"
@@ -1163,9 +1491,37 @@ fi
 assert_idle_cpu_below node-a
 assert_idle_cpu_below node-b
 
+if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_SELECTION_MODE" == "automatic" ]]; then
+  "${COMPOSE[@]}" exec -T node-b python3 - <<'PY'
+import json
+import pathlib
+import subprocess
+import time
+
+data = pathlib.Path('/root/.config/nvpn')
+store = json.loads((data / 'paid-routes.json').read_text())
+selected = store['selected_buyer_session_id']
+channel_id = store['sessions'][selected]['session']['payment']['channel_id']
+subprocess.run(['nvpn', 'set', '--internet-source', 'direct'], check=True, stdout=subprocess.DEVNULL)
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline:
+    store = json.loads((data / 'paid-routes.json').read_text())
+    closing = store['channels'][channel_id]['status'] in ('closing', 'closed')
+    pending = list((data / 'paid-exit-payment-outbox').glob('*.json'))
+    if closing and not pending:
+        status = json.loads(subprocess.check_output(['nvpn', 'status', '--json']))
+        assert status['internet_source'] == 'direct'
+        print('Leaving paid mode: final payment acknowledged in Direct mode; outbox empty')
+        break
+    time.sleep(1)
+else:
+    raise AssertionError('final payment was not acknowledged after removing the exit route')
+PY
+fi
+
 if truthy "$PAID_EXIT_MODE"; then
   if [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; then
-    echo "paid-exit docker e2e passed: the automatically streamed Spilman balance update allowed paid tunnel traffic, and the public target observed exit IP $NODE_A_PUBLIC_IP"
+    echo "paid-exit docker e2e passed: $PAID_EXIT_SELECTION_MODE selection and the automatically streamed Spilman balance update allowed paid tunnel traffic, and the public target observed exit IP $NODE_A_PUBLIC_IP"
   else
     echo "paid-exit docker e2e passed: token-lease admission allowed paid tunnel traffic, and the public target observed exit IP $NODE_A_PUBLIC_IP"
   fi

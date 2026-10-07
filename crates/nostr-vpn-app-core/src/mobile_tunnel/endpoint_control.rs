@@ -7,6 +7,7 @@ struct FipsPeerAddressHint {
 }
 
 const FIPS_STATIC_PEER_ENDPOINT_PRIORITY: u8 = 10;
+const FIPS_WEBSOCKET_FALLBACK_ENDPOINT_PRIORITY: u8 = 200;
 const FIPS_DYNAMIC_PEER_ENDPOINT_PRIORITY: u8 = 100;
 const FIPS_PRIVATE_DYNAMIC_PEER_ENDPOINT_PRIORITY: u8 = 200;
 // Mobile probes offline roster peers on its own bounded cadence. Let FIPS
@@ -20,6 +21,9 @@ fn default_fips_peer_address_priority() -> u8 {
 
 #[derive(Debug, Clone, Default)]
 struct MobilePeerPresence {
+    advertised_routes: Vec<String>,
+    capabilities_signed_at: u64,
+    capabilities_received_at: Option<u64>,
     last_seen_at: Option<u64>,
     last_control_seen_at: Option<u64>,
     last_data_seen_at: Option<u64>,
@@ -84,7 +88,8 @@ async fn handle_mobile_endpoint_message(
         return Ok(true);
     }
 
-    let source_node_addr = *message.source_peer.node_addr();
+    let source_peer = message.source_peer;
+    let source_node_addr = *source_peer.node_addr();
     let message_len = message.data.len();
     let packet = control.mesh.read().ok().and_then(|mesh| {
         mesh.receive_endpoint_data_owned_with_source_node_addr(
@@ -100,6 +105,21 @@ async fn handle_mobile_endpoint_message(
             message_len,
             MobilePeerRxKind::Data,
         );
+        let local_address = control
+            .config_state
+            .read()
+            .ok()
+            .and_then(|config| parse_ipv4(&config.local_address));
+        if let Some(reply) = local_address.and_then(|local_address| {
+            nostr_vpn_core::packet_checksums::ipv4_icmp_echo_reply(&bytes, local_address)
+        }) {
+            control
+                .endpoint
+                .send_batch_to_peer(source_peer, vec![reply])
+                .await
+                .context("failed to send mobile ICMP echo reply")?;
+            return Ok(true);
+        }
         nostr_vpn_core::packet_checksums::finalize_ipv4_transport_checksum(&mut bytes);
         inbound_packets.push(bytes);
     }
@@ -169,6 +189,19 @@ async fn handle_mobile_control_frame(
             apply_mobile_roster_frame(control, signed_roster.as_deref()).await?;
         }
         FipsControlFrame::Capabilities { capabilities, .. } => {
+            {
+                let mut presence = control
+                    .presence
+                    .write()
+                    .map_err(|_| anyhow!("mobile FIPS presence lock poisoned"))?;
+                let peer = presence.entry(source_pubkey.clone()).or_default();
+                if peer.capabilities_signed_at <= capabilities.signed_at {
+                    peer.advertised_routes
+                        .clone_from(&capabilities.advertised_routes);
+                    peer.capabilities_signed_at = capabilities.signed_at;
+                    peer.capabilities_received_at = Some(unix_timestamp());
+                }
+            }
             if update_mobile_peer_hints(control.peer_hints, &source_pubkey, &capabilities)? {
                 sync_mobile_config_peer_hints(control.config_state, control.peer_hints)?;
                 persist_mobile_peer_hints(
@@ -326,7 +359,8 @@ async fn apply_mobile_roster_runtime_update(
     };
     let local_routes = vec![updated.local_address.clone()];
     let updated_peers = updated.peers.clone();
-    let updated_peer_identities = mobile_peer_identity_map(&updated_peers);
+    let updated_peer_identities =
+        mobile_peer_identity_map(&updated_peers, &updated.bootstrap_peers);
     let updated_hints = updated.peer_hints.clone();
     replace_mobile_mesh(
         control.mesh,
@@ -382,27 +416,35 @@ async fn apply_mobile_join_roster_frame(
     source_peer: PeerIdentity,
     join_roster: &JoinRosterControl,
 ) -> Result<()> {
-    let updated = apply_mobile_join_roster(
-        control.app_config,
-        control.app_config_dirty,
-        control.config_path,
-        join_roster,
-    )?;
-    let applied = updated.is_some()
-        || mobile_join_roster_is_durably_persisted(
+    let updated = {
+        let _applying = control
+            .pending_join_roster_receipts
+            .applying
+            .lock()
+            .map_err(|_| anyhow!("mobile join receipt apply lock poisoned"))?;
+        let updated = apply_mobile_join_roster(
             control.app_config,
+            control.app_config_dirty,
             control.config_path,
             join_roster,
         )?;
-    if !applied {
-        return Ok(());
-    }
-    let roster_event_id = join_roster.signed_roster.artifact_hash();
-    let committed =
-        control.config_path.is_some() || !control.app_config_dirty.load(Ordering::Acquire);
-    control
-        .pending_join_roster_receipts
-        .enqueue(roster_event_id, source_peer, committed)?;
+        let applied = updated.is_some()
+            || mobile_join_roster_is_durably_persisted(
+                control.app_config,
+                control.config_path,
+                join_roster,
+            )?;
+        if !applied {
+            return Ok(());
+        }
+        let roster_event_id = join_roster.signed_roster.artifact_hash();
+        let committed =
+            control.config_path.is_some() || !control.app_config_dirty.load(Ordering::Acquire);
+        control
+            .pending_join_roster_receipts
+            .enqueue(roster_event_id, source_peer, committed)?;
+        updated
+    };
     if let Some(updated) = updated {
         apply_mobile_roster_runtime_update(control, updated).await?;
     }
@@ -464,9 +506,13 @@ fn control_frame_source_pubkey(
 ) -> Option<String> {
     mesh.participant_for_endpoint_node_addr(source_peer.node_addr().as_bytes())
         .or_else(|| {
+            // Configured transit is intentionally outside the private roster,
+            // but its authenticated link still needs Ping/Pong liveness.
             let allow_unknown = matches!(
                 frame,
-                FipsControlFrame::JoinRequest { .. }
+                FipsControlFrame::Ping { .. }
+                    | FipsControlFrame::Pong { .. }
+                    | FipsControlFrame::JoinRequest { .. }
                     | FipsControlFrame::JoinRoster { .. }
                     | FipsControlFrame::JoinRosterAck { .. }
             );
@@ -515,9 +561,18 @@ impl MobilePeerIdentityMap {
     }
 }
 
-fn mobile_peer_identity_map(peers: &[FipsMeshPeerConfig]) -> MobilePeerIdentityMap {
+fn mobile_peer_identity_map(
+    peers: &[FipsMeshPeerConfig],
+    bootstrap_peers: &HashMap<String, Vec<FipsPeerAddressHint>>,
+) -> MobilePeerIdentityMap {
     let mut identities = MobilePeerIdentityMap::default();
-    for peer in peers {
+    let bootstrap_peers = bootstrap_peers
+        .iter()
+        .filter(|(_, hints)| !hints.is_empty())
+        .filter_map(|(participant, _)| {
+            FipsMeshPeerConfig::from_participant_pubkey(participant, Vec::new()).ok()
+        });
+    for peer in peers.iter().cloned().chain(bootstrap_peers) {
         let endpoint_npub = normalize_mobile_endpoint_npub(&peer.endpoint_npub);
         let Ok(identity) = PeerIdentity::from_npub(&endpoint_npub) else {
             continue;

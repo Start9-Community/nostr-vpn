@@ -44,8 +44,8 @@ pub(crate) fn is_process_running(_pid: u32) -> bool {
 #[cfg(target_os = "linux")]
 pub(crate) fn daemon_pid_record_counts_as_running(pid: u32, config_path: &Path) -> bool {
     is_process_running(pid)
-        && linux_proc_command(pid)
-            .is_some_and(|command| daemon_command_matches_config(&command, config_path))
+        && fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|cmdline| linux_proc_daemon_matches_config(&cmdline, config_path))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -55,6 +55,7 @@ pub(crate) fn daemon_pid_record_counts_as_running(pid: u32, config_path: &Path) 
     }
 
     let output = ProcessCommand::new("ps")
+        .arg("-ww")
         .arg("-p")
         .arg(pid.to_string())
         .arg("-o")
@@ -110,11 +111,7 @@ pub(crate) fn find_daemon_pids_by_config(config_path: &Path) -> Vec<u32> {
     let mut pids = entries
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| is_process_running(*pid))
-        .filter(|pid| {
-            linux_proc_command(*pid)
-                .is_some_and(|command| daemon_command_matches_config(&command, config_path))
-        })
+        .filter(|pid| daemon_pid_record_counts_as_running(*pid, config_path))
         .collect::<Vec<_>>();
     pids.sort_unstable();
     pids.dedup();
@@ -125,6 +122,7 @@ pub(crate) fn find_daemon_pids_by_config(config_path: &Path) -> Vec<u32> {
 pub(crate) fn find_daemon_pids_by_config(config_path: &Path) -> Vec<u32> {
     let output = ProcessCommand::new("ps")
         .arg("ax")
+        .arg("-ww")
         .arg("-o")
         .arg("pid=,stat=,command=")
         .output();
@@ -139,18 +137,34 @@ pub(crate) fn find_daemon_pids_by_config(config_path: &Path) -> Vec<u32> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn linux_proc_cmdline_to_command(cmdline: &[u8]) -> Option<String> {
-    let args = cmdline
+pub(crate) fn linux_proc_daemon_matches_config(cmdline: &[u8], config_path: &Path) -> bool {
+    let mut args = cmdline
         .split(|byte| *byte == 0)
-        .filter(|arg| !arg.is_empty())
-        .map(|arg| String::from_utf8_lossy(arg))
-        .collect::<Vec<_>>();
-    (!args.is_empty()).then(|| args.join(" "))
-}
-
-#[cfg(target_os = "linux")]
-fn linux_proc_command(pid: u32) -> Option<String> {
-    linux_proc_cmdline_to_command(&fs::read(format!("/proc/{pid}/cmdline")).ok()?)
+        .filter(|arg| !arg.is_empty());
+    let Some(executable) = args.next() else {
+        return false;
+    };
+    // Keep argv boundaries: flattening a launcher such as `sudo /path/nvpn`
+    // makes its command look like the child daemon and prevents startup.
+    if !daemon_command_has_nvpn_executable_prefix(&String::from_utf8_lossy(executable))
+        || args.next() != Some(b"daemon".as_slice())
+    {
+        return false;
+    }
+    while let Some(arg) = args.next() {
+        let configured_path = if arg == b"--config" {
+            args.next()
+        } else {
+            arg.strip_prefix(b"--config=")
+        };
+        if let Some(configured_path) = configured_path {
+            return configured_path == config_path.as_os_str().as_encoded_bytes()
+                || fs::canonicalize(config_path).is_ok_and(|canonical| {
+                    configured_path == canonical.as_os_str().as_encoded_bytes()
+                });
+        }
+    }
+    false
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -368,8 +382,8 @@ pub(crate) fn daemon_candidate_pids(config_path: &Path, current_pid: u32) -> Res
     Ok(daemon_pids)
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 pub(crate) fn daemon_command_matches_config(command: &str, config_path: &Path) -> bool {
-    let config_text = config_path.display().to_string();
     let Some((prefix, _)) = command.split_once(" daemon ") else {
         return false;
     };
@@ -378,7 +392,20 @@ pub(crate) fn daemon_command_matches_config(command: &str, config_path: &Path) -
         && !daemon_command_prefix_looks_like_shell_wrapper(prefix)
         && command.contains(" daemon ")
         && command.contains("--config")
-        && command.contains(config_text.as_str())
+        && daemon_command_mentions_config(command, config_path)
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn daemon_command_mentions_config(command: &str, config_path: &Path) -> bool {
+    let config_text = config_path.display().to_string();
+    if command.contains(config_text.as_str()) {
+        return true;
+    }
+
+    fs::canonicalize(config_path).ok().is_some_and(|canonical| {
+        let canonical_text = canonical.display().to_string();
+        command.contains(canonical_text.as_str())
+    })
 }
 
 fn daemon_command_has_nvpn_executable_prefix(prefix: &str) -> bool {
@@ -419,6 +446,7 @@ fn daemon_command_has_nvpn_executable_prefix(prefix: &str) -> bool {
     false
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn daemon_command_prefix_looks_like_shell_wrapper(prefix: &str) -> bool {
     let trimmed = prefix.trim_start();
     let lower = trimmed.to_ascii_lowercase();

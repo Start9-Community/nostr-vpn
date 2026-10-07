@@ -38,6 +38,7 @@ SECONDARY_SERVICE="${NVPN_MACOS_SECONDARY_NETWORK_SERVICE:-Roaming Underlay}"
 PRIMARY_IFACE="${NVPN_MACOS_PRIMARY_INTERFACE:-en0}"
 SECONDARY_IFACE="${NVPN_MACOS_SECONDARY_INTERFACE:-en2}"
 RECOVERY_DEADLINE_MS="${NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
+ACTIVATION_DEADLINE_MS="${NVPN_MACOS_UNDERLAY_ACTIVATION_DEADLINE_MS:-10000}"
 FIPS_NETWORK_ID="${NVPN_MACOS_FIPS_NETWORK_ID:-macos-release-roaming-$PPID-$$}"
 IMAGE="${NVPN_MACOS_WG_FIXTURE_IMAGE:-nostr-vpn-macos-wireguard-exit-e2e}"
 CONTAINER="${NVPN_MACOS_WG_FIXTURE_CONTAINER:-nostr-vpn-macos-wireguard-exit-e2e-$$}"
@@ -60,6 +61,10 @@ MACOS_NPUB=""
 MACOS_TUNNEL_IP=""
 APP_GIT_SHA=""
 APP_GIT_TREE=""
+INSTALLED_STATE_SNAPSHOT_STARTED=0
+GUEST_NETWORK_CLEANED=0
+INSTALLED_STATE_RESTORED=0
+UNDERLAY_STARTED=0
 
 fail() {
   echo "macOS VM Release network gate failed: $*" >&2
@@ -83,6 +88,9 @@ for port in "$HOST_PORT" "$FIPS_CLIENT_LISTEN_PORT"; do
 done
 [[ "$HOST_PORT" != "$FIPS_CLIENT_LISTEN_PORT" ]] \
   || { echo "WireGuard and client FIPS ports must be distinct" >&2; exit 2; }
+[[ "$ACTIVATION_DEADLINE_MS" =~ ^[1-9][0-9]*$ \
+  && "$ACTIVATION_DEADLINE_MS" -le 10000 ]] \
+  || { echo "macOS underlay activation deadline must be at most ten seconds" >&2; exit 2; }
 
 python3 - "$TUNNEL_SERVER_IP" "$TUNNEL_CLIENT_IP" "$THROUGH_DNS_IP" <<'PY'
 import ipaddress
@@ -139,6 +147,7 @@ remote_phase() {
   done < <(ssh_args "$lane")
   remote_env=(
     NVPN_MACOS_VM_IMPORT_ONLY=1
+    RUST_LOG=info,nvpn::secure_dns_runtime=debug
     "NVPN_E2E_BINARY=$PACKAGE/Nostr VPN.app/Contents/Resources/nvpn"
     "NVPN_MACOS_NETWORK_STATE_DIR=$REMOTE_DIR"
     "NVPN_E2E_CONFIG=$REMOTE_DIR/config.toml"
@@ -153,6 +162,7 @@ remote_phase() {
     "NVPN_MACOS_PRIMARY_INTERFACE=$PRIMARY_IFACE"
     "NVPN_MACOS_SECONDARY_INTERFACE=$SECONDARY_IFACE"
     "NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS=$RECOVERY_DEADLINE_MS"
+    "NVPN_MACOS_UNDERLAY_ACTIVATION_DEADLINE_MS=$ACTIVATION_DEADLINE_MS"
     "NVPN_MACOS_FIPS_NETWORK_ID=$FIPS_NETWORK_ID"
     "NVPN_MACOS_FIPS_CLIENT_LISTEN_PORT=$FIPS_CLIENT_LISTEN_PORT"
     "NVPN_MACOS_FIPS_EXPECTED_REV=${RELEASE_JOIN_FIPS_SHA:0:10}"
@@ -174,6 +184,47 @@ remote_phase() {
   printf -v quoted '%q' "$action"
   remote_command+=" ./scripts/e2e-macos-release-network.sh $quoted"
   ssh "${options[@]}" "$SSH_HOST" "$remote_command"
+}
+
+run_dns_case() {
+  local status
+  if remote_phase primary dns-case; then
+    return 0
+  else
+    status="$?"
+  fi
+  [[ "$status" -eq 255 ]] || return "$status"
+  echo "macOS DNS-case SSH transport dropped; retrying the idempotent case once" >&2
+  remote_phase primary dns-case
+}
+
+poll_remote_prepare_status() {
+  remote_shell primary "
+    for ignored in {1..300}; do
+      if test -s '$REMOTE_DIR/results/prepare.txt'; then
+        echo pass
+        exit 0
+      fi
+      sleep 0.1
+    done
+    echo timeout
+  "
+}
+
+run_prepare() {
+  local status prepare_status
+  if remote_phase primary prepare; then
+    return 0
+  else
+    status="$?"
+  fi
+  [[ "$status" -eq 255 ]] || return "$status"
+  prepare_status="$(poll_remote_prepare_status)" || return "$status"
+  if [[ "$prepare_status" == pass ]]; then
+    echo "macOS prepare SSH transport dropped after the verified remote action completed" >&2
+    return 0
+  fi
+  return "$status"
 }
 
 poll_remote_underlay_status() {
@@ -215,7 +266,7 @@ copy_guest_results() {
   [[ -n "$REMOTE_DIR" ]] || return 0
   mkdir -p "$ARTIFACT_DIR"
   local lane=primary
-  [[ -n "$SECONDARY_IP" ]] && lane=secondary
+  [[ "$UNDERLAY_STARTED" -eq 1 ]] && lane=secondary
   local -a options=()
   while IFS= read -r option; do
     options+=("$option")
@@ -265,11 +316,17 @@ remove_forward_target() {
 
 remove_remote_dir() {
   [[ -n "$REMOTE_DIR" ]] || return 0
+  case "$REMOTE_DIR" in
+    /tmp/nvpn-macos-release-network.*) ;;
+    *) fail "refusing to remove an unsafe macOS guest state path" ;;
+  esac
   local lane=primary
-  [[ -n "$SECONDARY_IP" ]] && lane=secondary
+  [[ "$UNDERLAY_STARTED" -eq 1 ]] && lane=secondary
   local quoted
   printf -v quoted '%q' "$REMOTE_DIR"
-  remote_shell "$lane" "rm -rf -- $quoted" >/dev/null
+  remote_shell "$lane" \
+    "test -d $quoted && test ! -L $quoted \
+      && sudo -n /bin/rm -rf -- $quoted" >/dev/null
   remote_shell "$lane" "test ! -e $quoted"
   REMOTE_DIR=""
 }
@@ -293,20 +350,36 @@ cleanup() {
   fi
   if [[ -n "$REMOTE_DIR" ]]; then
     local lane=primary
-    [[ -n "$SECONDARY_IP" ]] && lane=secondary
-    if remote_phase "$lane" cleanup; then
+    [[ "$UNDERLAY_STARTED" -eq 1 ]] && lane=secondary
+    if [[ "$GUEST_NETWORK_CLEANED" -eq 1 ]]; then
       :
+    elif remote_phase "$lane" cleanup; then
+      GUEST_NETWORK_CLEANED=1
     else
       echo "macOS guest production cleanup failed" >&2
       cleanup_failed=1
+    fi
+    if [[ "$INSTALLED_STATE_SNAPSHOT_STARTED" -eq 1 \
+      && "$INSTALLED_STATE_RESTORED" -eq 0 ]]
+    then
+      if remote_phase "$lane" restore-installed-state; then
+        INSTALLED_STATE_RESTORED=1
+      else
+        echo "preexisting macOS installed state could not be restored" >&2
+        cleanup_failed=1
+      fi
     fi
     if ! copy_guest_results; then
       echo "macOS guest network receipts could not be copied" >&2
       cleanup_failed=1
     fi
-    if ! remove_remote_dir; then
-      echo "macOS guest private fixture state survived cleanup" >&2
-      cleanup_failed=1
+    if [[ "$cleanup_failed" -eq 0 ]]; then
+      if ! remove_remote_dir; then
+        echo "macOS guest private fixture state survived cleanup" >&2
+        cleanup_failed=1
+      fi
+    else
+      echo "preserving macOS guest state after incomplete cleanup" >&2
     fi
   fi
   if remove_forward_target; then
@@ -469,6 +542,8 @@ SECONDARY_IP="$(
 remote_shell secondary 'true'
 
 mkdir -p "$ARTIFACT_DIR"
+INSTALLED_STATE_SNAPSHOT_STARTED=1
+remote_phase primary quiesce-installed-state
 macos_identity_output="$(remote_phase primary initialize)"
 printf '%s\n' "$macos_identity_output" \
   >"$ARTIFACT_DIR/macos-fips-identity.txt"
@@ -480,7 +555,7 @@ valid_npub "$MACOS_NPUB" \
   || fail "macos-utm returned no private tunnel address"
 DNS_CASE_LABEL=direct-baseline
 DNS_CASE_PROBE_HOST=example.com
-remote_phase primary prepare
+run_prepare
 
 for DNS_CASE_LABEL in \
   automatic-profile cloudflare-doh quad9-doh custom-doh through-exit
@@ -503,7 +578,7 @@ do
   # old resolver; counting those against the new policy produces a false leak.
   # The second identical production probe below is the measured one, and the
   # forbidden-path assertions remain strict inside that quiescent window.
-  remote_phase primary dns-case
+  run_dns_case
   transition_probe_host="$DNS_CASE_PROBE_HOST"
   wait_for_fixture_dns_quiet "$transition_probe_host" >/dev/null \
     || fail "$DNS_CASE_LABEL DNS counters did not settle after transition"
@@ -516,7 +591,7 @@ do
     mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total
   )"
   before_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
-  remote_phase primary dns-case
+  run_dns_case
   after_transfer="$(
     mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total
   )"
@@ -544,6 +619,7 @@ before_transfer="$(
   mobile_wg_fixture_wg_bytes "$CONTAINER" | transfer_total
 )"
 before_forward="$(mobile_wg_fixture_forward_packets "$CONTAINER")"
+UNDERLAY_STARTED=1
 remote_phase primary underlay-start
 underlay_status="$(poll_remote_underlay_status)"
 if [[ "$underlay_status" != "pass" ]]; then
@@ -583,8 +659,11 @@ DNS_CASE_THROUGH_SERVERS=""
 DNS_CASE_PROBE_HOST=example.com
 DNS_CASE_EXPECTED_IP=""
 remote_phase secondary direct
-copy_guest_results
 remote_phase secondary cleanup
+GUEST_NETWORK_CLEANED=1
+remote_phase secondary restore-installed-state
+INSTALLED_STATE_RESTORED=1
+copy_guest_results
 remove_remote_dir
 remove_forward_target
 mobile_wg_fixture_cleanup "$CONTAINER" "$IMAGE"

@@ -127,10 +127,12 @@ function Test-PhysicalUnderlay {
     $defaultRoute = @(Get-NetRoute -InterfaceIndex $InterfaceIndex `
       -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" `
       -ErrorAction Stop)
+    $selectedPhysicalIndex = Get-SelectedPhysicalDefaultInterfaceIndex
     return (
       $adapter.Status -eq "Up" -and
       $address.Count -gt 0 -and
-      $defaultRoute.Count -gt 0
+      $defaultRoute.Count -gt 0 -and
+      $selectedPhysicalIndex -eq $InterfaceIndex
     )
   }
   catch {
@@ -225,6 +227,23 @@ function Get-WireGuardProbeSuccessCount {
   return @(
     Select-String -Path $log -Pattern "^OK " -ErrorAction SilentlyContinue
   ).Count
+}
+
+function Invoke-BoundedIcmpProbe {
+  param(
+    [string]$Target,
+    [int]$TimeoutMilliseconds
+  )
+  $ping = [System.Net.NetworkInformation.Ping]::new()
+  [byte[]]$buffer = [byte[]]::new(32)
+  $options = [System.Net.NetworkInformation.PingOptions]::new(64, $false)
+  try {
+    $reply = $ping.Send($Target, $TimeoutMilliseconds, $buffer, $options)
+    return $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success
+  }
+  finally {
+    $ping.Dispose()
+  }
 }
 
 function Get-FirstTimestampedReceipt {
@@ -505,7 +524,8 @@ function Observe-Recovery {
     [string]$ExpectedNpub,
     [string]$ExpectedTunnelIp,
     [long]$ObservationStartedUnixMilliseconds,
-    [int]$RebindBefore
+    [int]$RebindBefore,
+    [string[]]$ExpectedDnsRuleNames
   )
   Wait-ForCondition "$Label physical underlay to become usable" `
     30000 $NewUnderlayAvailable 25 $true |
@@ -525,6 +545,13 @@ function Observe-Recovery {
   # Stable state is still audited, but audit latency is deliberately excluded
   # from the product recovery measurement above.
   Assert-ActiveExit $ExpectedPhysicalIndex $ExpectedDaemonPid
+  $dnsRuleNames = @((Get-SecureDnsRules).Name | Sort-Object)
+  if (
+    $ExpectedDnsRuleNames.Count -eq 0 -or
+    ($dnsRuleNames -join ",") -ne ($ExpectedDnsRuleNames -join ",")
+  ) {
+    throw "$Label recreated unchanged DNS policy during network recovery"
+  }
   Assert-SessionContinuity `
     $ExpectedDaemonPid `
     $ExpectedEndpointStartCount `
@@ -758,9 +785,37 @@ function Invoke-OwnedNetworkCleanup {
         if ($processId -eq $PID) { continue }
         Wait-Process -Id $processId -Timeout 3 -ErrorAction SilentlyContinue
         Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $processId -Timeout 5 -ErrorAction SilentlyContinue
         if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
-          throw "cleanup owner could not stop recorded process $marker"
+          # A PowerShell probe can remain blocked in a native child after its
+          # parent receives Stop-Process. Kill that exact process tree before
+          # declaring cleanup unproven and quarantining the VM network.
+          $expectedAction = switch ($marker) {
+            "probe.pid" { "Probe" }
+            "wireguard-probe.pid" { "WireGuardProbe" }
+            "watchdog.pid" { "Watchdog" }
+          }
+          $recordedProcess = Get-CimInstance Win32_Process `
+            -Filter "ProcessId = $processId" -ErrorAction Stop
+          if (
+            !$recordedProcess -or
+            [string]$recordedProcess.Name -notmatch '^powershell(\.exe)?$' -or
+            [string]$recordedProcess.CommandLine -notmatch
+              ("-Action\s+" + [regex]::Escape($expectedAction))
+          ) {
+            # The owned child is already gone and Windows reused its PID.
+            # Never terminate the unrelated replacement process.
+            Remove-Item -LiteralPath $processPath `
+              -Force -ErrorAction SilentlyContinue
+            continue
+          }
+          & taskkill.exe /PID $processId /T /F 2>$null | Out-Null
+          Wait-Process -Id $processId -Timeout 15 -ErrorAction SilentlyContinue
+          if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+            throw "cleanup owner could not stop recorded process $marker"
+          }
         }
+        Remove-Item -LiteralPath $processPath -Force -ErrorAction SilentlyContinue
       }
       Invoke-IsolatedNetworkCleanup -EmergencyRepair -DaemonPid $DaemonPid
       Write-Marker "cleanup.complete" $Owner
@@ -859,43 +914,31 @@ switch ($Action) {
     if ([string]::IsNullOrWhiteSpace($PeerTunnelIp)) {
       throw "Probe requires PeerTunnelIp"
     }
-    $payload = [Text.Encoding]::ASCII.GetBytes("nvpn-real-underlay-payload")
-    $ping = [Net.NetworkInformation.Ping]::new()
     $log = Join-Path $StateDir "payload.log"
+    # Add-Content on Windows PowerShell 5.1 denies concurrent readers and can
+    # kill this probe while the recovery observer reads its timestamped log.
     while (!(Test-Path -LiteralPath (Join-Path $StateDir "stop-probe"))) {
-      try {
-        $reply = $ping.Send($PeerTunnelIp, 750, $payload)
-        $completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-        if ($reply.Status -eq [Net.NetworkInformation.IPStatus]::Success) {
-          Add-Content -LiteralPath $log -Value "OK $completedAt" -Encoding ASCII
-        }
-        else {
-          Add-Content -LiteralPath $log `
-            -Value "FAIL $completedAt $($reply.Status)" -Encoding ASCII
-        }
-      }
-      catch {
-        $completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-        Add-Content -LiteralPath $log `
-          -Value "FAIL $completedAt exception" -Encoding ASCII
-      }
+      $ok = try { Invoke-BoundedIcmpProbe $PeerTunnelIp 750 } catch { $false }
+      $completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+      $result = if ($ok) { "OK" } else { "FAIL" }
+      [IO.File]::AppendAllText($log, "$result $completedAt`r`n", [Text.Encoding]::ASCII)
       Start-Sleep -Milliseconds 100
     }
   }
 
   "WireGuardProbe" {
     Write-Marker "wireguard-probe.pid" "$PID"
+    if ([string]::IsNullOrWhiteSpace($WireGuardServerIp)) {
+      throw "WireGuardProbe requires WireGuardServerIp"
+    }
     $log = Join-Path $StateDir "wireguard-payload.log"
     while (!(Test-Path -LiteralPath (Join-Path $StateDir "stop-probe"))) {
-      & curl.exe -4 --ssl-revoke-best-effort --fail --silent `
-        --max-time 2 --output NUL $ProbeUrl
+      # The timed probe uses the local responder. Stable-state checks still
+      # require public DNS and verified HTTPS through the selected exit.
+      $ok = try { Invoke-BoundedIcmpProbe $WireGuardServerIp 750 } catch { $false }
       $completedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-      if ($LASTEXITCODE -eq 0) {
-        Add-Content -LiteralPath $log -Value "OK $completedAt" -Encoding ASCII
-      }
-      else {
-        Add-Content -LiteralPath $log -Value "FAIL $completedAt" -Encoding ASCII
-      }
+      $result = if ($ok) { "OK" } else { "FAIL" }
+      [IO.File]::AppendAllText($log, "$result $completedAt`r`n", [Text.Encoding]::ASCII)
       Start-Sleep -Milliseconds 100
     }
   }
@@ -1013,7 +1056,9 @@ switch ($Action) {
         "-PeerTunnelIp", $PeerTunnelIp
       )
       $probe = Start-Process -FilePath "powershell.exe" -ArgumentList $probeArgs `
-        -WindowStyle Hidden -PassThru
+        -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path $StateDir "probe.stdout.log") `
+        -RedirectStandardError (Join-Path $StateDir "probe.stderr.log")
 
       $wireGuardProbeArgs = @(
         "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -1022,10 +1067,12 @@ switch ($Action) {
         "-Binary", $Binary,
         "-Config", $Config,
         "-StateDir", $StateDir,
-        "-ProbeUrl", $ProbeUrl
+        "-WireGuardServerIp", $WireGuardServerIp
       )
       $wireGuardProbe = Start-Process -FilePath "powershell.exe" `
-        -ArgumentList $wireGuardProbeArgs -WindowStyle Hidden -PassThru
+        -ArgumentList $wireGuardProbeArgs -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path $StateDir "wireguard-probe.stdout.log") `
+        -RedirectStandardError (Join-Path $StateDir "wireguard-probe.stderr.log")
 
       Wait-ForCondition "initial FIPS, WireGuard exit, DNS, HTTPS, and payload" 30000 {
         try {
@@ -1041,6 +1088,7 @@ switch ($Action) {
         }
       } 250 $true | Out-Null
       Assert-NativeWireGuardSecretAcl
+      $stableDnsRuleNames = @((Get-SecureDnsRules).Name | Sort-Object)
       Write-Marker "ready" "$daemonPid"
 
       Wait-ForFile "arm-secondary"
@@ -1053,7 +1101,7 @@ switch ($Action) {
         (Test-PhysicalUnderlay ([int]$secondary.ifIndex))
       } ([int]$secondary.ifIndex) $daemonPid $endpointStartCount `
         $identityNpub $tunnelIp $secondaryObservationStarted `
-        $secondaryRebindBefore
+        $secondaryRebindBefore $stableDnsRuleNames
 
       Wait-ForFile "arm-primary"
       $primaryObservationStarted =
@@ -1064,7 +1112,7 @@ switch ($Action) {
         Test-PhysicalUnderlay ([int]$primary.ifIndex)
       } ([int]$primary.ifIndex) $daemonPid $endpointStartCount `
         $identityNpub $tunnelIp $primaryObservationStarted `
-        $primaryRebindBefore
+        $primaryRebindBefore $stableDnsRuleNames
 
       Run-DnsSettingCase "automatic" @(
         "--exit-dns-mode", "automatic"

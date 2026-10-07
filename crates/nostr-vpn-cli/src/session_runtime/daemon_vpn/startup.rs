@@ -53,6 +53,13 @@ pub(super) fn daemon_service_supervisor_requests_restart(
 }
 
 pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpnStartup> {
+    #[cfg(target_os = "macos")]
+    if args.service {
+        let executable = std::env::current_exe()?;
+        if crate::macos_privileged_files::helper_destination(&executable).is_some() {
+            crate::macos_privileged_files::validate_artifact(&executable)?;
+        }
+    }
     if args.iface.trim().is_empty() {
         return Err(anyhow!("--iface must not be empty"));
     }
@@ -169,12 +176,17 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     let network_snapshot = capture_network_snapshot();
     let network_changed_at = Some(unix_timestamp());
     let timeout = network_probe_timeout(&app);
-    let captive_portal = detect_captive_portal(timeout).await;
+    // A guest with only a raw Ethernet underlay has no Internet route until
+    // FIPS starts. Probing now only waits for DNS timeouts and delays the mesh.
+    let captive_portal = if network_snapshot.default_interface.is_some() {
+        detect_captive_portal(timeout).await
+    } else {
+        None
+    };
     let mut port_mapping_runtime = PortMappingRuntime::default();
     let vpn_enabled = daemon_start_vpn_enabled(&app, args.paused);
     let (fips_tunnel_runtime, last_fips_endpoint_peer_signature) =
-        if fips_private_runtime_active_for_config(&app, &config_path, vpn_enabled, expected_peers)?
-        {
+        if fips_private_runtime_active(&app, vpn_enabled) {
             let mut config = match fips_tunnel_config_from_app(FipsTunnelConfigInput {
                 app: &app,
                 config_path: &config_path,
@@ -336,7 +348,7 @@ pub(super) async fn initialize_daemon_vpn_loop(
         daemon_vpn_idle_status(
             startup.vpn_enabled,
             startup.expected_peers,
-            startup.app.join_requests_enabled(),
+            fips_server_runtime_active(&startup.app),
         )
         .to_string()
     } else {

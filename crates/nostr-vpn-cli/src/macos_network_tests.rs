@@ -1,4 +1,23 @@
 #[test]
+fn macos_lan_bypass_cleanup_preserves_neighbors_and_foreign_routes() {
+    for (row, owned) in [
+        ("192.0.2.20 192.0.2.1 UGHSI en0", true),
+        ("192.0.2.20 192.0.2.1 UGHS en0", true),
+        ("192.0.2 link#7 UCS en0", false),
+        ("192.0.2.20 aa:bb:cc:dd:ee:ff UHLWI en0", false),
+        ("192.0.2.20 192.0.2.2 UGHS en0", false),
+        ("192.0.2.20 192.0.2.1 UGHS en7", false),
+        ("192.0.2.21 192.0.2.1 UGHS en0", false),
+    ] {
+        assert_eq!(
+            macos_managed_route_present(row, "192.0.2.20/32", Some("192.0.2.1"), Some("en0"),),
+            owned,
+            "cleanup must match the exact recorded route: {row}",
+        );
+    }
+}
+
+#[test]
 fn macos_default_routes_from_netstat_finds_underlay_and_utun_routes() {
     let routes = macos_default_routes_from_netstat(
         "Routing tables\n\
@@ -82,17 +101,34 @@ destination: default
 }
 
 #[test]
-fn macos_gateway_route_args_scope_host_routes_to_the_recorded_interface() {
+fn macos_underlay_change_detects_a_different_selected_route() {
+    let current = MacosRouteSpec {
+        gateway: Some("10.168.32.48".to_string()),
+        interface: "en2".to_string(),
+    };
+
+    assert!(!macos_selected_underlay_changed(Some(&current), "en2"));
+    assert!(macos_selected_underlay_changed(Some(&current), "en0"));
+    assert!(!macos_selected_underlay_changed(None, "en0"));
+}
+
+#[test]
+fn macos_endpoint_bypass_route_args_are_global_host_routes() {
     assert_eq!(
-        macos_gateway_route_args("add", "65.109.48.91/32", "192.168.64.1", Some("en0"),),
+        macos_global_gateway_route_args(
+            "add",
+            "65.109.48.91/32",
+            "192.168.64.1",
+            Some("en2"),
+        ),
         vec![
             "-n".to_string(),
             "add".to_string(),
             "-host".to_string(),
             "65.109.48.91".to_string(),
             "192.168.64.1".to_string(),
-            "-ifscope".to_string(),
-            "en0".to_string(),
+            "-ifp".to_string(),
+            "en2".to_string(),
         ]
     );
     assert_eq!(
@@ -103,6 +139,41 @@ fn macos_gateway_route_args_scope_host_routes_to_the_recorded_interface() {
             "default".to_string(),
             "192.168.64.1".to_string(),
         ]
+    );
+}
+
+#[test]
+fn macos_same_gateway_handoff_changes_only_an_owned_global_route() {
+    let current = MacosManagedRoute {
+        target: "203.0.113.9/32".to_string(),
+        gateway: Some("192.168.64.1".to_string()),
+        interface: Some("en2".to_string()),
+    };
+    let desired = MacosManagedRoute {
+        interface: Some("en0".to_string()),
+        ..current.clone()
+    };
+    let owned = "\
+Destination        Gateway            Flags               Netif Expire\n\
+203.0.113.9       192.168.64.1       UGHS                  en2\n";
+    assert_eq!(
+        macos_owned_global_gateway_route_transition(owned, &current, &desired),
+        MacosOwnedGlobalGatewayRouteTransition::ChangeOwned,
+    );
+
+    let foreign = "\
+Destination        Gateway            Flags               Netif Expire\n\
+203.0.113.9       192.168.64.1       UGHS                  en7\n";
+    assert_eq!(
+        macos_owned_global_gateway_route_transition(foreign, &current, &desired),
+        MacosOwnedGlobalGatewayRouteTransition::MissingOrUnowned,
+        "same destination and gateway do not authorize changing a foreign interface",
+    );
+
+    let already_moved = owned.replace("en2", "en0");
+    assert_eq!(
+        macos_owned_global_gateway_route_transition(&already_moved, &current, &desired),
+        MacosOwnedGlobalGatewayRouteTransition::AlreadyDesired,
     );
 }
 
@@ -119,6 +190,18 @@ fn macos_ifconfig_has_ipv4_matches_exact_interface_address() {
     assert!(!macos_ifconfig_has_ipv4(
         output,
         Ipv4Addr::new(10, 44, 10, 24)
+    ));
+}
+
+#[test]
+fn macos_ifconfig_missing_interface_is_an_absent_interface() {
+    let error = "command failed: \"ifconfig\" \"utun0\"\n\
+stdout: \n\
+stderr: ifconfig: interface utun0 does not exist";
+
+    assert!(macos_ifconfig_error_is_absent(error));
+    assert!(!macos_ifconfig_error_is_absent(
+        "ifconfig: permission denied"
     ));
 }
 
@@ -190,6 +273,52 @@ Destination        Gateway            Flags               Netif Expire\n\
     assert!(
         !macos_managed_route_present(routes, "65.109.48.91/32", None, None),
         "cleanup without an owner must fail closed"
+    );
+}
+
+#[test]
+fn managed_route_set_detects_a_bypass_removed_during_default_route_update() {
+    let owner = MacosRouteSpec {
+        gateway: Some("192.168.64.1".to_string()),
+        interface: "en0".to_string(),
+    };
+    let desired = vec![
+        "65.109.48.91/32".to_string(),
+        "65.109.48.92/32".to_string(),
+    ];
+    let complete = "\
+Destination        Gateway            Flags               Netif Expire\n\
+65.109.48.91       192.168.64.1       UGHS                  en0\n\
+65.109.48.92       192.168.64.1       UGHS                  en0\n\
+0/1                utun6              USc                 utun6\n";
+    let missing_one = "\
+Destination        Gateway            Flags               Netif Expire\n\
+65.109.48.91       192.168.64.1       UGHS                  en0\n\
+0/1                utun6              USc                 utun6\n";
+
+    assert!(macos_global_managed_routes_present(
+        complete, &desired, &owner
+    ));
+    assert!(!macos_global_managed_routes_present(
+        missing_one,
+        &desired,
+        &owner,
+    ));
+
+    let scoped = "\
+Destination        Gateway            Flags               Netif Expire\n\
+65.109.48.91       192.168.64.1       UGHSI                 en0\n\
+65.109.48.92       192.168.64.1       UGHSI                 en0\n\
+0/1                utun6              USc                 utun6\n";
+    assert!(macos_managed_route_present(
+        scoped,
+        "65.109.48.91/32",
+        owner.gateway.as_deref(),
+        Some(owner.interface.as_str()),
+    ));
+    assert!(
+        !macos_global_managed_routes_present(scoped, &desired, &owner),
+        "interface-scoped bypasses do not protect global transport sockets"
     );
 }
 

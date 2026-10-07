@@ -1,6 +1,6 @@
 import { actions } from '../actions'
 import { restoreInit } from '../backups'
-import { setDependencies } from '../dependencies'
+import { dependencies } from '../dependencies'
 import { setInterfaces } from '../interfaces'
 import { registerUrlPlugin } from '../plugin/register'
 import { syncExportedUrls } from '../plugin/sync'
@@ -12,8 +12,8 @@ export const init = sdk.setupInit(
   restoreInit,
   versionGraph,
   setInterfaces,
-  setDependencies,
   actions,
+  dependencies,
   watchCredentials,
   registerUrlPlugin,
   syncExportedUrls,

@@ -3,6 +3,7 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, X509Certificate } from 'node:crypto'
 import {
+  constants,
   cpSync,
   copyFileSync,
   existsSync,
@@ -14,7 +15,6 @@ import {
   realpathSync,
   rmSync,
   statSync,
-  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -63,7 +63,7 @@ import {
   validateWindowsInstallerGateReceipt,
   validateExactZipMembers,
 } from './release-artifact-provenance-lib.mjs'
-import { inspectStartosReleasePackage } from './startos-release.mjs'
+import { inspectStartosReleasePackage, preflightStartosRelease } from './startos-release.mjs'
 import {
   preflightGithubRelease,
   publishExactGithubRelease,
@@ -77,6 +77,7 @@ import {
   preflightUmbrelPublication,
   publishVerifiedUmbrelRelease,
 } from './umbrel-release.mjs'
+import { withIosArtifactSource } from './ios-artifact-source.mjs'
 import { validateReleaseMutationGate } from './release-mutation-gate.mjs'
 import {
   preflightRequiredZapstorePublication as preflightExactZapstorePublication,
@@ -85,6 +86,7 @@ import {
 import {
   exactFipsPublicationCandidate,
   linuxPublicationVerificationPlan,
+  validateLinuxPublicationBuilder,
   validateWindowsPublicationFipsReceipts,
 } from './release-source-verification.mjs'
 import { completeReleaseGateFromReceipts } from './release-gate-resume.mjs'
@@ -1545,47 +1547,12 @@ function buildIosArtifacts({
   // Ordinary staging is local-only. It verifies the physically tested frozen
   // archive and exports its exact App Store IPA without contacting Apple.
   // Upload/attach/submission entry points require the exact-source mutation gate.
-  if (sourceEquivalence) {
-    const temporaryRoot = mkdtempSync(join(os.tmpdir(), 'nvpn-ios-export-source-'))
-    const sourceRoot = join(temporaryRoot, 'source')
-    let worktreeAdded = false
-    try {
-      run('git', [
-        'worktree', 'add', '--detach', sourceRoot, archiveReceipt.appGitSha,
-      ])
-      worktreeAdded = true
-      for (const name of ['dist', 'artifacts']) {
-        const externalRoot = join(repoRoot, name)
-        if (!existsSync(externalRoot)) continue
-        const linkRoot = join(sourceRoot, name)
-        mkdirSync(linkRoot)
-        for (const entry of readdirSync(externalRoot)) {
-          symlinkSync(
-            join(externalRoot, entry),
-            join(linkRoot, entry),
-          )
-        }
-      }
-      run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-export'], {
-        cwd: sourceRoot,
-        env: {
-          ...env,
-          NVPN_BUILD_GIT_SHA: archiveReceipt.appGitSha,
-          NVPN_IOS_RELEASE_SOURCE_ROOT: sourceRoot,
-        },
-      })
-    } finally {
-      for (const name of ['dist', 'artifacts']) {
-        rmSync(join(sourceRoot, name), { recursive: true, force: true })
-      }
-      if (worktreeAdded) {
-        run('git', ['worktree', 'remove', sourceRoot], { capture: true })
-      }
-      rmSync(temporaryRoot, { recursive: true, force: true })
-    }
-  } else {
-    run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-export'], { env })
-  }
+  withIosArtifactSource({
+    repoRoot, receipt: archiveReceipt,
+    commit: candidateCommit, tree: candidateTree, env,
+  }, (context) => {
+    run('bash', [join(repoRoot, 'scripts', 'ios-build'), 'ios-export'], context)
+  })
   builtLines.push(`Verified and exported iOS ${tag} without uploading it.`)
 
   const exportDir = join(repoRoot, 'dist', 'ios', 'export')
@@ -1916,7 +1883,7 @@ function stageRelease({
   const stagedAssetPaths = []
   for (const assetPath of assetPaths) {
     const stagedPath = join(stageDir, 'assets', basename(assetPath))
-    copyFileSync(assetPath, stagedPath)
+    copyFileSync(assetPath, stagedPath, constants.COPYFILE_FICLONE)
     stagedAssetPaths.push(stagedPath)
   }
 
@@ -2023,7 +1990,8 @@ function publishRelease({
   if (!draft) {
     validatePromotableReleaseManifest(manifest)
   }
-  const addOutput = run('htree', ['add', stageDir], { capture: true, dryRun })
+  // The validated stage is an exact allowlist; Git ignores must not omit assets.
+  const addOutput = run('htree', ['add', '--no-ignore', stageDir], { capture: true, dryRun })
   const match = addOutput.match(/^\s*url:\s*(\S+)/m)
   if (!match) {
     throw new Error('Could not parse htree add output for release CID.')
@@ -2080,6 +2048,8 @@ function promoteStagedDraft({
   const finalStageDir = join(finalStageParent, 'stage')
   try {
     cpSync(stageDir, finalStageDir, {
+      // Independent copies can share storage on filesystems with reflinks.
+      mode: constants.COPYFILE_FICLONE,
       recursive: true,
       errorOnExist: true,
       force: false,
@@ -2332,6 +2302,7 @@ function main() {
     },
     macos: {
       artifact: join(releaseJoinResultDir, 'macos', 'artifact.json'),
+      network_artifact: join(releaseGateLogDir, 'desktop-dns-ui', 'macos', 'app-artifact.json'),
       public_ui_join: join(releaseJoinResultDir, 'macos', 'summary.json'),
       network: join(
         releaseGateLogDir,
@@ -2757,6 +2728,15 @@ function main() {
       )
     }
     return
+  }
+
+  if (!options.dryRun && shouldRunStep('linux', options)) {
+    validateLinuxPublicationBuilder({ env })
+  }
+  if (!options.dryRun && shouldRunStep('startos', options)) {
+    preflightStartosRelease({
+      needsWorkspace: !String(env.NVPN_RELEASE_STARTOS_ARTIFACT_DIR ?? '').trim(),
+    })
   }
 
   const steps = [

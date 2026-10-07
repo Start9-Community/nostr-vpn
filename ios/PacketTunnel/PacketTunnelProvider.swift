@@ -1,6 +1,8 @@
+import Darwin
 import Foundation
 import Network
 import NetworkExtension
+import os
 
 private let appGroupIdentifier: String = {
     guard let value = Bundle.main.object(
@@ -21,6 +23,7 @@ private enum UnderlayPathSource: Hashable {
 }
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
+    private static let handoffLog = Logger(subsystem: "fi.siriusbusiness.nvpn", category: "config-handoff")
     private static let appMessageChunkSize = 3_072
     private var tunnelHandle: OpaquePointer?
     private var tunnelRunning = false
@@ -229,6 +232,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         case "health":
             let runtimeIsAlive = withTunnelHandle { _ in true } == true
             completionHandler?(runtimeIsAlive ? Data("ok".utf8) : nil)
+        case "joinReceiptsPending":
+            let pending = withTunnelHandle { handle in
+                nostr_vpn_mobile_tunnel_has_pending_join_receipts(handle)
+            }
+            completionHandler?(pending.map { Data(($0 ? "pending" : "drained").utf8) })
+        case "processMetrics":
+            completionHandler?(processMetricsData())
         case "runtimeStateBegin":
             let data = runtimeStateData()
             appMessageSnapshotLock.lock()
@@ -280,9 +290,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
             }
             guard let acknowledged else {
+                Self.handoffLog.error("Config handoff could not commit because the tunnel stopped")
                 completionHandler?(nil)
                 return
             }
+            let receiptsPending = withTunnelHandle { handle in
+                nostr_vpn_mobile_tunnel_has_pending_join_receipts(handle)
+            }
+            Self.handoffLog.notice("Config handoff acknowledged=\(acknowledged, privacy: .public) joinReceiptsPending=\(receiptsPending == true, privacy: .public)")
             appMessageSnapshotLock.lock()
             if appConfigSnapshot == snapshot {
                 appConfigSnapshot.removeAll(keepingCapacity: false)
@@ -299,6 +314,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             consumeCString(nostr_vpn_mobile_tunnel_runtime_state_json(handle))
         } ?? #"{"error":"mobile tunnel stopped"}"#
         return json.data(using: .utf8) ?? Data()
+    }
+
+    private func processMetricsData() -> Data? {
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else {
+            return nil
+        }
+        let cpuSeconds = Double(usage.ru_utime.tv_sec)
+            + Double(usage.ru_utime.tv_usec) / 1_000_000
+            + Double(usage.ru_stime.tv_sec)
+            + Double(usage.ru_stime.tv_usec) / 1_000_000
+        return try? JSONSerialization.data(withJSONObject: [
+            "pid": Int(getpid()),
+            "cpuSeconds": cpuSeconds,
+        ])
     }
 
     private func appConfigSnapshotData() -> Data {

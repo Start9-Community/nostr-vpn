@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, createPrivateKey } from 'node:crypto'
 import {
   copyFileSync,
   createReadStream,
+  existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -24,6 +25,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
 const cargoTomlPath = join(repoRoot, 'Cargo.toml')
 const startosVersionPath = join(repoRoot, 'startos', 'versions', 'current.ts')
+const startosCliVersion = '1.1.0'
 
 const targetAliases = new Map([
   ['x86', { arch: 'x86_64', makeTarget: 'x86' }],
@@ -115,6 +117,34 @@ function run(
   return capture ? result.stdout.trim() : ''
 }
 
+export function validateStartosCliVersion(output) {
+  const actual = String(output ?? '').trim()
+  const expected = `start-cli ${startosCliVersion}`
+  if (actual !== expected) {
+    throw new Error(`StartOS package builder is ${actual || '<missing>'}, expected ${expected}`)
+  }
+  return actual
+}
+
+export function preflightStartosRelease({ needsWorkspace = true } = {}) {
+  validateStartosCliVersion(run('start-cli', ['--version'], { capture: true }))
+  if (!needsWorkspace) return
+
+  for (let directory = repoRoot; ; directory = dirname(directory)) {
+    const keyPath = join(directory, '.startos', 'build.key.pem')
+    if (existsSync(keyPath)) {
+      if (createPrivateKey(readFileSync(keyPath)).asymmetricKeyType !== 'ed25519') {
+        throw new Error('The StartOS workspace requires an Ed25519 package-signing key.')
+      }
+      return
+    }
+    if (directory === dirname(directory)) break
+  }
+  throw new Error(
+    'Missing StartOS packaging workspace. Run start-cli s9pk init-workspace in the checkout parent and retain the existing package-signing key as .startos/build.key.pem; see CONTRIBUTING.md.',
+  )
+}
+
 export function resolveStartosTarget(value) {
   const normalized = String(value ?? '').trim().toLowerCase()
   const target = targetAliases.get(normalized)
@@ -164,9 +194,9 @@ export function validateStartosManifest(manifest, { arch, tag, revision = 0 }) {
   if (manifest?.id !== 'nostr-vpn') {
     throw new Error(`StartOS package id is ${manifest?.id ?? '<missing>'}, expected nostr-vpn`)
   }
-  if (manifest.nestedRuntime !== true) {
+  if (manifest.virtualNetworking !== true) {
     throw new Error(
-      `StartOS package nestedRuntime is ${manifest.nestedRuntime ?? '<missing>'}, expected true for StartOS v0.4`,
+      `StartOS package virtualNetworking is ${manifest.virtualNetworking ?? '<missing>'}, expected true for tunnel access`,
     )
   }
 
@@ -201,6 +231,7 @@ export function inspectStartosReleasePackage({
   revision,
   quiet = false,
 }) {
+  validateStartosCliVersion(run('start-cli', ['--version'], { capture: true, quiet }))
   const sourceVersion = readStartosSourceVersion(
     readFileSync(startosVersionPath, 'utf8'),
   )
@@ -303,6 +334,10 @@ export async function main(argv = process.argv.slice(2)) {
     throw new Error(
       `StartOS source version ${sourceVersion} does not match release ${tag} (${expectedVersion}); run node scripts/sync-versions.mjs`,
     )
+  }
+
+  if (!options.dryRun) {
+    preflightStartosRelease()
   }
 
   const outputDir = resolve(repoRoot, options.outputDir || 'dist')

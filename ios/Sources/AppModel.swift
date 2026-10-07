@@ -145,7 +145,6 @@ final class AppModel: ObservableObject {
         } else if pendingVpnTransitionEnabled == nil,
                   desiredVpnEnabled != state.vpnEnabled
         {
-            pendingVpnTransitionEnabled = desiredVpnEnabled
             state.vpnEnabled = desiredVpnEnabled
         }
         refreshTask = Task { [weak self] in
@@ -295,6 +294,11 @@ final class AppModel: ObservableObject {
         debugLog(
             "dispatch action=\(actionType) error=\(!state.error.isEmpty) vpn=\(state.vpnEnabled)/\(state.vpnActive) network=\(activeNetwork?.id ?? "nil")"
         )
+        if state.error.isEmpty,
+           Self.shouldStartPacketTunnelAfterAction(actionType, vpnEnabled: state.vpnEnabled)
+        {
+            setVpnEnabled(true)
+        }
         if state.error.isEmpty && requiresPacketTunnelConfigSync {
             let force = actionType == "remove_network"
                 && activeNetwork == nil
@@ -496,6 +500,7 @@ final class AppModel: ObservableObject {
             debugLog("PacketTunnel config sync skipped reason=\(reason) VPN transition pending")
             return
         }
+        statusMessage = "Updating VPN routes"
         tunnelConfigSyncTask?.cancel()
         tunnelConfigSyncTask = Task { [weak self] in
             do {
@@ -534,25 +539,56 @@ final class AppModel: ObservableObject {
         guard packetTunnelStartAllowed(reason: reason) else {
             return
         }
-        let tunnelConfigJson = core.mobileTunnelConfigJson()
+        statusMessage = "Updating VPN routes"
+        var tunnelConfigJson = core.mobileTunnelConfigJson()
+        let queuedApprovalClock = ContinuousClock()
+        let queuedApprovalDeadline = queuedApprovalClock.now.advanced(by: .seconds(12))
+        while queuedApprovalClock.now < queuedApprovalDeadline {
+            let pendingReceipt = await vpnController.hasPendingJoinReceipts()
+            try requirePacketTunnelTransition(generation)
+            guard Self.tunnelConfigHasQueuedJoinRosters(tunnelConfigJson) || pendingReceipt else {
+                break
+            }
+            debugLog("PacketTunnel config sync waiting for queued join approval delivery")
+            try await Task.sleep(nanoseconds: 250_000_000)
+            try requirePacketTunnelTransition(generation)
+            tunnelConfigJson = core.mobileTunnelConfigJson()
+        }
         let providerOptionsConfigJson = core.mobileTunnelProviderOptionsConfigJson()
         debugLog(
             "PacketTunnel config sync begin reason=\(reason) configLen=\(tunnelConfigJson.count) network=\(activeNetwork?.id ?? "nil")"
         )
-        statusMessage = "Updating VPN"
         try await vpnController.start(
             state: state,
             network: activeNetwork,
             tunnelConfigJson: tunnelConfigJson,
             providerOptionsConfigJson: providerOptionsConfigJson,
             onActiveTunnelDisconnected: { [weak self] in
-                self?.statusMessage = "Reconnecting VPN"
+                self?.statusMessage = "Restoring VPN"
             }
         )
         try requirePacketTunnelTransition(generation)
         debugLog("PacketTunnel config sync start returned")
         refresh()
         statusMessage = state.error
+    }
+
+    static func tunnelConfigHasQueuedJoinRosters(_ configJson: String) -> Bool {
+        guard let data = configJson.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let config = object as? [String: Any],
+              let queued = config["queuedJoinRosters"] as? [Any]
+        else {
+            return false
+        }
+        return !queued.isEmpty
+    }
+
+    static func shouldStartPacketTunnelAfterAction(
+        _ type: String,
+        vpnEnabled: Bool
+    ) -> Bool {
+        !vpnEnabled && (type == "add_network" || type == "import_join_request")
     }
 
     private func actionRequiresPacketTunnelConfigSync(
@@ -612,6 +648,10 @@ final class AppModel: ObservableObject {
         "wireguardExitMtu",
         "wireguardExitPersistentKeepaliveSecs",
         "wireguardExitConfig",
+        "connectToNonRosterFipsPeers",
+        "fipsNostrDiscoveryEnabled",
+        "fipsWebrtcEnabled",
+        "fipsBootstrapEnabled",
     ]
 
     func handle(url: URL) {

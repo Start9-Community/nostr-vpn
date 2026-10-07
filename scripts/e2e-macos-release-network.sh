@@ -4,10 +4,15 @@
 # host-local WireGuard fixture. This guest runner never builds or signs anything.
 set -euo pipefail
 
+ROOT="${NVPN_MACOS_NETWORK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-macos-owned-test-app.sh"
+
 ACTION="${1:-${NVPN_MACOS_NETWORK_ACTION:-}}"
 NVPN_BIN="${NVPN_E2E_BINARY:-}"
 STATE_DIR="${NVPN_MACOS_NETWORK_STATE_DIR:-}"
 CONFIG="${NVPN_E2E_CONFIG:-}"
+DAEMON_LOG=""
 WG_CONFIG="${NVPN_WG_EXIT_CONFIG_FILE:-}"
 RESULT_DIR="$STATE_DIR/results"
 ENDPOINT_HOST="${NVPN_MACOS_WG_ENDPOINT_HOST:-}"
@@ -29,12 +34,19 @@ PRIMARY_IFACE="${NVPN_MACOS_PRIMARY_INTERFACE:-en0}"
 SECONDARY_IFACE="${NVPN_MACOS_SECONDARY_INTERFACE:-en2}"
 WAIT_SECS="${NVPN_MACOS_NETWORK_WAIT_SECS:-30}"
 RECOVERY_DEADLINE_MS="${NVPN_MACOS_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
+ACTIVATION_DEADLINE_MS="${NVPN_MACOS_UNDERLAY_ACTIVATION_DEADLINE_MS:-10000}"
 FIPS_NETWORK_ID="${NVPN_MACOS_FIPS_NETWORK_ID:-}"
 FIPS_CLIENT_LISTEN_PORT="${NVPN_MACOS_FIPS_CLIENT_LISTEN_PORT:-}"
 EXPECTED_FIPS_REV="${NVPN_MACOS_FIPS_EXPECTED_REV:-}"
 SECURE_RESOLVER="/etc/resolver/nvpn-secure-dns"
 MAGIC_RESOLVER="/etc/resolver/nvpn"
 SECURE_DNS_STORE_KEY="State:/Network/Service/to.nostrvpn.nvpn-secure-dns/DNS"
+INSTALLED_STATE_DIR="$STATE_DIR/preexisting-installed-state"
+INSTALLED_APP_PATH="/Applications/Nostr VPN.app"
+INSTALLED_APP="$INSTALLED_APP_PATH/Contents/MacOS/Nostr VPN"
+SYSTEM_SERVICE_LABEL="system/to.nostrvpn.nvpn"
+SYSTEM_SERVICE_NAME="to.nostrvpn.nvpn"
+SYSTEM_SERVICE_PLIST="/Library/LaunchDaemons/to.nostrvpn.nvpn.plist"
 
 truthy() {
   case "${1:-}" in
@@ -76,6 +88,9 @@ validate_inputs() {
   [[ "$RECOVERY_DEADLINE_MS" =~ ^[1-9][0-9]*$ \
     && "$RECOVERY_DEADLINE_MS" -le 4000 ]] \
     || fail "underlay recovery deadline must be at most four seconds"
+  [[ "$ACTIVATION_DEADLINE_MS" =~ ^[1-9][0-9]*$ \
+    && "$ACTIVATION_DEADLINE_MS" -le 10000 ]] \
+    || fail "underlay activation deadline must be at most ten seconds"
   [[ -n "$FIPS_NETWORK_ID" ]] \
     || fail "isolated network id is missing"
   [[ "$FIPS_CLIENT_LISTEN_PORT" =~ ^[1-9][0-9]{0,4}$ \
@@ -89,6 +104,14 @@ validate_inputs() {
 
 nvpn() {
   "$NVPN_BIN" "$@"
+}
+
+resolve_daemon_log() {
+  DAEMON_LOG="$(
+    nvpn status --json --discover-secs 0 --config "$CONFIG" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["daemon"]["log_file"])'
+  )"
+  [[ "$DAEMON_LOG" == /* ]] || fail "daemon status did not identify an absolute log path"
 }
 
 privileged_nvpn() {
@@ -179,36 +202,52 @@ wireguard_endpoint_route_absent() {
 
 wireguard_endpoint_route_state_valid() {
   local expected_underlay="${1:-$PRIMARY_IFACE}"
-  local endpoint_iface expected_gateway physical_default_iface wg_iface
+  local endpoint_iface expected_gateway physical_default_iface
+  local direct_gateway_endpoint=false
   [[ "$expected_underlay" == "$PRIMARY_IFACE" \
     || "$expected_underlay" == "$SECONDARY_IFACE" ]] \
     || return 1
-  endpoint_iface="$(endpoint_route_interface)" || return 1
   if [[ "$ENDPOINT_FAMILY" == "ipv6" ]]; then
+    endpoint_iface="$(endpoint_route_interface)" || return 1
     [[ "$endpoint_iface" == "$expected_underlay" ]]
     return
   fi
-  wg_iface="$(wireguard_interface)" || return 1
   physical_default_iface="$(route_value default interface)" || return 1
   expected_gateway="$(route_value default gateway)" || return 1
-  # The global lookup remains covered by the WireGuard /1s, while exactly
-  # one interface-scoped /32 keeps encrypted UDP on the selected underlay.
-  [[ "$endpoint_iface" == "$wg_iface" \
-    && "$physical_default_iface" == "$expected_underlay" \
+  if [[ "$ENDPOINT_HOST" == "$expected_gateway" ]]; then
+    direct_gateway_endpoint=true
+  fi
+  # An ordinary endpoint needs the exact global /32 through the physical
+  # gateway. When the endpoint is the gateway itself, macOS represents the
+  # correct direct /32 as a neighbor route instead. IP_BOUND_IF pins the
+  # encrypted UDP socket to the same selected underlay in both cases.
+  # `route get` may briefly retain its pre-handoff lookup result after the
+  # authoritative table has changed. For IPv4, require the exact global /32
+  # in netstat plus live payload and handshake evidence from the caller; do
+  # not let that disposable lookup cache extend the measured recovery time.
+  [[ "$physical_default_iface" == "$expected_underlay" \
     && -n "$expected_gateway" \
     && "$expected_gateway" != link#* ]] \
     && ipv4_route_table \
       | awk \
         -v endpoint="$ENDPOINT_HOST" \
         -v gateway="$expected_gateway" \
-        -v interface="$expected_underlay" '
+        -v interface="$expected_underlay" \
+        -v direct_gateway_endpoint="$direct_gateway_endpoint" '
           $1 == endpoint {
             routes += 1
-            if ($2 == gateway && $4 == interface) {
+            if ($4 == interface \
+                && ((direct_gateway_endpoint == "true" \
+                    && $2 != gateway && $3 ~ /H/) \
+                    || (direct_gateway_endpoint != "true" \
+                        && $2 == gateway && $3 !~ /I/))) {
               matching += 1
             }
           }
-          END { exit (routes == 1 && matching == 1) ? 0 : 1 }
+          END {
+            if (direct_gateway_endpoint == "true" && matching >= 1) exit 0
+            exit (routes == 1 && matching == 1) ? 0 : 1
+          }
         '
 }
 
@@ -253,6 +292,177 @@ secure_dns_owned() {
 resolver_files_absent() {
   [[ ! -e "$SECURE_RESOLVER" && ! -e "$MAGIC_RESOLVER" ]] \
     && secure_dns_store_absent
+}
+
+system_service_loaded() {
+  /bin/launchctl print "$SYSTEM_SERVICE_LABEL" >/dev/null 2>&1
+}
+
+system_service_running() {
+  /bin/launchctl print "$SYSTEM_SERVICE_LABEL" 2>/dev/null \
+    | grep -Eq '^[[:space:]]*state = running$'
+}
+
+system_service_disabled() {
+  /bin/launchctl print-disabled system 2>/dev/null \
+    | grep -Eq "\"$SYSTEM_SERVICE_NAME\" => disabled$"
+}
+
+wait_for_system_service() {
+  local expected="$1" deadline=$((SECONDS + 10))
+  while ((SECONDS < deadline)); do
+    if [[ "$expected" == loaded ]] && system_service_loaded; then
+      return 0
+    fi
+    if [[ "$expected" == unloaded ]] && ! system_service_loaded; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "system nvpn service did not become $expected"
+}
+
+resolver_snapshot_name() {
+  case "$1" in
+    "$MAGIC_RESOLVER") printf '%s\n' magic-resolver ;;
+    "$SECURE_RESOLVER") printf '%s\n' secure-resolver ;;
+    *) fail "unsupported resolver snapshot path" ;;
+  esac
+}
+
+snapshot_resolver_file() {
+  local path="$1" name
+  name="$(resolver_snapshot_name "$path")"
+  if [[ -e "$path" ]]; then
+    [[ -f "$path" && ! -L "$path" ]] \
+      || fail "preexisting nvpn resolver is not a regular owned-state file"
+    shasum -a 256 "$path" | awk '{ print $1 }' \
+      >"$INSTALLED_STATE_DIR/$name.sha256"
+  else
+    touch "$INSTALLED_STATE_DIR/$name.absent"
+  fi
+}
+
+resolver_file_matches_snapshot() {
+  local path="$1" name expected
+  name="$(resolver_snapshot_name "$path")"
+  if [[ -f "$INSTALLED_STATE_DIR/$name.absent" ]]; then
+    [[ ! -e "$path" ]]
+    return
+  fi
+  [[ -f "$INSTALLED_STATE_DIR/$name.sha256" \
+    && -f "$path" && ! -L "$path" ]] || return 1
+  expected="$(<"$INSTALLED_STATE_DIR/$name.sha256")"
+  [[ "$(shasum -a 256 "$path" | awk '{ print $1 }')" == "$expected" ]]
+}
+
+installed_state_matches_snapshot() {
+  local app_running=false service_loaded=false service_running=false
+  [[ -n "$(macos_exact_executable_pids "$INSTALLED_APP")" ]] \
+    && app_running=true
+  system_service_loaded && service_loaded=true
+  system_service_running && service_running=true
+  [[ "$app_running" == "$(
+      [[ -f "$INSTALLED_STATE_DIR/app-was-running" ]] && echo true || echo false
+    )" \
+    && "$service_loaded" == "$(
+      [[ -f "$INSTALLED_STATE_DIR/service-was-loaded" ]] && echo true || echo false
+    )" \
+    && "$service_running" == "$(
+      [[ -f "$INSTALLED_STATE_DIR/service-was-running" ]] && echo true || echo false
+    )" ]] \
+    && resolver_file_matches_snapshot "$MAGIC_RESOLVER" \
+    && resolver_file_matches_snapshot "$SECURE_RESOLVER"
+}
+
+quiesce_installed_state() {
+  [[ ! -e "$INSTALLED_STATE_DIR" ]] \
+    || fail "installed macOS state was already snapshotted"
+  mkdir -p "$INSTALLED_STATE_DIR" "$RESULT_DIR"
+  chmod 700 "$INSTALLED_STATE_DIR"
+
+  if [[ -n "$(macos_exact_executable_pids "$INSTALLED_APP")" ]]; then
+    touch "$INSTALLED_STATE_DIR/app-was-running"
+  fi
+  if system_service_loaded; then
+    system_service_disabled \
+      && fail "refusing to mutate a loaded but disabled system nvpn service"
+    system_service_running \
+      || fail "refusing to mutate a loaded but stopped system nvpn service"
+    touch "$INSTALLED_STATE_DIR/service-was-loaded"
+    touch "$INSTALLED_STATE_DIR/service-was-running"
+  elif pgrep -x nvpn >/dev/null 2>&1; then
+    fail "an nvpn process exists outside the installed system service"
+  fi
+  snapshot_resolver_file "$MAGIC_RESOLVER"
+  snapshot_resolver_file "$SECURE_RESOLVER"
+  touch "$INSTALLED_STATE_DIR/snapshot-complete"
+
+  macos_stop_exact_test_app "$INSTALLED_APP"
+  if system_service_loaded; then
+    sudo -n /bin/launchctl bootout "$SYSTEM_SERVICE_LABEL"
+    wait_for_system_service unloaded
+  fi
+  wait_until "the installed daemon's resolver ownership to quiesce" \
+    resolver_files_absent
+  [[ -z "$(macos_exact_executable_pids "$INSTALLED_APP")" ]] \
+    || fail "installed app survived gate quiescence"
+  ! pgrep -x nvpn >/dev/null 2>&1 \
+    || fail "installed daemon survived gate quiescence"
+  touch "$INSTALLED_STATE_DIR/quiesced"
+  echo "MACOS_RELEASE_NETWORK_INSTALLED_STATE_QUIESCED"
+}
+
+restore_installed_state() {
+  [[ -f "$INSTALLED_STATE_DIR/snapshot-complete" ]] || return 0
+  mkdir -p "$RESULT_DIR"
+  ! pgrep -x nvpn >/dev/null 2>&1 \
+    || fail "owned network daemon survived before installed-state restoration"
+
+  if [[ -f "$INSTALLED_STATE_DIR/service-was-loaded" ]]; then
+    [[ -f "$SYSTEM_SERVICE_PLIST" && ! -L "$SYSTEM_SERVICE_PLIST" ]] \
+      || fail "system nvpn service plist disappeared during the network gate"
+    sudo -n /bin/launchctl bootstrap system "$SYSTEM_SERVICE_PLIST"
+    wait_for_system_service loaded
+    if [[ -f "$INSTALLED_STATE_DIR/service-was-running" ]]; then
+      sudo -n /bin/launchctl kickstart -k "$SYSTEM_SERVICE_LABEL"
+    fi
+  fi
+  if [[ -f "$INSTALLED_STATE_DIR/app-was-running" ]]; then
+    [[ -x "$INSTALLED_APP" ]] \
+      || fail "preexisting installed app disappeared during the network gate"
+    /usr/bin/open -n -F -j "$INSTALLED_APP_PATH" --args --hidden
+  fi
+  wait_until "the exact preexisting installed app, service, and resolver state" \
+    installed_state_matches_snapshot
+  python3 - "$RESULT_DIR/installed-state-restoration.json" \
+    "$INSTALLED_STATE_DIR/app-was-running" \
+    "$INSTALLED_STATE_DIR/service-was-loaded" \
+    "$INSTALLED_STATE_DIR/service-was-running" <<'PY'
+import json
+import pathlib
+import sys
+
+output, app_marker, loaded_marker, running_marker = sys.argv[1:]
+pathlib.Path(output).write_text(
+    json.dumps(
+        {
+            "receiptSchema": 1,
+            "preexistingInstalledAppWasRunning": pathlib.Path(app_marker).is_file(),
+            "preexistingSystemServiceWasLoaded": pathlib.Path(loaded_marker).is_file(),
+            "preexistingSystemServiceWasRunning": pathlib.Path(running_marker).is_file(),
+            "preexistingInstalledStateRestored": True,
+            "preexistingResolverStateRestored": True,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+  touch "$INSTALLED_STATE_DIR/restored"
+  echo "MACOS_RELEASE_NETWORK_INSTALLED_STATE_RESTORED"
 }
 
 flush_dns_cache() {
@@ -328,7 +538,7 @@ capture_wireguard_readiness_failure() {
     >"$RESULT_DIR/wireguard-readiness-dns.txt" 2>&1 || true
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
     >"$RESULT_DIR/wireguard-readiness-status.json" 2>&1 || true
-  tail -n 240 "$STATE_DIR/daemon.log" \
+  tail -n 240 "$DAEMON_LOG" \
     >"$RESULT_DIR/wireguard-readiness-daemon.log" 2>&1 || true
 }
 
@@ -384,19 +594,19 @@ PY
 }
 
 rebind_count() {
-  grep -Fc 'FIPS underlay carrier(s) rebound' "$STATE_DIR/daemon.log" 2>/dev/null \
+  grep -Fc 'FIPS underlay carrier(s) rebound' "$DAEMON_LOG" 2>/dev/null \
     || true
 }
 
 wireguard_rebind_count() {
-  grep -Fc 'WG upstream rebound' "$STATE_DIR/daemon.log" 2>/dev/null \
+  grep -Fc 'WG upstream rebound' "$DAEMON_LOG" 2>/dev/null \
     || true
 }
 
 wireguard_last_rebind_target_is() {
   local expected_iface="$1" last_rebind
   last_rebind="$(
-    grep -F 'WG upstream rebound' "$STATE_DIR/daemon.log" 2>/dev/null \
+    grep -F 'WG upstream rebound' "$DAEMON_LOG" 2>/dev/null \
       | tail -n 1
   )"
   [[ "$last_rebind" == *" -> $expected_iface with a fresh handshake" ]]
@@ -627,11 +837,11 @@ capture_underlay_routes() {
 crash_startup_log_order_is_valid() {
   local wireguard_line fips_line
   wireguard_line="$({
-    grep -nF 'fips: WG upstream up on ' "$STATE_DIR/daemon.log" \
+    grep -nF 'fips: WG upstream up on ' "$DAEMON_LOG" \
       || true
   } | tail -n 1 | cut -d: -f1)"
   fips_line="$({
-    grep -nF 'daemon: FIPS private mesh on ' "$STATE_DIR/daemon.log" \
+    grep -nF 'daemon: FIPS private mesh on ' "$DAEMON_LOG" \
       || true
   } | tail -n 1 | cut -d: -f1)"
   [[ "$wireguard_line" =~ ^[1-9][0-9]*$ \
@@ -642,9 +852,9 @@ crash_startup_log_order_is_valid() {
 capture_crash_startup_log_order() {
   {
     printf '%s\n' '--- WireGuard startup receipts ---'
-    grep -nF 'fips: WG upstream up on ' "$STATE_DIR/daemon.log" || true
+    grep -nF 'fips: WG upstream up on ' "$DAEMON_LOG" || true
     printf '%s\n' '--- FIPS startup completion receipts ---'
-    grep -nF 'daemon: FIPS private mesh on ' "$STATE_DIR/daemon.log" || true
+    grep -nF 'daemon: FIPS private mesh on ' "$DAEMON_LOG" || true
   }
 }
 
@@ -721,7 +931,7 @@ record_crash_external_audit() {
     >"$RESULT_DIR/crash-external-$label-startup-order.txt" 2>&1 || true
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
     >"$RESULT_DIR/crash-external-$label-status.json" 2>&1 || true
-  cp -p "$STATE_DIR/daemon.log" \
+  cp -p "$DAEMON_LOG" \
     "$RESULT_DIR/crash-external-$label-daemon.log" 2>/dev/null || true
 }
 
@@ -783,7 +993,7 @@ capture_crash_external_failure() {
     >"$RESULT_DIR/crash-external-failure-startup-order.txt" 2>&1 || true
   nvpn status --config "$CONFIG" --json --discover-secs 0 \
     >"$RESULT_DIR/crash-external-failure-status.json" 2>&1 || true
-  cp -p "$STATE_DIR/daemon.log" \
+  cp -p "$DAEMON_LOG" \
     "$RESULT_DIR/crash-external-failure-daemon.log" 2>/dev/null || true
 }
 
@@ -903,11 +1113,11 @@ prepare_gate() {
   fi
   runtime_has_no_fips_peers "$RESULT_DIR/fips-zero-peer-initial.json" \
     || fail "isolated zero-peer FIPS runtime changed after initial readiness"
-  [[ -s "$STATE_DIR/daemon.log" ]] \
+  [[ -s "$DAEMON_LOG" ]] \
     || fail "the owned daemon did not write its config-scoped log"
   grep -Fq \
     " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
-    "$STATE_DIR/daemon.log" \
+    "$DAEMON_LOG" \
     || fail "WireGuard did not bind to the initial physical underlay before readiness"
   assert_single_owned_daemon || fail "the gate does not own exactly one daemon"
   wireguard_interface >"$STATE_DIR/wireguard-interface"
@@ -932,9 +1142,16 @@ set_dns_case() {
     --exit-dns-custom-doh-url "$DNS_CUSTOM_URL" \
     --exit-dns-custom-doh-bootstrap-ips "$DNS_BOOTSTRAP_IPS" \
     --exit-dns-through-exit-servers "$DNS_THROUGH_SERVERS"
-  wait_until "$DNS_LABEL exact runtime DNS settings" \
+  if ! wait_until "$DNS_LABEL exact runtime DNS settings" \
     runtime_dns_state_matches
-  wait_until "$DNS_LABEL production resolver" dns_case_live
+  then
+    capture_dns_case_failure
+    return 1
+  fi
+  if ! wait_until "$DNS_LABEL production resolver" dns_case_live; then
+    capture_dns_case_failure
+    return 1
+  fi
   {
     printf 'label=%s\n' "$DNS_LABEL"
     printf 'mode=%s\n' "$DNS_MODE"
@@ -944,6 +1161,27 @@ set_dns_case() {
     printf 'forwarded_probe_live=true\n'
   } >"$RESULT_DIR/dns-$DNS_LABEL.receipt"
   echo "MACOS_RELEASE_NETWORK_DNS_OK=$DNS_LABEL"
+}
+
+capture_dns_case_failure() {
+  cp -p "$DAEMON_LOG" \
+    "$RESULT_DIR/dns-$DNS_LABEL-daemon.log" 2>/dev/null || true
+  nvpn status --config "$CONFIG" --json --discover-secs 0 \
+    >"$RESULT_DIR/dns-$DNS_LABEL-status.json" 2>&1 || true
+  /usr/sbin/scutil --dns \
+    >"$RESULT_DIR/dns-$DNS_LABEL-scutil.txt" 2>&1 || true
+  {
+    for path in "$SECURE_RESOLVER" "$MAGIC_RESOLVER"; do
+      printf 'path=%s\n' "$path"
+      if [[ -f "$path" && ! -L "$path" ]]; then
+        /bin/cat "$path"
+      else
+        printf 'absent\n'
+      fi
+    done
+    printf 'dynamic_store\n'
+    secure_dns_store_state 2>&1 || true
+  } >"$RESULT_DIR/dns-$DNS_LABEL-resolver-state.txt"
 }
 
 dns_case_live() {
@@ -1068,34 +1306,141 @@ underlay_recovered() {
   wireguard_endpoint_route_state_valid "$expected_iface" \
     && wireguard_interface >/dev/null \
     && payload_after "$requested_ms" \
-    && runtime_dns_state_matches \
-    && runtime_has_no_fips_peers \
     && [[ "$(rebind_count)" == "$expected_rebind" ]] \
     && [[ "$(wireguard_rebind_count)" == "$expected_wg_rebind" ]] \
     && wireguard_last_rebind_target_is "$expected_iface"
 }
 
+physical_underlay_selected() {
+  local expected_iface="$1"
+  [[ "$(route_value default interface 2>/dev/null || true)" \
+    == "$expected_iface" ]]
+}
+
+verify_underlay_runtime_invariants() {
+  local label="$1" expected_iface="$2" requested_ms="$3"
+  local expected_rebind="$4" expected_wg_rebind="$5"
+  runtime_dns_state_matches \
+    && runtime_has_no_fips_peers \
+      "$RESULT_DIR/fips-zero-peer-after-$label.json" \
+    && return 0
+  capture_underlay_recovery_failure \
+    "$label" "$expected_iface" "$requested_ms" \
+    "$expected_rebind" "$expected_wg_rebind"
+  fail "$label changed DNS or isolated zero-peer runtime state after recovery"
+}
+
+probe_boolean() {
+  if "$@" >/dev/null 2>&1; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
+}
+
+capture_underlay_recovery_failure() {
+  local label="$1" expected_iface="$2" requested_ms="$3"
+  local expected_rebind="$4" expected_wg_rebind="$5"
+  local physical_ready_ms="${6:-}" now
+  now="$(monotonic_ms)"
+  {
+    printf 'label=%s\n' "$label"
+    printf 'expected_interface=%s\n' "$expected_iface"
+    printf 'requested_monotonic_ms=%s\n' "$requested_ms"
+    printf 'captured_monotonic_ms=%s\n' "$now"
+    printf 'elapsed_ms=%s\n' "$((now - requested_ms))"
+    if [[ -n "$physical_ready_ms" ]]; then
+      printf 'underlay_activation_ms=%s\n' \
+        "$((physical_ready_ms - requested_ms))"
+      printf 'product_recovery_ms=%s\n' "$((now - physical_ready_ms))"
+    else
+      printf 'underlay_activation_ms=not-observed\n'
+      printf 'product_recovery_ms=not-started\n'
+    fi
+    printf 'endpoint_route_interface=%s\n' \
+      "$(endpoint_route_interface 2>/dev/null || true)"
+    printf 'endpoint_route_state_valid=%s\n' \
+      "$(probe_boolean wireguard_endpoint_route_state_valid "$expected_iface")"
+    printf 'wireguard_interface_present=%s\n' \
+      "$(probe_boolean wireguard_interface)"
+    printf 'payload_after_cut=%s\n' \
+      "$(probe_boolean payload_after "$requested_ms")"
+    printf 'runtime_dns_state_matches=%s\n' \
+      "$(probe_boolean runtime_dns_state_matches)"
+    printf 'isolated_zero_peer_runtime=%s\n' \
+      "$(probe_boolean runtime_has_no_fips_peers)"
+    printf 'expected_carrier_rebinds=%s\n' "$expected_rebind"
+    printf 'actual_carrier_rebinds=%s\n' "$(rebind_count)"
+    printf 'expected_wireguard_rebinds=%s\n' "$expected_wg_rebind"
+    printf 'actual_wireguard_rebinds=%s\n' "$(wireguard_rebind_count)"
+    printf 'wireguard_last_rebind_target_matches=%s\n' \
+      "$(probe_boolean wireguard_last_rebind_target_is "$expected_iface")"
+    printf 'primary_service_state=%s\n' "$(service_state "$PRIMARY_SERVICE")"
+    printf 'secondary_service_state=%s\n' "$(service_state "$SECONDARY_SERVICE")"
+    printf 'primary_interface_ipv4=%s\n' \
+      "$(interface_ipv4 "$PRIMARY_IFACE" 2>/dev/null || true)"
+    printf 'secondary_interface_ipv4=%s\n' \
+      "$(interface_ipv4 "$SECONDARY_IFACE" 2>/dev/null || true)"
+  } >"$RESULT_DIR/underlay-failure-$label.txt"
+  capture_underlay_routes \
+    >"$RESULT_DIR/underlay-failure-$label-routes.txt" 2>&1 || true
+  cp -p "$DAEMON_LOG" \
+    "$RESULT_DIR/underlay-failure-$label-daemon.log" 2>/dev/null || true
+  nvpn status --config "$CONFIG" --json --discover-secs 0 \
+    >"$RESULT_DIR/underlay-failure-$label-status.json" 2>&1 || true
+}
+
 wait_for_underlay_recovery() {
   local label="$1" expected_iface="$2" requested_ms="$3"
   local expected_rebind="$4" expected_wg_rebind="$5"
-  local now elapsed
+  local now activation_elapsed product_elapsed total_elapsed
+  local physical_ready_ms=""
   while true; do
-    if underlay_recovered \
+    now="$(monotonic_ms)"
+    if [[ -z "$physical_ready_ms" ]] \
+      && physical_underlay_selected "$expected_iface"
+    then
+      physical_ready_ms="$now"
+    fi
+    if [[ -n "$physical_ready_ms" ]] \
+      && underlay_recovered \
       "$expected_iface" "$requested_ms" "$expected_rebind" \
       "$expected_wg_rebind"
     then
       now="$(monotonic_ms)"
-      elapsed=$((now - requested_ms))
-      if (( elapsed < 0 || elapsed > RECOVERY_DEADLINE_MS )); then
-        fail "$label recovered in ${elapsed}ms (limit ${RECOVERY_DEADLINE_MS}ms)"
+      activation_elapsed=$((physical_ready_ms - requested_ms))
+      product_elapsed=$((now - physical_ready_ms))
+      total_elapsed=$((now - requested_ms))
+      if (( activation_elapsed < 0 \
+        || activation_elapsed > ACTIVATION_DEADLINE_MS \
+        || product_elapsed < 0 \
+        || product_elapsed > RECOVERY_DEADLINE_MS )); then
+        capture_underlay_recovery_failure \
+          "$label" "$expected_iface" "$requested_ms" \
+          "$expected_rebind" "$expected_wg_rebind" "$physical_ready_ms"
+        fail "$label recovered after ${activation_elapsed}ms of macOS activation and ${product_elapsed}ms of product recovery"
         return 1
       fi
-      printf '%s\n' "$elapsed"
+      printf '%s\t%s\t%s\n' \
+        "$product_elapsed" "$activation_elapsed" "$total_elapsed"
       return 0
     fi
-    now="$(monotonic_ms)"
-    if (( now - requested_ms > RECOVERY_DEADLINE_MS )); then
-      fail "$label did not restore WireGuard payload, carrier rebind, DNS, and a fresh handshake on $expected_iface in ${RECOVERY_DEADLINE_MS}ms"
+    if [[ -z "$physical_ready_ms" ]] \
+      && (( now - requested_ms > ACTIVATION_DEADLINE_MS ))
+    then
+      capture_underlay_recovery_failure \
+        "$label" "$expected_iface" "$requested_ms" \
+        "$expected_rebind" "$expected_wg_rebind"
+      fail "macOS did not select $expected_iface within ${ACTIVATION_DEADLINE_MS}ms"
+      return 1
+    fi
+    if [[ -n "$physical_ready_ms" ]] \
+      && (( now - physical_ready_ms > RECOVERY_DEADLINE_MS ))
+    then
+      capture_underlay_recovery_failure \
+        "$label" "$expected_iface" "$requested_ms" \
+        "$expected_rebind" "$expected_wg_rebind" "$physical_ready_ms"
+      fail "$label did not restore WireGuard payload, carrier rebind, and a fresh handshake on $expected_iface within ${RECOVERY_DEADLINE_MS}ms after macOS selected it"
       return 1
     fi
     sleep 0.1
@@ -1104,7 +1449,8 @@ wait_for_underlay_recovery() {
 
 run_underlay_gate() {
   local payload_pid baseline wg_baseline first_requested first_elapsed
-  local second_requested second_elapsed
+  local first_activation first_total second_requested second_elapsed
+  local second_activation second_total
   baseline="$(tr -d '[:space:]' <"$STATE_DIR/rebind-baseline")"
   wg_baseline="$(tr -d '[:space:]' <"$STATE_DIR/wireguard-rebind-baseline")"
   [[ "$baseline" =~ ^[0-9]+$ ]] || fail "invalid carrier-rebind baseline"
@@ -1119,11 +1465,14 @@ run_underlay_gate() {
   first_requested="$(monotonic_ms)"
   sudo -n /usr/sbin/networksetup \
     -setnetworkserviceenabled "$PRIMARY_SERVICE" off
-  first_elapsed="$(
+  IFS=$'\t' read -r first_elapsed first_activation first_total < <(
     wait_for_underlay_recovery \
       primary-to-secondary "$SECONDARY_IFACE" "$first_requested" \
       "$((baseline + 1))" "$((wg_baseline + 1))"
-  )"
+  )
+  verify_underlay_runtime_invariants \
+    primary-to-secondary "$SECONDARY_IFACE" "$first_requested" \
+    "$((baseline + 1))" "$((wg_baseline + 1))"
   dns_query_works || fail "DNS failed after the secondary underlay recovered"
   captured_probe_works \
     || fail "local forwarded exit traffic failed after the secondary underlay recovered"
@@ -1131,11 +1480,14 @@ run_underlay_gate() {
   second_requested="$(monotonic_ms)"
   sudo -n /usr/sbin/networksetup \
     -setnetworkserviceenabled "$PRIMARY_SERVICE" on
-  second_elapsed="$(
+  IFS=$'\t' read -r second_elapsed second_activation second_total < <(
     wait_for_underlay_recovery \
       secondary-to-primary "$PRIMARY_IFACE" "$second_requested" \
       "$((baseline + 2))" "$((wg_baseline + 2))"
-  )"
+  )
+  verify_underlay_runtime_invariants \
+    secondary-to-primary "$PRIMARY_IFACE" "$second_requested" \
+    "$((baseline + 2))" "$((wg_baseline + 2))"
   dns_query_works || fail "DNS failed after the primary underlay recovered"
   captured_probe_works \
     || fail "local forwarded exit traffic failed after the primary underlay recovered"
@@ -1144,7 +1496,11 @@ run_underlay_gate() {
 
   {
     printf 'primary_to_secondary_ms=%s\n' "$first_elapsed"
+    printf 'primary_to_secondary_activation_ms=%s\n' "$first_activation"
+    printf 'primary_to_secondary_total_ms=%s\n' "$first_total"
     printf 'secondary_to_primary_ms=%s\n' "$second_elapsed"
+    printf 'secondary_to_primary_activation_ms=%s\n' "$second_activation"
+    printf 'secondary_to_primary_total_ms=%s\n' "$second_total"
     printf 'endpoint_route_interface=%s\n' "$(endpoint_route_interface)"
     printf 'carrier_rebinds=%s->%s\n' "$baseline" "$(rebind_count)"
     printf 'wireguard_rebinds=%s->%s\n' \
@@ -1215,7 +1571,7 @@ start_underlay_gate() {
 wireguard_bind_receipt_count() {
   grep -Fc \
     " bound to $PRIMARY_IFACE (split-default kill switch installed)" \
-    "$STATE_DIR/daemon.log" 2>/dev/null || true
+    "$DAEMON_LOG" 2>/dev/null || true
 }
 
 record_crash_restart_probe() {
@@ -1509,6 +1865,13 @@ cleanup_gate() {
 
 validate_inputs
 case "$ACTION" in
+  prepare|dns-case|underlay-start|underlay-run|crash-restart|direct)
+    resolve_daemon_log
+    ;;
+esac
+case "$ACTION" in
+  quiesce-installed-state) quiesce_installed_state ;;
+  restore-installed-state) restore_installed_state ;;
   initialize) initialize_gate ;;
   prepare) prepare_gate ;;
   dns-case) set_dns_case ;;

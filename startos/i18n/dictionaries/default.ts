@@ -43,6 +43,7 @@ const dict = {
   // main.ts — shared-service forwarders
   'A shared service is reachable': 28,
   'A shared service is not reachable': 29,
+  'The current control panel password stops working immediately, and anyone signed in with it is locked out. The new password is shown only once.': 30,
 } as const
 
 /**

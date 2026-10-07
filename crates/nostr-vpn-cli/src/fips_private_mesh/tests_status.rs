@@ -72,6 +72,53 @@
     }
 
     #[test]
+    fn ping_participants_keep_configured_transit_alive_without_pinging_ambient_peers() {
+        let configured = FipsEndpointPeer {
+            npub: Keys::generate().public_key().to_bech32().expect("npub"),
+            node_addr: NodeAddr::from_bytes([7; 16]),
+            connected: true,
+            transport_addr: Some("wss://seed.example/fips".to_string()),
+            transport_type: Some("websocket".to_string()),
+            link_id: 1,
+            srtt_ms: None,
+            srtt_age_ms: None,
+            packets_sent: 0,
+            packets_recv: 0,
+            bytes_sent: 0,
+            bytes_recv: 0,
+            rekey_in_progress: false,
+            rekey_draining: false,
+            current_k_bit: None,
+            last_outbound_route: None,
+            direct_probe_pending: false,
+            direct_probe_after_ms: None,
+            direct_probe_retry_count: 0,
+            direct_probe_auto_reconnect: true,
+            direct_probe_expires_at_ms: None,
+            nostr_traversal_consecutive_failures: 0,
+            nostr_traversal_in_cooldown: false,
+            nostr_traversal_cooldown_until_ms: None,
+            nostr_traversal_last_observed_skew_ms: None,
+        };
+        let configured_pubkey = normalize_nostr_pubkey(&configured.npub).expect("pubkey");
+        let mut ambient = configured.clone();
+        ambient.npub = Keys::generate().public_key().to_bech32().expect("npub");
+        ambient.node_addr = NodeAddr::from_bytes([8; 16]);
+        ambient.direct_probe_auto_reconnect = false;
+        let ambient_pubkey = normalize_nostr_pubkey(&ambient.npub).expect("pubkey");
+        let mut other = HashMap::new();
+        other.insert(configured_pubkey.clone(), configured);
+        other.insert(ambient_pubkey, ambient);
+
+        let participants = fips_ping_participants(vec!["roster-peer".to_string()], &other);
+
+        assert_eq!(
+            participants,
+            vec![configured_pubkey, "roster-peer".to_string()]
+        );
+    }
+
+    #[test]
     fn stale_participant_refreshes_endpoint_path_when_direct_probe_is_pending() {
         let keys = Keys::generate();
         let npub = keys.public_key().to_bech32().expect("npub");
@@ -508,7 +555,7 @@
     }
 
     #[test]
-    fn control_frames_from_unknown_endpoints_are_limited_to_first_contact_records() {
+    fn control_frames_from_unknown_endpoints_allow_liveness_and_first_contact_records() {
         let keys = Keys::generate();
         let unknown_pubkey = keys.public_key().to_hex();
         let unknown_npub = keys.public_key().to_bech32().expect("npub");
@@ -557,7 +604,10 @@
             ),
         };
 
-        assert!(control_frame_source_pubkey(&mesh, unknown_peer, &ping).is_none());
+        assert_eq!(
+            control_frame_source_pubkey(&mesh, unknown_peer, &ping),
+            Some(unknown_pubkey.clone())
+        );
         assert!(control_frame_source_pubkey(&mesh, unknown_peer, &roster).is_none());
         assert_eq!(
             control_frame_source_pubkey(&mesh, unknown_peer, &join_request),
@@ -567,6 +617,24 @@
             control_frame_source_pubkey(&mesh, unknown_peer, &join_roster),
             Some(unknown_pubkey)
         );
+    }
+
+    #[test]
+    #[cfg(feature = "paid-exit")]
+    fn paid_control_acknowledgments_survive_removing_the_exit_route() {
+        let seller = Keys::generate();
+        let seller_peer = PeerIdentity::from_npub(&seller.public_key().to_bech32().unwrap()).unwrap();
+        let mesh = FipsMeshRuntime::new(Vec::new());
+        for frame in [
+            FipsControlFrame::PaidRoutePaymentAck { id: "a".repeat(64) },
+            FipsControlFrame::PaidRouteSessionOpenAck { lease_id: "lease".into() },
+        ] {
+            assert_eq!(
+                control_frame_source_pubkey(&mesh, seller_peer, &frame),
+                Some(seller.public_key().to_hex()),
+                "authenticated replies must reach the pending-payment/session validator in Direct mode"
+            );
+        }
     }
 
     #[test]

@@ -17,18 +17,27 @@ export NVPN_E2E_NODE_A_UNDERLAY_IP="${NVPN_E2E_NODE_A_UNDERLAY_IP:-$UNDERLAY_PRE
 export NVPN_E2E_NODE_B_UNDERLAY_IP="${NVPN_E2E_NODE_B_UNDERLAY_IP:-$UNDERLAY_PREFIX.11}"
 export NVPN_E2E_NODE_C_UNDERLAY_IP="${NVPN_E2E_NODE_C_UNDERLAY_IP:-$UNDERLAY_PREFIX.12}"
 MIGRATED_NODE_A_IP="${NVPN_E2E_MIGRATED_NODE_A_IP:-$UNDERLAY_PREFIX.20}"
-# Normal link-dead detection is 30s. Leave enough room for Docker scheduling,
-# status polling, and route-cache handoff before declaring fallback broken.
-FALLBACK_DEADLINE_SECS="${NVPN_E2E_ROAMING_FALLBACK_SECS:-60}"
+# A target-signed fallback response should move the established payload owner
+# before normal 30s link-dead detection. Leave enough room for Docker
+# scheduling and status polling without allowing link-dead to hide a stalled
+# authenticated handoff.
+FALLBACK_DEADLINE_SECS="${NVPN_E2E_ROAMING_FALLBACK_SECS:-20}"
 # Consecutive flaps can meet a draining rekey and several bounded direct-probe
-# retries. Active-path retries are paced at 2-4s, and repeated production-image
-# runs restore bidirectional direct payload in 5-13s. Fail at 20s instead of
+# retries. Active-path retries are paced at 1-2s, and repeated production-image
+# runs restore bidirectional direct payload within 13s. Fail at 20s instead of
 # hiding a stuck recovery behind a minute-long allowance.
 DIRECT_RECOVERY_DEADLINE_SECS="${NVPN_E2E_DIRECT_RECOVERY_SECS:-20}"
 FALLBACK_HOLD_SECS="${NVPN_E2E_ROAMING_FALLBACK_HOLD_SECS:-12}"
-PAYLOAD_PROBE_INTERVAL_SECS="${NVPN_E2E_ROAMING_PAYLOAD_PROBE_INTERVAL_SECS:-1}"
+# Direct-path promotion deliberately requires several authenticated payload
+# packets in a bounded window. Exercise that production validation with a real
+# sustained payload stream instead of balancing on a one-second timer boundary.
+PAYLOAD_PROBE_INTERVAL_SECS="${NVPN_E2E_ROAMING_PAYLOAD_PROBE_INTERVAL_SECS:-0.2}"
 PAYLOAD_RECOVERY_DEADLINE_SECS="${NVPN_E2E_ROAMING_PAYLOAD_RECOVERY_SECS:-10}"
 NETWORK_CHANGE_RECOVERY_DEADLINE_SECS="${NVPN_E2E_NETWORK_CHANGE_RECOVERY_SECS:-30}"
+# The consecutive-failure budget below was calibrated with one probe attempt
+# per second. Keep it independent from the faster sustained stream used to
+# promote fallback paths, because a failed ping itself waits up to one second.
+NETWORK_CHANGE_PAYLOAD_PROBE_INTERVAL_SECS="${NVPN_E2E_NETWORK_CHANGE_PAYLOAD_PROBE_INTERVAL_SECS:-1}"
 NETWORK_CHANGE_MAX_CONSECUTIVE_PAYLOAD_FAILURES="${NVPN_E2E_NETWORK_CHANGE_MAX_CONSECUTIVE_PAYLOAD_FAILURES:-4}"
 LOCAL_ROUTE_HANDSHAKE_FAILURE_MAX="${NVPN_E2E_LOCAL_ROUTE_HANDSHAKE_FAILURE_MAX:-2}"
 FIPS_NOSTR_DISCOVERY_POLICY="${NVPN_FIPS_NOSTR_DISCOVERY_POLICY:-configured_only}"
@@ -253,8 +262,7 @@ peer_matches_direct_addr() {
         $after_data_seen_at == 0
         or ((.last_fips_data_seen_at? // 0) > $after_data_seen_at)
       )
-      and (.direct_probe_pending? != true)
-      and (.direct_probe_after_ms? == null)
+      and (.fips_last_outbound_route? == "direct")
       and ((.runtime_endpoint? // "") != "fips")
       and (
         ((.runtime_endpoint? // "") | contains($direct_addr))
@@ -330,8 +338,9 @@ start_payload_probe() {
   local node="$1"
   local target_ip="$2"
   local output="$3"
+  local interval="${4:-$PAYLOAD_PROBE_INTERVAL_SECS}"
   "${COMPOSE[@]}" exec -T "$node" sh -s -- \
-    "$target_ip" "$PING_PAYLOAD_SIZE" "$PAYLOAD_PROBE_INTERVAL_SECS" "$output" <<'SH'
+    "$target_ip" "$PING_PAYLOAD_SIZE" "$interval" "$output" <<'SH'
 set -eu
 target_ip="$1"
 payload_size="$2"
@@ -794,8 +803,8 @@ run_underlay_network_change() {
   alice_pid_before="$(daemon_process_id node-a)"
   bob_pid_before="$(daemon_process_id node-b)"
   mark_daemon_log node-a "$roam_marker"
-  start_payload_probe node-a "$BOB_TUNNEL_IP" "$alice_probe"
-  start_payload_probe node-b "$ALICE_TUNNEL_IP" "$bob_probe"
+  start_payload_probe node-a "$BOB_TUNNEL_IP" "$alice_probe" "$NETWORK_CHANGE_PAYLOAD_PROBE_INTERVAL_SECS"
+  start_payload_probe node-b "$ALICE_TUNNEL_IP" "$bob_probe" "$NETWORK_CHANGE_PAYLOAD_PROBE_INTERVAL_SECS"
 
   echo "--- underlay-network-change: change Alice's source address while Bob remains stationary ---"
   change_started="$(date +%s)"

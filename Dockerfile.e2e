@@ -14,6 +14,7 @@ RUN case "$NVPN_E2E_BUILDER_APT_INSTALL" in \
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY vendor ./vendor
 COPY --from=cashu-service . /app/cashu-service
 COPY --from=cashu-spilman-channels . /app/cashu_spilman_channels
 COPY --from=fips . /app/fips
@@ -28,7 +29,8 @@ RUN case "$NVPN_PATCH_LOCAL_FIPS" in \
             && test -f /app/fips/crates/fips-endpoint/Cargo.toml \
             && test -f /app/fips/crates/fips-identity/Cargo.toml \
             || { echo "NVPN_PATCH_LOCAL_FIPS=1 requires NVPN_FIPS_REPO_PATH to point at a fips checkout" >&2; exit 1; }; \
-          printf '\n[patch.crates-io]\nfips-core = { path = "/app/fips/crates/fips-core" }\nfips-endpoint = { path = "/app/fips/crates/fips-endpoint" }\nfips-identity = { path = "/app/fips/crates/fips-identity" }\n' >> Cargo.toml; \
+          mkdir -p .cargo; \
+          printf '[patch.crates-io]\nnvpn-fips-core = { path = "/app/fips/crates/fips-core" }\nnvpn-fips-endpoint = { path = "/app/fips/crates/fips-endpoint" }\nnvpn-fips-identity = { path = "/app/fips/crates/fips-identity" }\n' > .cargo/config.toml; \
           ;; \
       esac
 
@@ -38,7 +40,7 @@ RUN case "$NVPN_PATCH_LOCAL_FIPS" in \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/nostr-vpn/target \
-    find crates -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -exec touch {} + \
+    find crates vendor -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -exec touch {} + \
     && if [ -d /app/fips/crates ]; then \
       find /app/fips/crates -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -exec touch {} +; \
     fi \

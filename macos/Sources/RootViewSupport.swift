@@ -184,6 +184,7 @@ extension RootView {
             paidExitFreeProbeUnits = fallbackText(seller.freeProbeText, paidExitTrafficUnitDraft(seller.freeProbeUnits))
             paidExitGraceUnits = fallbackText(seller.graceText, paidExitTrafficUnitDraft(seller.graceUnits))
             paidExitCountryCode = seller.countryCode
+            paidExitNetworkClass = seller.networkClass
             paidExitAsn = seller.asn == 0 ? "" : String(seller.asn)
         }
         lastSyncedPaidExitSeller = state.paidExitSeller
@@ -663,7 +664,7 @@ enum SidebarItem: Hashable {
     case devices
     case internet
     case publicExits
-    case sellExit
+    case sharing
     case wallet
     case settings
 }

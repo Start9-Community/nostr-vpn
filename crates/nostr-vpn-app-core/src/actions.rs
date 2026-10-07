@@ -98,6 +98,7 @@ pub enum NativeAppAction {
     RefreshPaidRouteWallet {
         refresh: bool,
     },
+    RefreshPaidRouteWalletHistory,
     TopUpPaidRouteWallet {
         mint_url: Option<String>,
         amount_sat: u64,
@@ -132,6 +133,11 @@ pub enum NativeAppAction {
     SelectPaidRouteSession {
         session_id: String,
         connect: bool,
+    },
+    ReselectPaidExit,
+    RatePaidExit {
+        seller_npub: String,
+        rating: i64,
     },
     ProbePaidRouteSession {
         session_id: String,
@@ -185,6 +191,7 @@ pub enum NativeAppAction {
         min_increment_msat: u64,
         limit: u64,
     },
+    ClearPaidRouteActivity,
     ReceivePaidRoutePayments {
         duration_secs: u64,
     },

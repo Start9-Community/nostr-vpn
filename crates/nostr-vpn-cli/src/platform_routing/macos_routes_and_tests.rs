@@ -128,6 +128,27 @@ mod tests {
     }
 
     #[test]
+    fn linux_tunnel_address_reconciliation_removes_only_stale_owned_addresses() {
+        let state = r#"[{
+            "addr_info": [
+                {"local": "10.44.0.1", "prefixlen": 32},
+                {"local": "10.44.29.134", "prefixlen": 32},
+                {"local": "fd00::134", "prefixlen": 128},
+                {"local": "fe80::134", "prefixlen": 64}
+            ]
+        }]"#;
+        let desired = vec![
+            "10.44.29.134/32".to_string(),
+            "fd00::134/128".to_string(),
+        ];
+
+        assert_eq!(
+            stale_linux_interface_addresses_json(state, &desired).expect("stale addresses"),
+            vec!["10.44.0.1/32"]
+        );
+    }
+
+    #[test]
     fn wireguard_upstream_inbound_drop_rule_blocks_new_mesh_forwards() {
         assert_eq!(
             linux_wireguard_exit_inbound_drop_rule("nvpn-wg-exit", "nvpn0", "10.44.0.0/16"),
@@ -444,5 +465,36 @@ default via 198.51.100.1 dev enp7s0 proto static src 198.51.100.10 metric 600
                 "ACCEPT",
             ]
         );
+    }
+
+    #[test]
+    fn missing_iptables_comment_match_means_tagged_rule_cannot_exist() {
+        let rule = linux_exit_node_legacy_forward_in_rule(
+            "utun100",
+            LinuxExitNodeIpFamily::V4,
+        );
+        assert!(linux_iptables_rule_check_proves_absent(
+            Some(2),
+            "iptables v1.8.3 (legacy): Couldn't load match `comment':No such file or directory",
+            &rule,
+        ));
+    }
+
+    #[test]
+    fn iptables_rule_check_keeps_unrelated_operational_errors_fatal() {
+        let rule = linux_exit_node_legacy_forward_in_rule(
+            "utun100",
+            LinuxExitNodeIpFamily::V4,
+        );
+        assert!(!linux_iptables_rule_check_proves_absent(
+            Some(4),
+            "Another app is currently holding the xtables lock",
+            &rule,
+        ));
+        assert!(!linux_iptables_rule_check_proves_absent(
+            Some(2),
+            "Couldn't load match `comment':No such file or directory",
+            &["FORWARD".to_string(), "-j".to_string(), "ACCEPT".to_string()],
+        ));
     }
 }

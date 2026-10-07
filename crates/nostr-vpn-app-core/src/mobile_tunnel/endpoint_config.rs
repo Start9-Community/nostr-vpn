@@ -164,7 +164,11 @@ fn fips_address_hints(
                 .filter_map(|endpoint| {
                     normalize_fips_transport_address(&endpoint).map(|addr| {
                         FipsPeerAddressHint {
-                            priority: FIPS_STATIC_PEER_ENDPOINT_PRIORITY,
+                            priority: if split_peer_transport_addr(&addr).0 == "websocket" {
+                                FIPS_WEBSOCKET_FALLBACK_ENDPOINT_PRIORITY
+                            } else {
+                                FIPS_STATIC_PEER_ENDPOINT_PRIORITY
+                            },
                             addr,
                             seen_at_ms: None,
                         }
@@ -224,19 +228,26 @@ fn fips_endpoint_config_for_platform(
     let include_non_roster_transit = mobile.connect_to_non_roster_fips_peers
         || mobile.join_requests_enabled
         || mobile.device_approval_pending
+        || mobile.local_identity_confirmation_pending
         || join_request_pending
-        || !mobile.websocket_seed_urls.is_empty();
+        || !mobile.websocket_seed_urls.is_empty()
+        || !mobile.bootstrap_peers.is_empty();
     let nostr_enabled = mobile_nostr_enabled(mobile);
     config.node.discovery.nostr.enabled = nostr_enabled;
     // Publish only the generic `udp:nat` overlay advert so roster peers can
     // bootstrap encrypted traversal offers to mobile nodes. LAN addresses are
     // not placed in that public advert; when enabled, they are carried inside
     // encrypted traversal signaling/control frames.
-    // A pending approval already carries the joiner's FIPS identity (the app
-    // npub), so roster delivery routes by identity through configured transit.
-    // Do not publish an advert merely to complete approval. Once roster peers
-    // exist, adverts remain enabled to seek the preferred direct VPN path.
-    config.node.discovery.nostr.advertise = nostr_enabled && !mobile.peers.is_empty();
+    // A pending joiner has no roster path yet. Publish the same generic,
+    // identity-bound reachability advert used by roster peers so the admin can
+    // discover a return path for the request and signed approval. Stop this
+    // temporary advertisement once the pending request is cleared unless the
+    // accepted roster still needs peer discovery.
+    config.node.discovery.nostr.advertise = nostr_enabled
+        && (!mobile.peers.is_empty()
+            || join_request_pending
+            || mobile.device_approval_pending
+            || mobile.local_identity_confirmation_pending);
     config.node.discovery.nostr.policy = if include_non_roster_transit {
         NostrDiscoveryPolicy::Open
     } else {
@@ -284,19 +295,25 @@ fn fips_endpoint_config_for_platform(
             platform != RuntimePlatform::Ios,
         );
     }
-    if !mobile.websocket_seed_urls.is_empty() {
-        config.transports.websocket = TransportInstances::Single(WebSocketConfig {
-            seed_urls: mobile.websocket_seed_urls.clone(),
-            ..WebSocketConfig::default()
-        });
-    }
-    config.transports.udp = mobile_udp_transports(mobile.listen_port, nostr_enabled);
     config.peers = fips_peer_configs_from_mesh(
         &mobile.peers,
         &mobile.peer_hints,
         &mobile.bootstrap_peers,
         include_non_roster_transit,
     );
+    let needs_websocket = !mobile.websocket_seed_urls.is_empty()
+        || config.peers.iter().any(|peer| {
+            peer.addresses
+                .iter()
+                .any(|address| address.transport.eq_ignore_ascii_case("websocket"))
+        });
+    if needs_websocket {
+        config.transports.websocket = TransportInstances::Single(WebSocketConfig {
+            seed_urls: mobile.websocket_seed_urls.clone(),
+            ..WebSocketConfig::default()
+        });
+    }
+    config.transports.udp = mobile_udp_transports(mobile.listen_port, nostr_enabled);
     // Outbound TCP transport so peers reachable only over tcp:443 (UDP-blocked
     // networks) can still be dialed. bind_addr=None keeps it outbound-only.
     let needs_tcp = config.peers.iter().any(|peer| {
@@ -355,6 +372,7 @@ fn mobile_nostr_enabled(mobile: &MobileTunnelConfig) -> bool {
     mobile.nostr_discovery_enabled
         && (mobile.join_requests_enabled
             || mobile.device_approval_pending
+            || mobile.local_identity_confirmation_pending
             || mobile_join_request_pending(mobile)
             || !mobile.peers.is_empty()
             || !mobile.peer_hints.is_empty())
@@ -734,8 +752,8 @@ mod endpoint_config_tests {
 
         assert!(config.node.discovery.nostr.enabled);
         assert!(
-            !config.node.discovery.nostr.advertise,
-            "the approval npub must route without a FIPS advert"
+            config.node.discovery.nostr.advertise,
+            "the pending device must publish an encrypted approval return path"
         );
         assert_eq!(
             config.node.discovery.nostr.policy,

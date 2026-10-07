@@ -7,9 +7,21 @@
             .expect("configure manual join");
 
         let config = MobileTunnelConfig::from_app(&app).expect("manual bootstrap config");
+        let endpoint = fips_endpoint_config("nostr-vpn:pending-manual-join", &config);
 
         assert!(config.network_id.is_empty());
-        assert!(config.peers.is_empty());
+        assert_eq!(config.peers.len(), 1);
+        assert_eq!(config.peers[0].participant_pubkey, admin);
+        assert!(
+            config.peers[0].allowed_ips.is_empty(),
+            "the unconfirmed admin is control-only and must not receive a mesh route"
+        );
+        assert_eq!(config.pending_join_network_id, "manual-mesh");
+        assert_eq!(config.pending_join_request_recipient, admin);
+        assert!(
+            endpoint.node.discovery.nostr.advertise,
+            "a manual joiner must publish an encrypted return path for its approval"
+        );
         assert!(config.route_targets.is_empty());
         assert!(
             config.dns_servers.is_empty(),
@@ -28,7 +40,7 @@
             NetworkRoster {
                 network_name: "Manual mesh".to_string(),
                 devices: Vec::new(),
-                admins: vec![admin],
+                admins: vec![admin.clone()],
                 aliases: HashMap::new(),
                 signed_at: unix_timestamp(),
             },
@@ -46,7 +58,9 @@
             still_pending.network_id.is_empty(),
             "an unrelated signed roster must not move an unaccepted manual join into the mesh"
         );
-        assert!(still_pending.peers.is_empty());
+        assert_eq!(still_pending.peers.len(), 1);
+        assert_eq!(still_pending.peers[0].participant_pubkey, admin);
+        assert!(still_pending.peers[0].allowed_ips.is_empty());
         assert!(still_pending.route_targets.is_empty());
         assert!(still_pending.dns_servers.is_empty());
         assert!(still_pending.magic_dns_server.is_empty());
@@ -86,10 +100,7 @@
         assert!(mobile.join_requests_enabled);
         assert!(mobile.peers.is_empty());
         assert!(config.node.discovery.nostr.enabled);
-        assert!(
-            !config.node.discovery.nostr.advertise,
-            "a known approval npub routes through discovery transit without a public advert"
-        );
+        assert!(!config.node.discovery.nostr.advertise);
         assert_eq!(
             config.node.discovery.nostr.policy,
             NostrDiscoveryPolicy::Open
@@ -134,7 +145,7 @@
     }
 
     #[test]
-    fn mobile_config_identity_pins_each_default_websocket_seed_once() {
+    fn mobile_config_identity_pins_each_default_bootstrap_peer_once() {
         let app = AppConfig::generated();
         let mobile = MobileTunnelConfig::from_app(&app).expect("mobile config");
         let config = fips_endpoint_config("nostr-vpn:test", &mobile);
@@ -159,9 +170,16 @@
                 .filter(|peer| peer.npub == *expected_npub)
                 .collect::<Vec<_>>();
             assert_eq!(matching.len(), 1, "seed PeerConfig must not be duplicated");
-            assert_eq!(matching[0].addresses.len(), 1);
-            assert_eq!(matching[0].addresses[0].transport, "websocket");
-            assert_eq!(matching[0].addresses[0].addr, *expected_url);
+            assert!(matching[0].addresses.iter().any(|address| {
+                address.transport == "websocket" && address.addr == *expected_url
+            }));
+            assert!(
+                matching[0]
+                    .addresses
+                    .iter()
+                    .any(|address| address.transport == "udp"),
+                "native bootstrap peers should retain their preferred UDP path"
+            );
         }
     }
 

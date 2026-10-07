@@ -5,15 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 required_source=(
-  'macos/Sources/RootViewInternet.swift:.accessibilityIdentifier("exit-dns-mode")'
-  'macos/Sources/RootViewInternet.swift:.accessibilityIdentifier("exit-dns-save")'
+  'macos/Sources/RootViewSettings.swift:.accessibilityIdentifier("exit-dns-mode")'
+  'macos/Sources/RootViewSettings.swift:.accessibilityIdentifier("exit-dns-save")'
   'linux/src/main/saved_networks.rs:nvpn-exit-dns-mode'
   'linux/src/main/saved_networks.rs:nvpn-exit-dns-save'
   'windows/NostrVpn.Windows/MainWindow.xaml:AutomationProperties.AutomationId="ExitDnsMode"'
   'windows/NostrVpn.Windows/MainWindow.xaml:AutomationProperties.AutomationId="ExitDnsSave"'
   'scripts/desktop-mobile-manual-join-atspi.py:uiRestartReadback'
-  'scripts/desktop-mobile-manual-join-atspi.py:invoke("Internet", stable_focus=0.5)'
-  'scripts/desktop-mobile-manual-join-atspi.py:find_named("nvpn-exit-dns-mode")'
+  'scripts/desktop-mobile-manual-join-atspi.py:invoke_until_visible("Internet", "nvpn-exit-dns-mode")'
   'scripts/desktop-mobile-manual-join-windows-ui.ps1:uiRestartReadback'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:DnsPolicy'
   'scripts/ubuntu-vm-exit-dns-ui-e2e.sh:source "$repo/scripts/lib-linux-owned-test-app.sh"'
@@ -181,7 +180,7 @@ if "set_dropdown_accessible_label" in source:
 for required in (
     'name.startswith("nvpn-exit-dns-")',
     "node.get_accessible_id() == name",
-    "ancestor_with_accessible_id(candidate, name)",
+    "return ancestor_with_accessible_id(node, name)",
     '"nvpn-exit-dns-mode": (',
     '"Automatic (recommended)"',
     '"Encrypted DNS"',
@@ -203,6 +202,16 @@ for required in (
     "wait_dropdown_popup_ready(name)",
     "expected_items = len(DNS_DROPDOWN_LABELS[name])",
     'node.getRoleName() != "list box"',
+    "def focused_actionable_nodes() -> list[Any]:",
+    "def sole_focused_target(name: str) -> Any | None:",
+    "saw_non_target_focus = False",
+    "target = sole_focused_target(name)",
+    "if focused and not any(focused_target(node, name) for node in focused):",
+    "target_window_has_focus() and sole_focused_target(name) is not None",
+    "def invoke_until_visible(name: str, expected: str, attempts: int = 4)",
+    "except RuntimeError as error:",
+    "invoke(name)\n",
+    'subprocess.run(["xdotool", "key", "--clearmodifiers", "Escape"]',
 ):
     if required not in driver:
         raise SystemExit(
@@ -383,6 +392,35 @@ with tempfile.TemporaryDirectory() as temporary:
         assert source == (app_sha, app_tree)
         assert reused_hash is None
 
+    seller_sidecar = base / "seller-sidecar"
+    shutil.copytree(base / "macos", seller_sidecar)
+    (seller_sidecar / "paid-exit-seller.json").write_text(
+        json.dumps({"case": "paid-exit-seller"}) + "\n",
+        encoding="utf-8",
+    )
+    cases, hashes, source, reused_hash = module.validate_desktop_dns_ui_receipts(
+        seller_sidecar, "macos", app_sha, app_tree
+    )
+    assert set(cases) == set(settings)
+    assert set(hashes) == {f"{case}.json" for case in settings}
+    assert source == (app_sha, app_tree)
+    assert reused_hash is None
+
+    unexpected_sidecar = base / "unexpected-sidecar"
+    shutil.copytree(base / "linux", unexpected_sidecar)
+    (unexpected_sidecar / "unrelated.json").write_text(
+        json.dumps({"case": "unrelated"}) + "\n",
+        encoding="utf-8",
+    )
+    try:
+        module.validate_desktop_dns_ui_receipts(
+            unexpected_sidecar, "linux", app_sha, app_tree
+        )
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("unexpected desktop DNS UI sidecar was accepted")
+
     bad = base / "bad-bootstrap"
     shutil.copytree(base / "linux", bad)
     path = bad / "custom.json"
@@ -445,6 +483,7 @@ with tempfile.TemporaryDirectory() as temporary:
     }
     artifact = {
         "receiptSchema": 1,
+        "companySigningVerified": True,
         "appGitSha": receipt_sha,
         "appGitTree": receipt_tree,
         "appExecutableSha256": artifact_hash,
@@ -483,6 +522,43 @@ with tempfile.TemporaryDirectory() as temporary:
     assert set(hashes) == {f"{case}.json" for case in settings}
     assert source == (receipt_sha, receipt_tree)
     assert reused_hash == artifact_receipt_hash
+
+    network = reused / "network"
+    network.mkdir()
+    rows = []
+    for case, kind in module.DNS_CASES.items():
+        after = [int(name in module.DNS_COUNTERS_INCREASED[kind])
+                 for name in module.COUNTERS]
+        rows.append("\t".join(map(str, [case, 0, 1, 0, 1] + [0] * 7 + after)))
+    (network / "fixture-dns-counters.tsv").write_text("\n".join(rows) + "\n")
+    (network / "underlay.txt").write_text(
+        "primary_to_secondary_ms=100\nsecondary_to_primary_ms=100\n"
+        "primary_to_secondary_activation_ms=200\nsecondary_to_primary_activation_ms=200\n"
+        "primary_to_secondary_total_ms=300\nsecondary_to_primary_total_ms=300\n"
+        "connected_peer_count=0\n"
+    )
+    (network / "crash-restart.txt").write_text(
+        "startup_persist_path_completed=true\nsigkill_tunnel_routes_absent=true\n"
+        "sigkill_secure_dns_ownership_seen=true\nold_pid=1\nnew_pid=2\n"
+        "restart_payload_ms=100\nconnected_peer_count=0\n"
+    )
+    (network / "direct.txt").write_text(
+        "resolver_state_absent=true\ndirect_interface=en0\n"
+        "direct_gateway=192.0.2.1\ndirect_source_ip=192.0.2.2\n"
+    )
+    output = reused / "network-receipt.json"
+    module.build_desktop(module.parser().parse_args([
+        "desktop", "--platform", "macos", "--artifact-dir", str(network),
+        "--dns-ui-dir", str(cases_root), "--artifact-receipt", str(artifact_path),
+        "--app-git-sha", app_sha, "--app-git-tree", app_tree,
+        "--output", str(output),
+    ]))
+    network_receipt = json.loads(output.read_text())
+    assert (network_receipt["appGitSha"], network_receipt["appGitTree"]) == (
+        receipt_sha, receipt_tree
+    ), "network receipt replaced the tested artifact source with the harness source"
+    assert network_receipt["summary"]["artifactReceiptSha256"] == artifact_receipt_hash
+    assert network_receipt["desktopDnsUiEvidenceFiles"] == hashes
 
     for label, mutate in (
         ("candidate", lambda value: value["componentInputProof"].update(

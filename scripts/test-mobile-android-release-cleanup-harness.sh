@@ -51,11 +51,19 @@ if "if ! vpn_state_present" in disconnect:
     )
 for receipt in (
     "android_release_vpn_toggle_checked",
-    'tap_android_ui description "Turn VPN off"',
     "android_release_vpn_off_and_inactive",
+    'echo "Android Release VPN-off gesture produced no UI state change; retrying once"',
 ):
     if receipt not in disconnect:
         raise SystemExit(f"Release disconnect is missing {receipt!r}")
+if disconnect.count('tap_android_ui description "Turn VPN off"') != 2:
+    raise SystemExit("Release disconnect must allow exactly one bounded shipped-UI retap")
+if disconnect.count('wait_until "$VPN_STOP_WAIT_SECS" android_release_vpn_off_and_inactive') != 2:
+    raise SystemExit("Release disconnect must prove OS/UI shutdown after each bounded gesture")
+if disconnect.index("retrying once") > disconnect.rindex(
+    'tap_android_ui description "Turn VPN off"'
+):
+    raise SystemExit("Release disconnect retry is not announced before its second gesture")
 
 quiescence = function_body(
     release_gate,
@@ -111,6 +119,7 @@ for receipt, expected in (
     (arm, 1),
     ("android_release_connect_ui", 1),
     ("run_android_release_exit_network_probe", 1),
+    ("run_android_release_direct_network_probe start-stop-stable-direct 0", 1),
     ("android_release_disconnect_ui", 1),
     (stable, 1),
     (disarm, 1),
@@ -125,12 +134,25 @@ for receipt, expected in (
 positions = [
     rapid_gate.index(receipt)
     for receipt in (
+        "run_android_release_direct_network_probe start-stop-stable-direct 0",
         arm, "android_release_connect_ui", "run_android_release_exit_network_probe",
         "android_release_disconnect_ui", stable, disarm,
     )
 ]
 if positions != sorted(positions):
     raise SystemExit("Release reconnect cleanup is not armed through stable quiescence")
+for receipt in (
+    'expected_pid="$(android_app_pid)"',
+    '[[ "$(android_app_pid)" == "$expected_pid" ]]',
+    "printf 'semantic\\t%s\\t%s\\n'",
+    '>>"$start_stop_ledger"',
+):
+    if rapid_gate.count(receipt) != 1:
+        raise SystemExit(
+            f"Release semantic start/stop gate must emit one exact receipt: {receipt!r}"
+        )
+if rapid_gate.index('>>"$start_stop_ledger"') < rapid_gate.index(disarm):
+    raise SystemExit("Release start/stop receipt is emitted before stable cleanup")
 
 emergency = function_body(
     release_gate,
@@ -168,3 +190,41 @@ for receipt in (
 
 print("Android Release semantic start/stop cleanup source contract passed")
 PY
+
+# Exercise the production setup flow with OS/UI boundaries replaced. Creating
+# a network can start its approval carrier and raise Android's permission sheet.
+source "$release_gate"
+for permission_result in 0 1; do
+  (
+    create_network=1
+    DEBUG_NETWORK_NAME=fixture
+    submitted=0
+    permission_seen=0
+    start_main_activity() { :; }
+    sleep() { :; }
+    truthy() { [[ "$1" == 1 ]]; }
+    android_ui_query() { return 1; }
+    replace_android_ui_text() { :; }
+    android_ui_scroll_to() { :; }
+    tap_android_ui() {
+      [[ "$2" != network-create-submit ]] || submitted=1
+    }
+    maybe_accept_vpn_dialog() {
+      [[ "$submitted" == 1 ]] || return 1
+      permission_seen=1
+      return "$permission_result"
+    }
+    wait_for_android_ui() {
+      [[ "$2" != 'Internet tab' ]] || [[ "$permission_seen" == 1 ]]
+    }
+    if android_release_ensure_network_ui; then
+      [[ "$permission_result" == 0 && "$permission_seen" == 1 ]]
+    else
+      [[ "$permission_result" == 1 && "$permission_seen" == 1 ]]
+    fi
+  ) || {
+    echo 'Android network setup did not resolve its actual permission boundary' >&2
+    exit 1
+  }
+done
+echo 'Android Release network creation permission handling passed'

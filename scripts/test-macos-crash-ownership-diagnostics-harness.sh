@@ -31,12 +31,19 @@ fi
 while IFS= read -r sudo_line; do
   sudo_line="${sudo_line#*sudo -n }"
   case "$sudo_line" in
-    '"$NVPN_BIN" '*|'/usr/sbin/networksetup '*|'/usr/sbin/networksetup \'|'/bin/kill '*) ;;
+    '"$NVPN_BIN" '* \
+      | '/usr/sbin/networksetup '* \
+      | '/usr/sbin/networksetup \' \
+      | '/bin/kill '* \
+      | '/bin/launchctl bootout "$SYSTEM_SERVICE_LABEL"' \
+      | '/bin/launchctl bootstrap system "$SYSTEM_SERVICE_PLIST"' \
+      | '/bin/launchctl kickstart -k "$SYSTEM_SERVICE_LABEL"') ;;
     *) fail "guest harness sudo command is outside its explicit allowlist: $sudo_line" ;;
   esac
 done < <(grep -F 'sudo -n ' "$GUEST")
 
 sed '/^validate_inputs$/,$d' "$GUEST" >"$DEFINITIONS"
+export NVPN_MACOS_NETWORK_ROOT="$ROOT"
 export NVPN_MACOS_NETWORK_STATE_DIR="$TMP_ROOT/state"
 mkdir -p "$NVPN_MACOS_NETWORK_STATE_DIR/results"
 # shellcheck disable=SC1090
@@ -45,6 +52,8 @@ source "$DEFINITIONS"
 STATE_DIR="$NVPN_MACOS_NETWORK_STATE_DIR"
 RESULT_DIR="$STATE_DIR/results"
 CONFIG="$STATE_DIR/config.toml"
+DAEMON_LOG="$TMP_ROOT/protected-runtime/daemon.log"
+mkdir -p "$(dirname "$DAEMON_LOG")"
 ENDPOINT_FAMILY=ipv4
 ENDPOINT_HOST=192.0.2.10
 PRIMARY_IFACE=en0
@@ -80,11 +89,15 @@ runtime_has_no_fips_peers() { return "$RESTART_STATE_STATUS"; }
 no_nvpn_processes() { return 0; }
 capture_underlay_routes() { printf 'route snapshot\n'; }
 secure_dns_store_state() { printf 'dynamic resolver snapshot\n'; }
-nvpn() { printf '{"daemon":{"running":true}}\n'; }
+nvpn() { printf '{"daemon":{"running":true,"log_file":"%s"}}\n' "$TMP_ROOT/protected-runtime/daemon.log"; }
+DAEMON_LOG=""
+resolve_daemon_log
+[[ "$DAEMON_LOG" == "$TMP_ROOT/protected-runtime/daemon.log" ]] \
+  || fail "the gate did not use the log path reported by the daemon"
 
 # The startup completion receipt must follow WireGuard setup. It is the public
 # log point reached only after mandatory cleanup-ownership persistence succeeds.
-cat >"$STATE_DIR/daemon.log" <<'LOG'
+cat >"$DAEMON_LOG" <<'LOG'
 daemon: FIPS private mesh on utun8
 fips: WG upstream up on utun9 via 192.0.2.1 bound to en0 (split-default kill switch installed)
 LOG
@@ -92,11 +105,11 @@ if crash_startup_log_order_is_valid; then
   fail "reversed startup persistence ordering was accepted"
 fi
 
-cat >"$STATE_DIR/daemon.log" <<'LOG'
+cat >"$DAEMON_LOG" <<'LOG'
 fips: WG upstream up on utun9 via 192.0.2.1 bound to en0 (split-default kill switch installed)
 LOG
 sleep() {
-  printf '%s\n' 'daemon: FIPS private mesh on utun8' >>"$STATE_DIR/daemon.log"
+  printf '%s\n' 'daemon: FIPS private mesh on utun8' >>"$DAEMON_LOG"
 }
 wait_for_crash_live_precondition \
   || fail "transient external startup state did not converge"
@@ -220,7 +233,7 @@ grep -Fq 'nameserver 127.0.0.1' \
 grep -Fq '"running":true' \
   "$RESULT_DIR/crash-external-failure-status.json" \
   || fail "daemon status was not retained"
-cmp -s "$STATE_DIR/daemon.log" \
+cmp -s "$DAEMON_LOG" \
   "$RESULT_DIR/crash-external-failure-daemon.log" \
   || fail "the daemon log was not retained exactly"
 if find "$STATE_DIR" -name '*cleanup*json' -print -quit | grep -q .; then

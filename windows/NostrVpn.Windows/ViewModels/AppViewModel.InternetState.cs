@@ -47,6 +47,56 @@ public sealed partial class AppViewModel
     public bool CanSetManualPaidExitProvider =>
         PaidRouteMarketVisible && !ActionInFlight && !string.IsNullOrWhiteSpace(ManualPaidExitProvider);
 
+    public string PaidRouteFilterCountryCode
+    {
+        get => _paidRouteFilterCountryCode;
+        set
+        {
+            var normalized = new string((value ?? "").Where(char.IsLetter).Take(2).ToArray()).ToUpperInvariant();
+            if (SetField(ref _paidRouteFilterCountryCode, normalized))
+            {
+                _paidRouteFilterEditing = true;
+            }
+        }
+    }
+
+    public string PaidRouteFilterSort
+    {
+        get => _paidRouteFilterSort;
+        set
+        {
+            var normalized = value is "price" or "newest" ? value : "quality";
+            if (SetField(ref _paidRouteFilterSort, normalized))
+            {
+                _paidRouteFilterEditing = true;
+            }
+        }
+    }
+
+    public bool PaidRouteFilterRequireIpv4
+    {
+        get => _paidRouteFilterRequireIpv4;
+        set
+        {
+            if (SetField(ref _paidRouteFilterRequireIpv4, value))
+            {
+                _paidRouteFilterEditing = true;
+            }
+        }
+    }
+
+    public bool PaidRouteFilterRequireIpv6
+    {
+        get => _paidRouteFilterRequireIpv6;
+        set
+        {
+            if (SetField(ref _paidRouteFilterRequireIpv6, value))
+            {
+                _paidRouteFilterEditing = true;
+            }
+        }
+    }
+
     public bool CanSavePaidExitPrice =>
         PaidExitSellerVisible && !ActionInFlight && ulong.TryParse(PaidExitPriceMsatPerGb.Trim(), out _);
 
@@ -145,11 +195,26 @@ public sealed partial class AppViewModel
 
     public bool PaidExitSellerVisible => State.PaidExitSeller.Supported;
 
+    public IReadOnlyList<NativePaidRouteOfferState> PaidRouteVisibleOffers =>
+        State.PaidRouteMarket.HiddenOfferCount > 0 || State.PaidRouteMarket.VisibleOffers.Count > 0
+            ? State.PaidRouteMarket.VisibleOffers
+            : State.PaidRouteMarket.Offers;
+
+    public string PaidRouteHiddenOffersText => State.PaidRouteMarket.HiddenOfferCount == 0
+        ? ""
+        : $"{State.PaidRouteMarket.HiddenOfferCount} hidden by filters";
+
     // Bullet-style radio indicators next to each exit-node row.
     public string DirectExitMarker =>
         State.InternetSource == "direct" ? "●" : "○";
 
     public string WireguardExitMarker => State.InternetSource == "wireguard" ? "●" : "○";
+
+    public bool AutomaticProviderSelected => State.InternetSource == "paid_automatic" && !string.IsNullOrEmpty(State.ExitNode);
+    public IEnumerable<NativePaidRouteSessionState> ActiveAutomaticPaidSessions =>
+        AutomaticProviderSelected && State.ExitNodeActive
+            ? State.PaidRouteMarket.Sessions.Where(session => session.SellerNpub == State.ExitNode && session.CanRate).Take(1)
+            : [];
 
     public string PaidAutomaticExitMarker => State.InternetSource == "paid_automatic" ? "●" : "○";
 
@@ -193,7 +258,9 @@ public sealed partial class AppViewModel
         ? "Wallet"
         : $"Wallet {State.PaidRouteMarket.Wallet.NavigationBalanceText}";
 
-    public string PaidRouteWalletFiatText => State.PaidRouteMarket.Wallet.FiatBalanceText;
+    public string PaidRouteWalletSecondaryBalanceText => string.IsNullOrWhiteSpace(State.PaidRouteMarket.Wallet.FiatBalanceText)
+        ? ""
+        : FormatPaidRouteMsat(State.PaidRouteMarket.Wallet.TotalBalanceMsat);
 
     public string PaidRouteWalletRateText => string.IsNullOrWhiteSpace(State.PaidRouteMarket.Wallet.ExchangeRateText)
         ? ""

@@ -11,6 +11,21 @@ fn endpoint_path_refresh_due(
         && fips_peer_presence_stale(last_path_data_seen_at, now)
 }
 
+fn fips_ping_participants(
+    mut participants: Vec<String>,
+    other_link_status: &HashMap<String, FipsEndpointPeer>,
+) -> Vec<String> {
+    participants.extend(
+        other_link_status
+            .iter()
+            .filter(|(_, peer)| peer.direct_probe_auto_reconnect)
+            .map(|(participant, _)| participant.clone()),
+    );
+    participants.sort();
+    participants.dedup();
+    participants
+}
+
 impl FipsPrivateMeshRuntime {
     pub(crate) fn peer_statuses(&self) -> Vec<MeshPeerStatus> {
         let now = unix_timestamp();
@@ -61,6 +76,7 @@ impl FipsPrivateMeshRuntime {
                 status.rekey_in_progress = peer_link.rekey_in_progress;
                 status.rekey_draining = peer_link.rekey_draining;
                 status.current_k_bit = peer_link.current_k_bit;
+                status.last_outbound_route = peer_link.last_outbound_route.clone();
                 status.direct_probe_pending = peer_link.direct_probe_pending;
                 status.direct_probe_after_ms = peer_link.direct_probe_after_ms;
                 status.direct_probe_retry_count = peer_link.direct_probe_retry_count;
@@ -225,6 +241,11 @@ impl FipsPrivateMeshRuntime {
             .link_status
             .read()
             .map_err(|_| anyhow!("FIPS mesh link status lock poisoned"))?;
+        let other_link_status = self
+            .other_link_status
+            .read()
+            .map_err(|_| anyhow!("FIPS mesh other link status lock poisoned"))?;
+        let participants = fips_ping_participants(participants, &other_link_status);
         let mut due = participants
             .into_iter()
             .filter_map(|participant| {
@@ -232,6 +253,7 @@ impl FipsPrivateMeshRuntime {
                 let peer_presence = presence.get(&participant);
                 let link_connected = link_status
                     .get(&participant)
+                    .or_else(|| other_link_status.get(&participant))
                     .is_some_and(|peer| peer.connected);
                 let last_seen_at = participant_key
                     .as_ref()
@@ -412,7 +434,7 @@ impl FipsPrivateMeshRuntime {
         participant: &str,
         capabilities: &PeerCapabilities,
         now: u64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let normalized = normalize_nostr_pubkey(participant)?;
         let mut caps = self
             .peer_capabilities
@@ -420,18 +442,20 @@ impl FipsPrivateMeshRuntime {
             .map_err(|_| anyhow!("FIPS mesh peer capabilities lock poisoned"))?;
         match caps.get(&normalized) {
             Some(existing) if existing.capabilities.signed_at > capabilities.signed_at => {
-                return Ok(());
+                return Ok(false);
             }
             _ => {}
         }
-        caps.insert(
-            normalized,
-            PeerCapabilitiesEntry {
-                capabilities: capabilities.clone(),
-                received_at: now,
-            },
-        );
-        Ok(())
+        let first_received = caps
+            .insert(
+                normalized,
+                PeerCapabilitiesEntry {
+                    capabilities: capabilities.clone(),
+                    received_at: now,
+                },
+            )
+            .is_none();
+        Ok(first_received)
     }
 
 }

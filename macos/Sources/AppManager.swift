@@ -14,6 +14,8 @@ let defaultUpdatePollIntervalNanoseconds: UInt64 = 6 * 60 * 60 * 1_000_000_000
 @MainActor
 final class AppManager: ObservableObject {
     @Published var state: NativeAppState
+    @Published var paidExitChooserRequested = false
+    @Published var sellingSettingsRequested = false
     @Published var actionInFlight = false
     @Published var actionStatus = ""
     @Published var actionError = ""
@@ -233,6 +235,11 @@ final class AppManager: ObservableObject {
         if actionInFlight || serviceSettling || updateChecking || updateInstalling {
             return 1_000_000_000
         }
+        if state.vpnEnabled,
+           activeNetwork?.participants.contains(where: { !$0.rosterAccepted }) == true {
+            // Approval arrives asynchronously; keep the pending join responsive.
+            return 1_000_000_000
+        }
         if paidRouteLiveRefreshWanted {
             return Self.paidRouteRefreshIntervalNanoseconds
         }
@@ -275,6 +282,13 @@ final class AppManager: ObservableObject {
         actionInFlight = true
         actionStatus = status
         actionError = ""
+        let joiningDevice: Bool
+        switch action {
+        case .importJoinRequest, .acceptJoinRequest, .addParticipant:
+            joiningDevice = true
+        default:
+            joiningDevice = false
+        }
         Task {
             let nextState = await Task.detached {
                 app.dispatch(action: action)
@@ -290,6 +304,10 @@ final class AppManager: ObservableObject {
                 }
                 if settleService {
                     self.startServiceSettlementPolling()
+                } else if joiningDevice, nextState.error.isEmpty {
+                    // Approval delivery continues after the local roster is saved.
+                    // Observe its receipt without waiting for the idle refresh.
+                    self.startServiceSettlementPolling(attempts: 30)
                 }
                 completion?(nextState.error.isEmpty)
             }

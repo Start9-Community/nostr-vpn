@@ -18,7 +18,7 @@ extension RootView {
     var paidExitSellerStatusSettings: some View {
         surface {
             HStack(spacing: 12) {
-                sectionHeader("Share My Internet", systemImage: "bitcoinsign.circle.fill")
+                sectionHeader("Paid Internet · Experimental", systemImage: "bitcoinsign.circle.fill")
                 Spacer(minLength: 16)
                 Toggle("", isOn: Binding(
                     get: { state.paidExitSeller.enabled },
@@ -26,6 +26,7 @@ extension RootView {
                 ))
                 .labelsHidden()
                 .toggleStyle(.switch)
+                .accessibilityIdentifier("paid-exit-seller-enabled")
                 .disabled(manager.actionInFlight || !state.paidExitSeller.supported)
             }
             if !state.paidExitSeller.supported {
@@ -59,7 +60,9 @@ extension RootView {
 
     var paidExitSellerStatusBadges: some View {
         HStack(spacing: 8) {
-            badge(state.paidExitSeller.enabled ? "Selling" : "Off", style: state.paidExitSeller.enabled ? .ok : .muted)
+            badge(state.paidExitSeller.enabled ? (state.paidExitSeller.ready ? "Ready" : "Waiting") : "Off",
+                  style: state.paidExitSeller.enabled ? (state.paidExitSeller.ready ? .ok : .warn) : .muted)
+                .help(state.paidExitSeller.statusText)
             badge(fallbackText(state.paidExitSeller.internetText, paidExitCurrentInternetTitle), style: .muted)
             if !state.paidExitSeller.publicIpText.isEmpty {
                 badge("Public IP \(state.paidExitSeller.publicIpText)", style: .muted)
@@ -142,6 +145,18 @@ extension RootView {
                                 value.uppercased().filter { $0.isASCII && $0.isLetter }.prefix(2)
                             )
                         }
+                }
+                paidExitFormRow("Network") {
+                    Picker("Network", selection: $paidExitNetworkClass) {
+                        Text("Unspecified").tag("unknown")
+                        Text("Residential").tag("residential")
+                        Text("Datacenter").tag("datacenter")
+                        Text("Mobile").tag("mobile")
+                        Text("Business").tag("business")
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                    .accessibilityIdentifier("paid-exit-network-class")
                 }
                 paidExitFormRow("Works with") {
                     Text("IPv4")
@@ -322,6 +337,7 @@ extension RootView {
                 freeProbeUnits: freeProbeUnits,
                 graceUnits: graceUnits,
                 countryCode: countryCode,
+                networkClass: paidExitNetworkClass,
                 asn: asn
             )
         } label: {

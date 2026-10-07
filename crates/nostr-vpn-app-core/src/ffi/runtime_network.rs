@@ -13,7 +13,24 @@ impl NativeAppRuntime {
         vpn_active: bool,
         daemon_state: Option<&DaemonRuntimeState>,
         active_network: &NetworkConfig,
+        paid_route_market: &NativePaidRouteMarketState,
     ) -> ExitNodeUiStatus {
+        if vpn_enabled
+            && self.config.internet_source == InternetSource::PaidAutomatic
+            && let Some((payment_status, needs_attention)) = self.pending_paid_route_funding_status()
+        {
+            let blocked = self.config.exit_node_leak_protection;
+            return ExitNodeUiStatus {
+                active: false,
+                blocked,
+                needs_attention,
+                text: if blocked {
+                    format!("Automatic paid exit · Blocked · {payment_status}")
+                } else {
+                    format!("Automatic paid exit · {payment_status}")
+                },
+            };
+        }
         let selected_exit_node = self.config.exit_node.trim();
         if !selected_exit_node.is_empty() {
             let source = match self.config.internet_source {
@@ -22,31 +39,33 @@ impl NativeAppRuntime {
                 InternetSource::WireGuard => "WireGuard exit",
                 InternetSource::Direct | InternetSource::PrivateVpn => "Private exit",
             };
-            let name = exit_node_display_name(&self.config, active_network, selected_exit_node);
             let selected_peer = daemon_state.and_then(|state| {
                 state
                     .peers
                     .iter()
                     .find(|peer| peer.participant_pubkey == selected_exit_node)
             });
-            let active_paid_exit_ip = matches!(
+            let paid_exit = matches!(
                 self.config.internet_source,
                 InternetSource::PaidAutomatic | InternetSource::PaidManual
-            )
-            .then(|| self.active_paid_route_exit_ip(selected_exit_node))
-            .flatten();
-            let selected_exit_active = vpn_active
-                && if matches!(
-                    self.config.internet_source,
-                    InternetSource::PaidAutomatic | InternetSource::PaidManual
-                ) {
+            );
+            let name = if paid_exit {
+                paid_exit_provider_display_name(paid_route_market, selected_exit_node)
+            } else {
+                exit_node_display_name(&self.config, active_network, selected_exit_node)
+            };
+            let active_paid_exit_ip = paid_exit
+                .then(|| self.active_paid_route_exit_ip(selected_exit_node))
+                .flatten();
+            // Admission and a successful exit probe are not enough if
+            // the selected seller has since disconnected.
+            let selected_exit_active = vpn_active && selected_peer.is_some_and(|peer| {
+                peer.reachable && if paid_exit {
                     active_paid_exit_ip.is_some()
-                        && selected_peer.is_some_and(|peer| peer.reachable)
                 } else {
-                    selected_peer.is_some_and(|peer| {
-                        peer.reachable && peer_offers_exit_node(&peer.advertised_routes)
-                    })
-                };
+                    peer_offers_exit_node(&peer.advertised_routes)
+                }
+            });
             let blocked =
                 self.config.exit_node_leak_protection && vpn_enabled && !selected_exit_active;
             let text = if blocked {
@@ -56,18 +75,30 @@ impl NativeAppRuntime {
                 if realized_exit_ip.is_empty() {
                     format!("{source} · {name} · Connected")
                 } else {
-                    format!("{source} · {name} · {realized_exit_ip} · Connected")
+                    let connected = if self.config.internet_source == InternetSource::PaidAutomatic {
+                        "Active"
+                    } else {
+                        "Connected"
+                    };
+                    format!("{source} · {name} · {realized_exit_ip} · {connected}")
                 }
+            } else if self.config.internet_source == InternetSource::PaidAutomatic {
+                format!("{source} · Selected {name} · Connecting")
             } else {
                 format!("{source} · {name} · Pending")
             };
             return ExitNodeUiStatus {
+                needs_attention: blocked,
                 active: selected_exit_active,
                 blocked,
                 text,
             };
         }
 
+        self.unselected_exit_ui_status(vpn_enabled, vpn_active, daemon_state)
+    }
+
+    fn unselected_exit_ui_status(&self, vpn_enabled: bool, vpn_active: bool, daemon_state: Option<&DaemonRuntimeState>) -> ExitNodeUiStatus {
         let pending_source = match self.config.internet_source {
             InternetSource::PrivateVpn => Some("Private exit"),
             InternetSource::PaidAutomatic => Some("Automatic paid exit"),
@@ -79,16 +110,18 @@ impl NativeAppRuntime {
             return ExitNodeUiStatus {
                 active: false,
                 blocked,
+                needs_attention: blocked,
                 text: if blocked {
                     format!("{source} · Blocked")
+                } else if self.config.internet_source == InternetSource::PaidAutomatic {
+                    format!("{source} · Selecting provider")
                 } else {
                     format!("{source} · Pending")
                 },
             };
         }
 
-        let wireguard_exit_selected = self.config.internet_source == InternetSource::WireGuard;
-        if wireguard_exit_selected {
+        if self.config.internet_source == InternetSource::WireGuard {
             let wireguard_exit_active = vpn_active
                 && self.config.wireguard_exit.configured()
                 && daemon_state.is_some_and(|state| state.wireguard_exit_ready);
@@ -102,6 +135,7 @@ impl NativeAppRuntime {
                 "WireGuard exit · Pending".to_string()
             };
             return ExitNodeUiStatus {
+                needs_attention: blocked,
                 active: wireguard_exit_active,
                 blocked,
                 text,

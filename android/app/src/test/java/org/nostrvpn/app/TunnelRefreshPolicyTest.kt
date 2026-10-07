@@ -46,6 +46,14 @@ class TunnelRefreshPolicyTest {
     }
 
     @Test
+    fun creatingOrImportingANetworkStartsTheTunnelOnlyWhenItIsOff() {
+        assertTrue(TunnelRefreshPolicy.shouldStartTunnelAfterAction("add_network", false))
+        assertTrue(TunnelRefreshPolicy.shouldStartTunnelAfterAction("import_join_request", false))
+        assertFalse(TunnelRefreshPolicy.shouldStartTunnelAfterAction("add_network", true))
+        assertFalse(TunnelRefreshPolicy.shouldStartTunnelAfterAction("tick", false))
+    }
+
+    @Test
     fun rosterAndTunnelSettingsRestartButUiOnlyActionsDoNot() {
         assertTrue(TunnelRefreshPolicy.requiresTunnelRefresh("set_participant_alias"))
         assertTrue(
@@ -192,6 +200,63 @@ class TunnelRefreshPolicyTest {
                 vpnEnabled = true,
                 observedConfigJson = observed,
                 currentConfigJson = refreshed,
+            ),
+        )
+    }
+
+    @Test
+    fun runningTunnelDrainsQueuedJoinApprovalsBeforeRestart() {
+        val queuedApproval = """
+            {"queuedJoinRosters":[{"recipientNpub":"npub1joiner"}]}
+        """.trimIndent()
+
+        assertTrue(
+            TunnelConfigRefreshPolicy.shouldDeferRestartForQueuedApproval(
+                tunnelRunning = true,
+                configJson = queuedApproval,
+            ),
+        )
+        assertFalse(
+            TunnelConfigRefreshPolicy.shouldDeferRestartForQueuedApproval(
+                tunnelRunning = false,
+                configJson = queuedApproval,
+            ),
+        )
+        assertFalse(
+            TunnelConfigRefreshPolicy.shouldDeferRestartForQueuedApproval(
+                tunnelRunning = true,
+                configJson = """{"queuedJoinRosters":[]}""",
+            ),
+        )
+        assertFalse(
+            TunnelConfigRefreshPolicy.shouldDeferRestartForQueuedApproval(
+                tunnelRunning = true,
+                configJson = "not-json",
+            ),
+        )
+    }
+
+    @Test
+    fun runningTunnelDrainsReceiverReceiptWithoutAnAdminOutbox() {
+        assertTrue(
+            TunnelConfigRefreshPolicy.shouldDeferRestartForQueuedApproval(
+                tunnelRunning = true,
+                configJson = """{"queuedJoinRosters":[]}""",
+                pendingJoinReceipt = true,
+            ),
+        )
+        assertFalse(
+            TunnelConfigRefreshPolicy.shouldDeferRestartForQueuedApproval(
+                tunnelRunning = true,
+                configJson = """{"queuedJoinRosters":[]}""",
+                pendingJoinReceipt = false,
+            ),
+        )
+        assertFalse(
+            TunnelConfigRefreshPolicy.shouldDeferRestartForQueuedApproval(
+                tunnelRunning = false,
+                configJson = """{"queuedJoinRosters":[]}""",
+                pendingJoinReceipt = true,
             ),
         )
     }

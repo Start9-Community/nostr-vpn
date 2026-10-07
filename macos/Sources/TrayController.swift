@@ -33,6 +33,7 @@ final class TrayController: NSObject {
     private let openMainWindow: () -> Void
 
     private let statusItem: NSStatusItem
+    private let internetBadge = InternetExitBadgeView()
     private let menu = NSMenu()
 
     // Stable items
@@ -42,6 +43,11 @@ final class TrayController: NSObject {
     private let copyDeviceIdItem = NSMenuItem()
     private let networkSubmenuItem = NSMenuItem()
     private let exitNodeSubmenuItem = NSMenuItem()
+    private let sellingSubmenuItem = NSMenuItem()
+    private let sellingSubmenu = NSMenu()
+    private let sellingUpstreamItem = NSMenuItem()
+    private let sellingStatusItem = NSMenuItem()
+    private let sellingSettingsItem = NSMenuItem()
     private let openItem = NSMenuItem()
     private let quitItem = NSMenuItem()
 
@@ -101,6 +107,14 @@ final class TrayController: NSObject {
             button.image = image
         }
         button.toolTip = "Nostr VPN"
+        internetBadge.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(internetBadge)
+        NSLayoutConstraint.activate([
+            internetBadge.widthAnchor.constraint(equalToConstant: 6),
+            internetBadge.heightAnchor.constraint(equalToConstant: 6),
+            internetBadge.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -2),
+            internetBadge.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+        ])
     }
 
     private func buildMenuSkeleton() {
@@ -121,6 +135,18 @@ final class TrayController: NSObject {
 
         exitNodeSubmenuItem.title = "Internet Source"
         exitNodeSubmenuItem.submenu = exitNodeSubmenu
+
+        sellingSubmenuItem.title = "Sell internet"
+        sellingSubmenuItem.submenu = sellingSubmenu
+        sellingUpstreamItem.isEnabled = false
+        sellingStatusItem.isEnabled = false
+        sellingSettingsItem.title = "Settings…"
+        sellingSettingsItem.target = self
+        sellingSettingsItem.action = #selector(handleOpenSelling)
+        sellingSubmenu.addItem(sellingUpstreamItem)
+        sellingSubmenu.addItem(sellingStatusItem)
+        sellingSubmenu.addItem(.separator())
+        sellingSubmenu.addItem(sellingSettingsItem)
 
         // Internet Source submenu skeleton.
         exitNodeStatusItem.isEnabled = false
@@ -171,6 +197,7 @@ final class TrayController: NSObject {
         menu.addItem(.separator())
         menu.addItem(networkSubmenuItem)
         menu.addItem(exitNodeSubmenuItem)
+        menu.addItem(sellingSubmenuItem)
         menu.addItem(.separator())
         menu.addItem(openItem)
         menu.addItem(quitItem)
@@ -205,6 +232,16 @@ final class TrayController: NSObject {
 
         // Internet Source submenu
         exitNodeStatusItem.title = snapshot.exitNodeStatusText
+        internetBadge.indicator = snapshot.trayIndicator
+        statusItem.length = snapshot.trayIndicator == .hidden ? NSStatusItem.variableLength : 38
+        exitNodeSubmenuItem.title = "Internet · \(snapshot.internetTitle)"
+        sellingSubmenuItem.isHidden = !snapshot.sellingSupported
+        sellingSubmenuItem.image = snapshot.sellingIndicator.image
+        sellingSubmenuItem.toolTip = snapshot.sellingStatus
+        sellingUpstreamItem.title = "Uplink: \(snapshot.sellingUpstream)"
+        sellingStatusItem.title = snapshot.sellingStatus
+        exitNodeSubmenuItem.image = snapshot.internetIndicator.image
+        statusItem.button?.setAccessibilityLabel("Nostr VPN · \(snapshot.tooltip)")
         exitNodeStatusItem.isHidden = snapshot.exitNodeStatusText.isEmpty
         offerExitItem.state = snapshot.advertiseExitNode ? .on : .off
         noExitNodeItem.state = snapshot.internetSource == "direct" ? .on : .off
@@ -307,6 +344,11 @@ final class TrayController: NSObject {
         manager.selectPeerExit(npub)
     }
 
+    @objc private func handleOpenSelling() {
+        manager.sellingSettingsRequested = true
+        openMainWindow()
+    }
+
     @objc private func handleOpenMain() {
         openMainWindow()
     }
@@ -327,6 +369,13 @@ private struct MenuSnapshot: Equatable {
     let networkTitle: String?
     let networkItems: [SubmenuItem<NetworkRow>]
     let exitNodeStatusText: String
+    let internetIndicator: InternetExitIndicator
+    let internetTitle: String
+    let trayIndicator: InternetExitIndicator
+    let sellingIndicator: InternetExitIndicator
+    let sellingSupported: Bool
+    let sellingUpstream: String
+    let sellingStatus: String
     let advertiseExitNode: Bool
     let internetSource: String
     let paidInternetAvailable: Bool
@@ -368,11 +417,28 @@ private struct MenuSnapshot: Equatable {
                 }
         }
 
-        let tooltip: String = {
-            if !state.exitNodeStatusText.isEmpty { return state.exitNodeStatusText }
-            if !state.vpnStatus.isEmpty { return state.vpnStatus }
-            return "Nostr VPN"
-        }()
+        let internetTitle: String = switch state.internetSource {
+        case "wireguard": "WireGuard"
+        case "private_vpn": exitNodeItems.first(where: { $0.npub == state.exitNode })?.title ?? "Private VPN"
+        case "paid_automatic": "Automatic"
+        case "paid_manual": "Paid VPN"
+        default: "Direct"
+        }
+        let internetStatus = state.exitNodeStatusText.isEmpty
+            ? (state.internetSource == "direct" ? "Using device internet" : manager.vpnStatusText)
+            : state.exitNodeStatusText
+        let internetIndicator = InternetExitIndicator(
+            vpnEnabled: state.vpnEnabled, source: state.internetSource,
+            active: state.exitNodeActive, needsAttention: state.exitNodeNeedsAttention)
+        let selling = state.paidExitSeller
+        let sellingIndicator = InternetExitIndicator(sellingEnabled: selling.enabled, ready: selling.ready)
+        let trayIndicator = InternetExitIndicator.tray(
+            connection: internetIndicator, selling: sellingIndicator,
+            vpnEnabled: state.vpnEnabled, vpnActive: state.vpnActive)
+        var tooltip = "VPN: \(manager.vpnStatusText)\nInternet: \(internetTitle) · \(internetStatus)"
+        if selling.enabled {
+            tooltip += "\n\(selling.internetText) · \(selling.statusText)"
+        }
 
         return MenuSnapshot(
             vpnEnabled: state.vpnEnabled,
@@ -382,7 +448,14 @@ private struct MenuSnapshot: Equatable {
             deviceIdValue: state.ownNpub,
             networkTitle: networkTitle,
             networkItems: networkItems,
-            exitNodeStatusText: state.exitNodeStatusText,
+            exitNodeStatusText: internetStatus,
+            internetIndicator: internetIndicator,
+            internetTitle: internetTitle,
+            trayIndicator: trayIndicator,
+            sellingIndicator: sellingIndicator,
+            sellingSupported: selling.supported,
+            sellingUpstream: selling.internetText,
+            sellingStatus: selling.statusText,
             advertiseExitNode: state.advertiseExitNode,
             internetSource: state.internetSource,
             paidInternetAvailable: state.paidRouteMarket.supported,

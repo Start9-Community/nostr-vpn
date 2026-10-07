@@ -66,6 +66,7 @@ esac
 # to.nostrvpn.nvpn.<suffix> and we don't touch a real user's service.
 SUFFIX="e2e-$(date +%s)-$$"
 TEST_DIR="$(mktemp -d /tmp/nvpn-svc-e2e.XXXXXX)"
+install -d -m 700 "$TEST_DIR/cashu"
 TEST_CONFIG="$TEST_DIR/$SUFFIX.toml"
 TEST_CONFIG_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$TEST_CONFIG")"
 PEER_CONFIG="$TEST_DIR/$SUFFIX-peer.toml"
@@ -80,15 +81,47 @@ if [ -z "$UNDERLAY_IP" ]; then
   echo "FAIL: could not resolve the macOS runner's default underlay IPv4 address" >&2
   exit 1
 fi
-SERVICE_LABEL="to.nostrvpn.nvpn.$(printf '%s' "$TEST_DIR/$SUFFIX" \
-  | sed -e 's:/:_:g' -e 's:^_*::' -e 's:^Users_:u_:' )"
+DEFAULT_CONFIG="${NVPN_MACOS_E2E_DEFAULT_CONFIG:-$HOME/Library/Application Support/nvpn/config.toml}"
+RESTORE_DEFAULT_SERVICE=0
+
+restore_default_service() {
+  local attempt restore_log="$TEST_DIR/default-service-restore.log"
+  for attempt in 1 2 3 4 5; do
+    if sudo -n "$NVPN_BIN" service enable --config "$DEFAULT_CONFIG" \
+      >"$restore_log" 2>&1
+    then
+      return 0
+    fi
+    sleep 1
+  done
+  cat "$restore_log" >&2 || true
+  return 1
+}
 
 cleanup() {
-  echo "Cleaning up test service ($SERVICE_LABEL)..."
+  echo "Cleaning up test service ($TEST_CONFIG)..."
   sudo -n "$NVPN_BIN" service uninstall --config "$TEST_CONFIG" 2>/dev/null || true
+  if [[ "$RESTORE_DEFAULT_SERVICE" == "1" ]]; then
+    echo "Restoring the pre-existing default service..."
+    restore_default_service \
+      || echo "FAIL: could not restore the default macOS service" >&2
+  fi
   rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
+
+default_service_json="$("$NVPN_BIN" service status --json --skip-binary-version \
+  --config "$DEFAULT_CONFIG")"
+default_service_active="$(printf '%s' "$default_service_json" | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+print("true" if s.get("installed") and not s.get("disabled") and (s.get("loaded") or s.get("running")) else "false")
+')"
+if [[ "$default_service_active" == "true" ]]; then
+  echo "Temporarily disabling the pre-existing default service..."
+  sudo -n "$NVPN_BIN" service disable --config "$DEFAULT_CONFIG" >/dev/null
+  RESTORE_DEFAULT_SERVICE=1
+fi
 
 "$NVPN_BIN" init --config "$TEST_CONFIG" --force >/dev/null
 "$NVPN_BIN" init --config "$PEER_CONFIG" --force >/dev/null
@@ -101,6 +134,10 @@ test -n "$own_npub" && test -n "$peer_npub"
   --fips-peer-endpoint "$peer_npub=$UNDERLAY_IP:$((TEST_PORT + 1))" \
   --fips-advertise-endpoint true \
   --fips-nostr-discovery-enabled false --fips-bootstrap-enabled false >/dev/null
+# This lane measures the active FIPS daemon itself. Keep relay/TLS reconnects
+# out of the fixture; signed relay discovery is covered by the paid-exit E2Es.
+perl -0pi -e 's/^\[nostr\]\n/[nostr]\npubsub = { mode = "client" }\n/m or die "missing [nostr] table\n"' \
+  "$TEST_CONFIG"
 
 echo "Installing test service..."
 sudo -n "$NVPN_BIN" service install --force --config "$TEST_CONFIG" >/dev/null
@@ -114,9 +151,32 @@ DETECTED_RUNNING="$(printf '%s' "$runtime_json" \
 
 if [ "$DETECTED_RUNNING" != "true" ]; then
   echo "FAIL: nvpn status reports daemon.running=$DETECTED_RUNNING after"
-  echo "      `nvpn service install`. The launchd daemon should be visible."
+  echo "      nvpn service install. The launchd daemon should be visible."
   echo "Service status:"
   "$NVPN_BIN" service status --config "$TEST_CONFIG" || true
+  service_json="$("$NVPN_BIN" service status --json --skip-binary-version \
+    --config "$TEST_CONFIG" 2>/dev/null || true)"
+  service_pid="$(printf '%s' "$service_json" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("pid") or "")' \
+    2>/dev/null || true)"
+  service_label="$(printf '%s' "$service_json" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("label") or "")' \
+    2>/dev/null || true)"
+  if [[ -n "$service_label" ]]; then
+    echo "launchctl service details:"
+    launchctl print "system/$service_label" || true
+  fi
+  if [[ -n "$service_pid" ]]; then
+    echo "Service process:"
+    ps -ww -p "$service_pid" -o pid=,stat=,command= || true
+  fi
+  daemon_log="$(printf '%s' "$runtime_json" | python3 -c '
+import json,sys; print(json.load(sys.stdin).get("daemon",{}).get("log_file", ""))'
+  )"
+  if [[ -f "$daemon_log" ]]; then
+    echo "Daemon log:"
+    tail -n 100 "$daemon_log" || true
+  fi
   exit 1
 fi
 printf '%s' "$runtime_json" | python3 -c '

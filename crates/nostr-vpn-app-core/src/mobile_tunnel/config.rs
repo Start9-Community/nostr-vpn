@@ -22,6 +22,8 @@ const MOBILE_MAX_FIPS_CONNECTIONS: usize = 64;
 /// Active-link cap on mobile (matches `MOBILE_MAX_FIPS_CONNECTIONS`).
 const MOBILE_MAX_FIPS_LINKS: usize = 64;
 const MOBILE_CAPABILITIES_BROADCAST_SECS: u64 = 60;
+// Match the desktop lifetime for received capability advertisements.
+const MOBILE_PEER_CAPS_GRACE_SECS: u64 = 600;
 const MOBILE_CAPABILITIES_STARTUP_BURST_COUNT: usize = 4;
 const MOBILE_CAPABILITIES_STARTUP_BURST_INTERVAL_MS: u64 = 750;
 const MOBILE_RUNTIME_STATE_REFRESH_SECS: u64 = 10;
@@ -29,6 +31,7 @@ const MOBILE_ROSTER_RESEND_SECS: u64 = 60;
 const MOBILE_RUNTIME_STATE_FILE: &str = "mobile-runtime-state.json";
 const MOBILE_PEER_ONLINE_GRACE_SECS: u64 = 45;
 const MOBILE_PEER_MAX_FUTURE_SKEW_SECS: u64 = 2;
+const MOBILE_CONFIGURED_TRANSIT_PING_INTERVAL_SECS: u64 = 10;
 const MOBILE_PEER_ACTIVE_PING_INTERVAL_SECS: u64 = 30;
 // Nostr subscriptions and minute-cadence LAN scans provide the fast paths;
 // this is only the battery-safe fallback for peers that remain offline.
@@ -185,6 +188,10 @@ pub(crate) struct MobileTunnelConfig {
     pub(crate) join_requests_enabled: bool,
     #[serde(default)]
     pub(crate) device_approval_pending: bool,
+    #[serde(default)]
+    pub(crate) local_identity_confirmation_pending: bool,
+    #[serde(default)]
+    pub(crate) pending_join_network_id: String,
     #[serde(default)]
     pub(crate) pending_join_request_recipient: String,
     #[serde(default)]
@@ -363,9 +370,7 @@ impl MobileTunnelConfig {
             generated.save(&config_path)?;
             generated
         };
-        app.ensure_defaults();
         maybe_autoconfigure_node(&mut app);
-        app.save(&config_path)?;
         Self::from_app_with_config_path(&app, &config_path)
     }
 
@@ -382,6 +387,16 @@ impl MobileTunnelConfig {
         let manual_roster_pending = app
             .active_network_opt()
             .is_some_and(|network| network.local_identity_confirmation_pending);
+        let (manual_join_admin, pending_join_network_id) = app
+            .active_network_opt()
+            .filter(|_| manual_roster_pending)
+            .map(|network| {
+                (
+                    network.join_request_admin.clone(),
+                    network.network_id.clone(),
+                )
+            })
+            .unwrap_or_default();
         // Until the configured admin signs the roster, manual join is an
         // onboarding endpoint rather than a member of that mesh. Advertising
         // the requested mesh id/local route early can make transit learn a
@@ -398,7 +413,7 @@ impl MobileTunnelConfig {
             .collect::<HashSet<_>>();
 
         let mut signal_pubkeys = if manual_roster_pending {
-            Vec::new()
+            vec![manual_join_admin.clone()]
         } else {
             app.active_network_signal_pubkeys_hex()
         };
@@ -414,9 +429,11 @@ impl MobileTunnelConfig {
         }
         for participant in signal_pubkeys
             .into_iter()
-            .filter(|participant| participant != &own_pubkey)
+            .filter(|participant| !participant.trim().is_empty() && participant != &own_pubkey)
         {
-            let mut allowed_ips = if participant_pubkeys.contains(&participant) {
+            let mut allowed_ips = if !manual_roster_pending
+                && participant_pubkeys.contains(&participant)
+            {
                 let Some(tunnel_ip) = derive_mesh_tunnel_ip(&network_id, &participant) else {
                     continue;
                 };
@@ -524,7 +541,7 @@ impl MobileTunnelConfig {
         } else {
             Vec::new()
         };
-        let (pending_join_request_recipient, pending_join_secret, pending_join_requested_at) =
+        let (mut pending_join_request_recipient, pending_join_secret, pending_join_requested_at) =
             app.active_network_opt()
                 .and_then(|network| {
                     network.outbound_join_request.as_ref().map(|request| {
@@ -536,6 +553,9 @@ impl MobileTunnelConfig {
                     })
                 })
                 .unwrap_or_default();
+        if pending_join_request_recipient.is_empty() && manual_roster_pending {
+            pending_join_request_recipient.clone_from(&manual_join_admin);
+        }
 
         Ok(Self {
             config_path: config_path.to_string_lossy().to_string(),
@@ -569,6 +589,10 @@ impl MobileTunnelConfig {
             wireguard_exit,
             join_requests_enabled: app.join_requests_enabled(),
             device_approval_pending: app.pending_nostr_join_request.is_some(),
+            local_identity_confirmation_pending: app.active_network_opt().is_some_and(|network| {
+                network.local_identity_confirmation_pending
+            }),
+            pending_join_network_id,
             pending_join_request_recipient,
             pending_join_secret,
             pending_join_requested_at,

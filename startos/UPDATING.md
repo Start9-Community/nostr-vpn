@@ -21,25 +21,25 @@ packages a version whose artifacts do not exist. The current pin lives in
 
 ## Applying the update
 
-`master` carries no Start9 commits ahead of upstream, so the sync is a
-fast-forward:
+`master` carries Start9 commits that upstream does not have, so the sync is a
+merge of the release tag:
 
 ```sh
 git remote add upstream https://github.com/mmalmi/nostr-vpn.git   # first time only
 git fetch upstream --tags
-git merge --ff-only v<latest>          # the release tag, not upstream/master
+git merge v<latest>                    # the release tag, not upstream/master
 ```
 
-Then reapply any in-flight Start9 changes (kept under `startos/`) on top, rebuild,
-and test on a StartOS host:
+Conflicts should only touch the package. Fold upstream's own `startos/`
+changes into ours rather than taking either side whole; keep Start9's
+`package.json`, `instructions.md` and workflows; keep `s9pk.mk` deleted, since
+the SDK supplies it; take upstream's side everywhere else. Set
+`startos/versions/current.ts` to the new upstream version with revision `:0`,
+regenerate `package-lock.json`, rebuild, and test on a StartOS host:
 
 ```sh
 make x86 install
 ```
-
-> If Start9-specific commits have been landed on `master` (a hard fork), the
-> fast-forward will fail; rebase onto the release tag instead and resolve any
-> conflicts — which should only ever touch `startos/`.
 
 ## Keep divergence minimal
 
