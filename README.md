@@ -11,7 +11,7 @@ Nostr identities and signed rosters control enrollment; peers connect directly w
 The fork is optimized for high-rate VPN traffic. In comparable direct-path benchmarks it delivers roughly three times the original implementation's throughput by keeping packet ownership, buffers, and session state together, batching I/O and cryptography, reusing packet storage, and avoiding packet-by-packet queue hops, allocations, copies, and repeated lookups. It preserves the FIPS protocol surface.
 
 <p align="center">
-  <img src="docs/images/desktop-gui-overview.png" alt="Nostr VPN desktop app showing a connected Home Mesh network, device status badges, and join request controls." width="900">
+  <img src="docs/images/desktop-gui-overview.png" alt="Nostr VPN macOS app in dark mode showing the Home Mesh demo network with five online devices and internet-sharing controls." width="900">
 </p>
 
 ## Install
