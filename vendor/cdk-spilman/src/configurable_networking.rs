@@ -98,28 +98,28 @@ pub async fn fetch_all_keysets_from_mint(
     let client = reqwest::Client::new();
 
     let keysets_url = format!("{mint_url}/v1/keysets");
-    let keysets_resp: serde_json::Value = client
-        .get(&keysets_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch keysets: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse keysets response: {e}"))?;
+    let keysets_resp: serde_json::Value =
+        crate::mint_http::send_mint_request(client.get(&keysets_url))
+            .await
+            .map_err(|e| format!("Failed to fetch keysets: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse keysets response: {e}"))?;
 
     let keysets = parse_listed_keysets(&keysets_resp)?;
 
     let mut result = Vec::new();
     for keyset in keysets {
         let keys_url = format!("{mint_url}/v1/keys/{}", keyset.id);
-        let keys_resp: serde_json::Value = client
-            .get(&keys_url)
-            .send()
-            .await
-            .map_err(|error| format!("Failed to fetch keys for {}: {error}", keyset.id))?
-            .json()
-            .await
-            .map_err(|error| format!("Failed to parse keys response for {}: {error}", keyset.id))?;
+        let keys_resp: serde_json::Value =
+            crate::mint_http::send_mint_request(client.get(&keys_url))
+                .await
+                .map_err(|error| format!("Failed to fetch keys for {}: {error}", keyset.id))?
+                .json()
+                .await
+                .map_err(|error| {
+                    format!("Failed to parse keys response for {}: {error}", keyset.id)
+                })?;
 
         let keys = keys_resp
             .get("keysets")
@@ -261,13 +261,14 @@ impl SpilmanAsyncNetworking for ReqwestNetworking {
         let client = reqwest::Client::new();
         let url = format!("{mint_url}/v1/swap");
 
-        let resp = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .body(swap_request_json.to_string())
-            .send()
-            .await
-            .map_err(|e| format!("Swap request failed: {e}"))?;
+        let resp = crate::mint_http::send_mint_request(
+            client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(swap_request_json.to_string()),
+        )
+        .await
+        .map_err(|e| format!("Swap request failed: {e}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();

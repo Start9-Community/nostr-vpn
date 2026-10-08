@@ -39,7 +39,7 @@ mod paid_exit {
     };
 
     const PAID_ROUTE_WALLET_TOP_UP_POLL_CADENCE: std::time::Duration =
-        std::time::Duration::from_secs(3);
+        std::time::Duration::from_secs(15);
 
     #[cfg(any(target_os = "ios", target_os = "android"))]
     include!("paid_exit_wallet_runtime.rs");

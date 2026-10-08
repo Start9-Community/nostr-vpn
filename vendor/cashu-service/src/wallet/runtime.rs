@@ -86,6 +86,10 @@ impl CashuWalletService {
         let repository = WalletRepositoryBuilder::new()
             .localstore(localstore.clone())
             .seed(resolved.seed)
+            // Leave headroom for direct channel settlement/refund requests.
+            .with_rate_limiting_config(
+                cdk::wallet::RateLimitConfig::try_new(5, 15).expect("nonzero mint budget"),
+            )
             .build()
             .await
             .context("failed to build Cashu wallet repository")?;
@@ -112,29 +116,19 @@ impl CashuWalletService {
         };
 
         for wallet in wallets {
-            let mint_label = format!("{} ({})", wallet.mint_url, wallet.unit);
-            match wallet.finalize_pending_melts().await {
-                Ok(melts) => report.finalized_melts += melts.len(),
-                Err(error) => report.warnings.push(format!(
-                    "Failed to finalize pending melts for {mint_label}: {error}"
-                )),
-            }
-            match wallet.recover_incomplete_sagas().await {
+            match self.refresh_pending_wallet(&wallet).await {
                 Ok(recovery) => {
-                    report.recovered_sagas += recovery.recovered;
-                    report.compensated_sagas += recovery.compensated;
-                    report.pending_sagas += recovery.skipped;
-                    report.failed_sagas += recovery.failed;
+                    report.finalized_melts += recovery.finalized_melts;
+                    report.recovered_sagas += recovery.recovered_sagas;
+                    report.compensated_sagas += recovery.compensated_sagas;
+                    report.pending_sagas += recovery.pending_sagas;
+                    report.failed_sagas += recovery.failed_sagas;
+                    report.minted_amount += recovery.minted_amount;
+                    report.warnings.extend(recovery.warnings);
                 }
-                Err(error) => report.warnings.push(format!(
-                    "Failed to recover wallet operations for {mint_label}: {error}"
-                )),
-            }
-            match wallet.mint_unissued_quotes().await {
-                Ok(amount) => report.minted_amount += amount.to_u64(),
-                Err(error) => report.warnings.push(format!(
-                    "Failed to refresh pending mint quotes for {mint_label}: {error}"
-                )),
+                Err(error) => report
+                    .warnings
+                    .push(format!("Failed to recover Cashu wallet: {error:#}")),
             }
         }
 

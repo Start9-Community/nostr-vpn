@@ -8,7 +8,7 @@ use cdk_spilman::ClientStorage;
 use serde::Serialize;
 
 const PAID_EXIT_BUYER_REFUND_ATTEMPT_TIMEOUT_SECS: u64 = 30;
-const PAID_EXIT_BUYER_REFUND_RETRY_SECS: u64 = 10;
+const PAID_EXIT_BUYER_REFUND_RETRY_SECS: u64 = 60;
 
 #[derive(Debug)]
 struct RefundWorkDeferred(String);
@@ -451,13 +451,13 @@ impl RefundMintConnection {
         T: Serialize + ?Sized,
         R: serde::de::DeserializeOwned,
     {
-        let response = self
-            .client
-            .post(format!("{}{path}", self.mint_url))
-            .json(request)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await?;
+        let response = cashu_service::send_mint_request(
+            self.client
+                .post(format!("{}{path}", self.mint_url))
+                .json(request)
+                .timeout(Duration::from_secs(10)),
+        )
+        .await?;
         cashu_service::check_mint_response(response)?
             .json()
             .await

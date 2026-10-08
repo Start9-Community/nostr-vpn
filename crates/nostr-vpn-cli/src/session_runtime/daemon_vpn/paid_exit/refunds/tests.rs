@@ -531,8 +531,8 @@
             0,
             "healthy polling must allow funding"
         );
-        assert_eq!(store.buyer_mint_retry_at(mint), now + 11);
-        now += 11;
+        assert_eq!(store.buyer_mint_retry_at(mint), now + 61);
+        now += 61;
         update_paid_route_store(&path, |store| {
             store.defer_buyer_mint_retry(mint, now, Some("Mint unavailable"), None)
         })

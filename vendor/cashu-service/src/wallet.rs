@@ -23,15 +23,16 @@ mod cross_mint;
 pub use cross_mint::*;
 
 mod persistence;
+mod polling;
 pub use persistence::*;
 
 mod runtime;
 pub use runtime::*;
 
 mod send;
-pub use send::{CashuInsufficientFunds, send_payment_token};
 #[cfg(test)]
 use send::{proofs_require_keyset_consolidation, refresh_active_keyset_id};
+pub use send::{send_payment_token, CashuInsufficientFunds};
 
 pub const CASHU_WALLET_SEED_VERSION: u32 = 1;
 
@@ -392,17 +393,11 @@ impl CashuWalletService {
 
         if refresh_quotes {
             for wallet in repository.get_wallets().await {
-                let mint_label = format!("{} ({})", wallet.mint_url, wallet.unit);
-                if let Err(err) = wallet.recover_incomplete_sagas().await {
-                    warnings.push(format!(
-                        "Failed to recover wallet state for {mint_label}: {err}"
-                    ));
-                    continue;
-                }
-                if let Err(err) = wallet.mint_unissued_quotes().await {
-                    warnings.push(format!(
-                        "Failed to refresh pending mint quotes for {mint_label}: {err}"
-                    ));
+                match self.refresh_pending_wallet(&wallet).await {
+                    Ok(report) => warnings.extend(report.warnings),
+                    Err(error) => {
+                        warnings.push(format!("Failed to refresh Cashu wallet: {error:#}"))
+                    }
                 }
             }
         }
@@ -466,15 +461,6 @@ impl CashuWalletService {
         let mint_url =
             MintUrl::from_str(&normalized_mint).context("Failed to parse normalized mint URL")?;
         let wallet = ensure_sat_wallet(self.repository(), &mint_url).await?;
-
-        wallet
-            .recover_incomplete_sagas()
-            .await
-            .context("Failed to recover Cashu wallet state before creating quote")?;
-        wallet
-            .mint_unissued_quotes()
-            .await
-            .context("Failed to refresh pending Cashu mint quotes before creating quote")?;
 
         let quote = wallet
             .mint_quote(

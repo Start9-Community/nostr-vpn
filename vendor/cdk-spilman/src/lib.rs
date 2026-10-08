@@ -68,3 +68,6 @@ pub use params::{compute_channel_secret, ChannelId, ChannelParameters};
 pub use sender_and_receiver::{
     verify_valid_channel, ChannelVerificationError, ChannelVerificationResult, SpilmanChannelSender,
 };
+
+#[cfg(feature = "mint-http")]
+pub mod mint_http;

@@ -35,18 +35,16 @@ impl HttpSpilmanMintConnection {
         T: Serialize + ?Sized,
         R: serde::de::DeserializeOwned,
     {
-        let response = self
-            .client
-            .post(format!("{}{path}", self.mint_url))
-            .json(request)
-            .send()
-            .await?;
-        let status = response.status();
-        let body = response.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("Cashu mint request to {path} failed with {status}: {body}");
-        }
-        serde_json::from_str(&body).map_err(Into::into)
+        let response = crate::send_mint_request(
+            self.client
+                .post(format!("{}{path}", self.mint_url))
+                .json(request),
+        )
+        .await?;
+        crate::check_mint_response(response)?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 }
 
