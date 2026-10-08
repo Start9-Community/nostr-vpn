@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented in this file.
 
+## 4.1.18 - 2026-10-08
+
+### Release notes
+
+This release improves peer discovery, network joining, and paid Internet
+connections. It also fixes signed update discovery and preserves existing
+settings and identities. iOS does not support paid exits.
+
+### Improved
+
+- Share peer and Internet-sharing discovery across desktop and mobile.
+- Discover signed updates through peers and nearby applications, retaining
+  verified release information between checks.
+- Explain paid-exit failures and switch to providers the wallet can pay.
+- Publish desktop and command-line packages through Haps.
+
+### Fixed
+
+- Correct FIPS TCP transport handling for reliable peer connections.
+- Keep joining devices pending until their signed network roster arrives,
+  and preserve accepted membership after relaunch.
+- Open pasted paid-exit provider links immediately on macOS.
+- Collect seller channels promptly after an accepted close request and before
+  buyer refund eligibility, retaining settlement retries.
+- Keep shared peer discovery available on iOS without including desktop
+  self-update code.
+- Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
+- Protect macOS background-service PID and runtime-state files against unsafe
+  paths and permissions.
+
 ## 4.1.17 - 2026-09-27
 
 ### Release notes
