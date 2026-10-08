@@ -26,13 +26,14 @@ license = "MIT"
 repository = "https://github.com/mmalmi/nostr-vpn"
 
 [features]
+mint-http = ["dep:reqwest", "dep:httpdate", "dep:tokio"]
 configurable-host = [
     "dep:serde_yaml",
     "dep:rusqlite",
 ]
 configurable-host-reqwest = [
     "configurable-host",
-    "dep:reqwest",
+    "mint-http",
 ]
 default = []
 spilman-axum = [
@@ -154,3 +155,12 @@ path = "tests/channel_safety.rs"
 [[test]]
 name = "restore_safety"
 path = "tests/restore_safety.rs"
+
+[dependencies.httpdate]
+version = "1"
+optional = true
+
+[dependencies.tokio]
+version = "1"
+features = ["sync", "time"]
+optional = true

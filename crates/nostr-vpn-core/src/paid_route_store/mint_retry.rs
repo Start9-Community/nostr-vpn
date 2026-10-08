@@ -100,9 +100,13 @@ impl PaidRouteStore {
             0
         };
         let exponent = retry.consecutive_failures.saturating_sub(1).min(6);
-        let delay = (10_u64 << exponent)
-            .min(600)
-            .max(retry_after_secs.unwrap_or(0));
+        let delay = if error.is_some() {
+            (10_u64 << exponent).min(600)
+        } else {
+            // Unsettled refunds need no ten-second background mint polling.
+            60
+        }
+        .max(retry_after_secs.unwrap_or(0));
         // Persistence uses whole Unix seconds; round up to avoid retrying early.
         retry.retry_at_unix = retry
             .retry_at_unix

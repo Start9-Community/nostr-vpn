@@ -78,7 +78,7 @@ spilman-wallet-http = [
     "spilman-wallet",
     "dep:cashu",
     "dep:reqwest",
-    "dep:httpdate",
+    "cdk-spilman/mint-http",
 ]
 wallet = [
     "dep:cdk",
@@ -253,7 +253,7 @@ path = "tests/spilman_receiver_safety.rs"
 name = "spilman_channel_capacity"
 path = "tests/spilman_channel_capacity.rs"
 
-
-[dependencies.httpdate]
-version = "1"
-optional = true
+[[test]]
+name = "mint_request_budget"
+path = "tests/mint_request_budget.rs"
+required-features = ["wallet"]

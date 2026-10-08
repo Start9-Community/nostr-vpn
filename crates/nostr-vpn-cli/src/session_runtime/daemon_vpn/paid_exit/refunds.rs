@@ -8,7 +8,7 @@ use cdk_spilman::ClientStorage;
 use serde::Serialize;
 
 const PAID_EXIT_BUYER_REFUND_ATTEMPT_TIMEOUT_SECS: u64 = 30;
-const PAID_EXIT_BUYER_REFUND_RETRY_SECS: u64 = 10;
+const PAID_EXIT_BUYER_REFUND_RETRY_SECS: u64 = 60;
 
 #[derive(Debug)]
 struct RefundWorkDeferred(String);
@@ -451,13 +451,13 @@ impl RefundMintConnection {
         T: Serialize + ?Sized,
         R: serde::de::DeserializeOwned,
     {
-        let response = self
-            .client
-            .post(format!("{}{path}", self.mint_url))
-            .json(request)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await?;
+        let response = cashu_service::send_mint_request(
+            self.client
+                .post(format!("{}{path}", self.mint_url))
+                .json(request)
+                .timeout(Duration::from_secs(10)),
+        )
+        .await?;
         cashu_service::check_mint_response(response)?
             .json()
             .await
@@ -679,8 +679,10 @@ fn apply_paid_exit_buyer_refund_attempt(
                 // A local work deadline or busy store says nothing about the
                 // mint's availability. Keep retrying the refund without
                 // blocking unrelated foreground payments at the same mint.
-                error.filter(|error| !error.is::<RefundWorkDeferred>())
-                    .map(|error| format!("{error:#}")).as_deref(),
+                error
+                    .filter(|error| !error.is::<RefundWorkDeferred>())
+                    .map(|error| format!("{error:#}"))
+                    .as_deref(),
                 error
                     .and_then(|error| error.downcast_ref::<cashu_service::MintRetryAfter>())
                     .map(|delay| delay.0),
