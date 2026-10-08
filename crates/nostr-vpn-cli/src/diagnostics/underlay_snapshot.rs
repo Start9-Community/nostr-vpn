@@ -500,11 +500,14 @@ fn windows_network_snapshot_from_ipv6_routes(
 #[cfg(target_os = "windows")]
 fn capture_windows_network_snapshot(excluded_interfaces: &[&str]) -> NetworkSnapshot {
     let interfaces = get_interfaces();
-    if let Some(snapshot) = windows_network_snapshot_from_ipv4_capture(
-        &interfaces,
-        excluded_interfaces,
-        crate::wg_upstream_runtime::capture_windows_default_route_excluding,
-    ) {
+    if let Some(snapshot) =
+        windows_network_snapshot_from_ipv4_capture(&interfaces, excluded_interfaces, |excluded| {
+            crate::wg_upstream_runtime::capture_windows_default_route_for_interfaces(
+                excluded,
+                &interfaces,
+            )
+        })
+    {
         return snapshot;
     }
     crate::wg_upstream_runtime::capture_windows_ipv6_default_routes()
