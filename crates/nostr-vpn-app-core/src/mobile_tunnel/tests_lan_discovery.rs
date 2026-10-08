@@ -32,7 +32,7 @@ fn bonjour_candidate_is_only_a_hint_for_an_approved_device() {
     assert_eq!(hints.len(), 1);
     assert_eq!(hints[0].addr, addresses[0]);
     assert!(hints[0].seen_at_ms.is_some());
-    assert!(observed.peers[0].allowed_ips.is_empty());
+    assert_eq!(observed.peers[0].allowed_ips, Vec::<String>::new());
 }
 
 #[test]

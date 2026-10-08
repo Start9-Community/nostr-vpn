@@ -24,12 +24,12 @@ pub mod magic_dns;
 mod network_roster;
 mod network_routes;
 pub mod packet_checksums;
+#[cfg(feature = "paid-exit")]
+pub mod paid_provider_names;
 pub mod paid_route_accounting;
 pub mod paid_route_probe;
 #[cfg(feature = "paid-exit")]
 pub mod paid_route_ratings;
-#[cfg(feature = "paid-exit")]
-pub mod paid_provider_names;
 #[cfg(feature = "paid-exit")]
 pub mod paid_route_store;
 pub mod paid_routes;

@@ -30,16 +30,16 @@ use crate::join_approval::{prepare_join_approval, prepare_manual_join_delivery};
 use crate::join_request_link::{
     own_join_request_qr_code_or_link, parse_join_request_qr_code_or_link,
 };
+#[cfg(feature = "paid-exit")]
+use crate::native_state::NativePaidRouteWalletHistoryState;
 use crate::native_state::{
     NativeAppState, NativeHealthIssue, NativeInboundJoinRequestState, NativeNetworkState,
     NativeNetworkSummary, NativeOutboundJoinRequestState, NativePaidExitSellerState,
     NativePaidRouteMarketFilterState, NativePaidRouteMarketState,
     NativePaidRoutePaymentActionState, NativePaidRouteWalletActionState,
-    NativePaidRouteWalletState, NativeParticipantState,
-    NativePortMappingStatus, NativeProbeStatus, NativeRelayState,
+    NativePaidRouteWalletState, NativeParticipantState, NativePortMappingStatus, NativeProbeStatus,
+    NativeRelayState,
 };
-#[cfg(feature = "paid-exit")]
-use crate::native_state::NativePaidRouteWalletHistoryState;
 use crate::platform::current_runtime_capabilities;
 use crate::state::{
     DaemonPeerState, DaemonRuntimeState, HealthIssue, NetworkSummary, PortMappingStatus,

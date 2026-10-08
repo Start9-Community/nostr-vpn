@@ -197,6 +197,7 @@
 
     #[cfg(feature = "paid-exit")]
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn automatic_exit_confirmation_tracks_selection_probe_and_live_connection() {
         use nostr_vpn_core::paid_route_store::{
             OpenPaidRouteBuyerSessionRequest, UpdatePaidRouteSessionProbeRequest,

@@ -679,8 +679,10 @@ fn apply_paid_exit_buyer_refund_attempt(
                 // A local work deadline or busy store says nothing about the
                 // mint's availability. Keep retrying the refund without
                 // blocking unrelated foreground payments at the same mint.
-                error.filter(|error| !error.is::<RefundWorkDeferred>())
-                    .map(|error| format!("{error:#}")).as_deref(),
+                error
+                    .filter(|error| !error.is::<RefundWorkDeferred>())
+                    .map(|error| format!("{error:#}"))
+                    .as_deref(),
                 error
                     .and_then(|error| error.downcast_ref::<cashu_service::MintRetryAfter>())
                     .map(|delay| delay.0),
