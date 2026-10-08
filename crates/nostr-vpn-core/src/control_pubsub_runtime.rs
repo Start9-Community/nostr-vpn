@@ -529,6 +529,9 @@ async fn run(
             }
         }
     }
+    if let Err(error) = events.lock().await.persist() {
+        tracing::warn!(%error, "failed to flush control pubsub cache on shutdown");
+    }
 }
 
 async fn publish_local(context: PublishContext<'_>, event: Event) -> Result<bool> {
@@ -676,7 +679,7 @@ async fn publish_policy_maintenance(context: PublishContext<'_>) {
         .await
         .prune_expired_events(now / 1_000)
     {
-        tracing::warn!(%error, "failed to prune expired control pubsub events");
+        tracing::warn!(%error, "failed to maintain control pubsub cache");
     }
     let policy_events = match context
         .pubsub_policy
@@ -767,13 +770,7 @@ async fn process_fips_delivery(
     let event = verified.as_event().clone();
     observe_policy_event(pubsub_policy, &event).await;
     ingest_into_fips_discovery(endpoint, &event).await;
-    let inserted = match events.lock().await.insert(event.clone()) {
-        Ok(inserted) => inserted,
-        Err(error) => {
-            tracing::warn!(%error, event_id = %event.id, "failed to store control pubsub event");
-            false
-        }
-    };
+    let inserted = events.lock().await.insert_memory(event.clone());
     if inserted {
         tracing::debug!(event_id = %event.id, "delivered new standard FIPS pubsub event");
         if let Some(relay) = relay
@@ -804,13 +801,7 @@ async fn process_relay_delivery(
     let event = verified.as_event().clone();
     observe_policy_event(pubsub_policy, &event).await;
     ingest_into_fips_discovery(endpoint, &event).await;
-    let inserted = match events.lock().await.insert(event.clone()) {
-        Ok(inserted) => inserted,
-        Err(error) => {
-            tracing::warn!(%error, event_id = %event.id, "failed to store control pubsub event");
-            false
-        }
-    };
+    let inserted = events.lock().await.insert_memory(event.clone());
     if !inserted {
         return;
     }

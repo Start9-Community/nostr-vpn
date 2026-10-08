@@ -112,7 +112,7 @@ try {
   $watch.Stop()
   $daemon.Refresh()
   if ($daemon.HasExited) { throw 'Candidate Windows nvpn daemon exited during idle sample' }
-  $cpuPercent = [Math]::Max(0, $daemon.TotalProcessorTime.TotalSeconds - $startCpu) * 100 / [Math]::Max(0.001, $watch.Elapsed.TotalSeconds)
+  $cpuPercent = [Math]::Max(0.0, $daemon.TotalProcessorTime.TotalSeconds - $startCpu) * 100 / [Math]::Max(0.001, $watch.Elapsed.TotalSeconds)
   $ok = $cpuPercent -le $MaxPercent
   [pscustomobject]@{
     ok = $ok
