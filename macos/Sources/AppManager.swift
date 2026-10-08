@@ -56,8 +56,8 @@ final class AppManager: ObservableObject {
     var refreshInFlight = false
     var refreshPending = false
     var startupUrlsDrained = false
-    var pendingPaidExitLink: String?
-    var openingPaidExitLink: String?
+    @Published var pendingPaidExitLink: String?
+    @Published var openingPaidExitLink: String?
     var startupUpdateCheckDone = false
     var updateAssetUrl: URL?
     var updateUsesCoreDownload = false

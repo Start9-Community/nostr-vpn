@@ -94,6 +94,7 @@ extension RootView {
 
     func paidRouteOfferDiscoverySection(_ market: NativePaidRouteMarketState) -> some View {
         let visibleOffers = paidRouteVisibleOffers(market)
+        let openingProvider = manager.pendingPaidExitLink != nil || manager.openingPaidExitLink != nil
         return surface {
             HStack(spacing: 12) {
                 sectionHeader("Find Internet", systemImage: "cart.fill")
@@ -137,7 +138,16 @@ extension RootView {
                             .disabled(manager.actionInFlight)
                     }
                 }
-                if !market.manualProviderStatusText.isEmpty {
+                .disabled(openingProvider)
+                if openingProvider {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Opening provider…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityIdentifier("opening-paid-exit-provider")
+                } else if !market.manualProviderStatusText.isEmpty {
                     Text(market.manualProviderStatusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -753,6 +763,7 @@ extension RootView {
 // AppKit's field editor consumes Paste before SwiftUI's onPasteCommand runs.
 // Use its paste callback so ordinary typing and state refreshes never open a provider.
 struct PaidExitProviderField: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
     @Binding var text: String
     var open: (String) -> Void
 
@@ -785,6 +796,12 @@ struct PaidExitProviderField: NSViewRepresentable {
 
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.parent = self
+        if !isEnabled, field.currentEditor() != nil {
+            field.window?.makeFirstResponder(nil)
+        }
+        field.isEnabled = isEnabled
+        field.isEditable = isEnabled
+        field.isSelectable = isEnabled
         if field.stringValue != text {
             field.stringValue = text
             field.currentEditor()?.string = text
@@ -798,7 +815,10 @@ struct PaidExitProviderField: NSViewRepresentable {
             guard let field = notification.object as? NSTextField else { return }
             parent.text = field.stringValue
         }
-        @objc func submit(_ field: NSTextField) { parent.open(field.stringValue) }
+        @objc func submit(_ field: NSTextField) {
+            guard field.isEnabled else { return }
+            parent.open(field.stringValue)
+        }
     }
 
     final class ProviderCell: NSTextFieldCell {

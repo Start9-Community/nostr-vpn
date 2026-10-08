@@ -12,6 +12,11 @@ impl AppConfig {
 
     pub fn set_internet_source(&mut self, source: InternetSource) {
         let previous_source = self.internet_source;
+        // A pasted provider is pending discovery, not permission to override a
+        // later Internet choice when its offer arrives or the app refreshes.
+        if source != InternetSource::PaidManual {
+            self.clear_manual_paid_exit_provider();
+        }
         self.internet_source = source;
         match source {
             InternetSource::Direct => {
@@ -30,7 +35,6 @@ impl AppConfig {
                 self.exit_node_public_paid_exit = false;
             }
             InternetSource::PaidAutomatic => {
-                self.clear_manual_paid_exit_provider();
                 self.exit_node.clear();
                 self.exit_node_public_paid_exit = false;
             }
@@ -83,7 +87,7 @@ impl AppConfig {
         {
             return Err(anyhow!("cannot select this device as its own private exit"));
         }
-        self.internet_source = InternetSource::PrivateVpn;
+        self.set_internet_source(InternetSource::PrivateVpn);
         self.exit_node = peer_pubkey.clone();
         self.exit_node_public_paid_exit = false;
         self.normalize_internet_source();
