@@ -1,4 +1,84 @@
     #[cfg(feature = "paid-exit")]
+    #[test]
+    fn device_internet_cancels_a_pasted_provider_before_late_offer_discovery() {
+        use nostr_vpn_core::paid_route_store::{
+            load_paid_route_store, paid_route_store_file_path, upsert_paid_route_offer,
+        };
+        use nostr_vpn_core::paid_routes::{
+            ManualPaidExitProvider, PaidExitConfig,
+            signed_paid_exit_offer_from_config_with_receiver,
+        };
+
+        let dir = unique_service_test_dir("nvpn-cancel-manual-provider");
+        let mut runtime = NativeAppRuntime::from_startup_error(&anyhow!("test runtime"));
+        runtime.startup_error = None;
+        runtime.last_error.clear();
+        runtime.mobile_runtime = true;
+        runtime.config_path = dir.join("config.toml");
+        create_test_network(&mut runtime, "Provider cancellation test");
+        runtime.config.save(&runtime.config_path).unwrap();
+        let seller_keys = Keys::generate();
+        let seller = seller_keys.public_key().to_bech32().unwrap();
+        let link = ManualPaidExitProvider::new(&seller, Some(25_000), Some("https://mint.example"))
+            .unwrap()
+            .link()
+            .unwrap();
+        runtime.dispatch(NativeAppAction::SetManualPaidExitProvider { provider: link });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        assert!(!runtime.config.manual_paid_exit_provider.is_default());
+
+        runtime.dispatch(NativeAppAction::UpdateSettings {
+            patch: SettingsPatch {
+                internet_source: Some("direct".to_string()),
+                ..Default::default()
+            },
+        });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        runtime.config = AppConfig::load(&runtime.config_path).unwrap();
+        assert!(runtime.config.manual_paid_exit_provider.is_default());
+        let mut terms = PaidExitConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        terms.pricing.price_msat_per_gb = 25_000;
+        terms.channel.accepted_mints = vec!["https://mint.example".into()];
+        let offer = signed_paid_exit_offer_from_config_with_receiver(
+            "late-provider",
+            &seller_keys,
+            &terms,
+            Some("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
+            None,
+            unix_timestamp(),
+        )
+        .unwrap();
+        upsert_paid_route_offer(
+            &paid_route_store_file_path(&runtime.config_path),
+            offer,
+            Vec::new(),
+            unix_timestamp(),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            runtime.dispatch(NativeAppAction::Tick);
+        }
+        assert_eq!(runtime.config.internet_source, InternetSource::Direct);
+        assert!(runtime.config.exit_node.is_empty());
+        assert!(
+            runtime
+                .state()
+                .paid_route_market
+                .manual_provider_link
+                .is_empty()
+        );
+        assert!(
+            load_paid_route_store(&paid_route_store_file_path(&runtime.config_path))
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
+    }
+
+    #[cfg(feature = "paid-exit")]
     fn approve_manual_provider_mint(
         runtime: &mut NativeAppRuntime,
         seller_npub: &str,

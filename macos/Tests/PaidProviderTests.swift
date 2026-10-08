@@ -102,14 +102,47 @@ struct PaidProviderTests {
         manager.openPendingPaidExitLink()
         precondition(manager.pendingPaidExitLink == nil)
         window.makeFirstResponder(nil)
+        manager.openingPaidExitLink = pasted
+        manager.actionInFlight = true
+        let busyDeadline = Date(timeIntervalSinceNow: 3)
+        while field.isEnabled && Date() < busyDeadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        precondition(!field.isEnabled && !field.isEditable, "Opening a provider must disable the native input")
+        if CommandLine.arguments.count > 1 {
+            view.layoutSubtreeIfNeeded()
+            try snapshot(view, to: CommandLine.arguments[1] + ".opening.png")
+        }
+        manager.openingPaidExitLink = nil
+        manager.actionInFlight = false
+        let readyDeadline = Date(timeIntervalSinceNow: 3)
+        while !field.isEnabled && Date() < readyDeadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        precondition(field.isEnabled && field.isEditable, "Completion must restore the provider input")
+        manager.state.paidRouteMarket.manualProviderLink = pasted
+        manager.state.rev += 1
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        manager.state.internetSource = "direct"
+        manager.state.paidRouteMarket.manualProviderLink = ""
+        manager.state.rev += 1
+        let clearedDeadline = Date(timeIntervalSinceNow: 3)
+        while !field.stringValue.isEmpty && Date() < clearedDeadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        precondition(field.stringValue.isEmpty, "Cancelling the provider choice must clear the pasted link")
         guard CommandLine.arguments.count > 1 else {
             print("Provider URL queue passed")
             return
         }
+        try snapshot(view, to: CommandLine.arguments[1])
+        print("Provider URL queue and failure-reason UI rendering passed")
+    }
+
+    @MainActor static func snapshot(_ view: NSView, to path: String) throws {
         guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { fatalError("No bitmap") }
         view.cacheDisplay(in: view.bounds, to: bitmap)
-        try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[1]))
-        print("Provider URL queue and failure-reason UI rendering passed")
+        try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
     }
 
     @MainActor static func providerField(in view: NSView) -> NSTextField? {
