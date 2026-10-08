@@ -13,7 +13,7 @@ source "$1"
 host_linux_builder_resource_args
 printf '%s\\n' "\${HOST_LINUX_BUILDER_RESOURCE_ARGS[@]}"
 `, '_', helper], { encoding: 'utf8', env: { ...process.env,
-    NVPN_HOST_LINUX_VM_BUILD_CPUS: '', NVPN_HOST_LINUX_VM_BUILD_MEMORY: '', NVPN_HOST_LINUX_VM_CARGO_JOBS: '', ...env } })
+    NVPN_HOST_LINUX_VM_BUILD_CPUS: '', NVPN_HOST_LINUX_VM_BUILD_MEMORY: '', NVPN_HOST_LINUX_VM_CARGO_JOBS: '', NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES: '', ...env } })
 }
 
 test('default Linux builder resource arguments preserve existing behavior', () => {
@@ -28,11 +28,48 @@ test('Linux builder caps CPU, memory without extra swap, and Cargo jobs', () => 
   assert.deepEqual(r.stdout.trim().split('\n'), ['--env', 'CARGO_INCREMENTAL=0', '--cpus', '2', '--memory', '6g', '--memory-swap', '6g', '--env', 'CARGO_BUILD_JOBS=2'])
 })
 
+test('temporary memory storage requires an overall memory limit', () => {
+  const r = resourceArgs({ NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES: '4294967296' })
+  assert.equal(r.status, 2)
+  assert.equal(r.stdout, '')
+})
+
+test('fresh target volume can use bounded memory with ownership preserved across mounts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-builder-tmpfs-'))
+  try {
+    const capture = join(root, 'docker-args')
+    for (const tmpfs of ['', '4294967296']) {
+      const r = spawnSync('/bin/bash', ['-c', `
+set -euo pipefail
+source "$1"
+host_linux_builder_remove_target_volume() { :; }
+host_linux_builder_target_volume_matches() { :; }
+docker() { printf '%s\\n' "$@" >"$FIXTURE_CAPTURE"; }
+host_linux_builder_create_fresh_target_volume fixture-volume fixture-cache fixture-generation
+`, '_', helper], { encoding: 'utf8', env: { ...process.env, FIXTURE_CAPTURE: capture,
+        NVPN_HOST_LINUX_VM_BUILD_MEMORY: '6g', NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES: tmpfs } })
+      assert.equal(r.status, 0, r.stderr)
+      const args = readFileSync(capture, 'utf8').trim().split('\n')
+      assert.deepEqual(args.slice(0, 4), ['volume', 'create', '--driver', 'local'])
+      assert.equal(args.includes('type=tmpfs'), Boolean(tmpfs))
+      if (tmpfs) {
+        assert.ok(args.includes('device=tmpfs'))
+        assert.ok(args.includes(`o=size=${tmpfs},mode=0700,uid=${process.getuid()},gid=${process.getgid()}`))
+      }
+      assert.ok(args.includes('to.nostrvpn.release-builder=host-linux-vm-bundle-target'))
+      assert.ok(args.includes('to.nostrvpn.release-builder-cache=fixture-cache'))
+      assert.ok(args.includes('to.nostrvpn.release-builder-generation=fixture-generation'))
+      assert.equal(args.at(-1), 'fixture-volume')
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('nonpositive and malformed limits are rejected before returning Docker arguments', () => {
   for (const [key, values] of Object.entries({
     NVPN_HOST_LINUX_VM_BUILD_CPUS: ['0', '-1', 'nan', '2 --privileged'],
     NVPN_HOST_LINUX_VM_BUILD_MEMORY: ['0', '0g', '-1', '6g --privileged'],
     NVPN_HOST_LINUX_VM_CARGO_JOBS: ['0', '-1', 'auto', '2\n3'],
+    NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES: ['0', '-1', '7g', '7 --privileged'],
   })) for (const value of values) {
     const r = resourceArgs({ [key]: value })
     assert.equal(r.status, 2, `${key}: ${r.stderr}`)
@@ -68,9 +105,9 @@ host_linux_native_builder_commands() { NVPN_HOST_LINUX_NATIVE_SSH=(capture_ssh);
 host_linux_native_builder_run "$fixture" a b c d 1.95.0 e f g h i j 1 k l
 `, '_', process.cwd(), root, capture], { encoding: 'utf8', env: { ...process.env,
         NVPN_HOST_LINUX_VM_NATIVE_BUILDER_HOST: 'fixture', NVPN_HOST_LINUX_VM_BUILD_CPUS: cpus,
-        NVPN_HOST_LINUX_VM_BUILD_MEMORY: cpus ? '6g' : '', NVPN_HOST_LINUX_VM_CARGO_JOBS: cpus ? '2' : '' } })
+        NVPN_HOST_LINUX_VM_BUILD_MEMORY: cpus ? '6g' : '', NVPN_HOST_LINUX_VM_CARGO_JOBS: cpus ? '2' : '', NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES: cpus ? '4294967296' : '' } })
       assert.equal(r.status, cpus !== '0' ? 77 : 2, r.stdout + r.stderr)
-      if (cpus !== '0') assert.deepEqual(readFileSync(capture, 'utf8').trim().split('\n').slice(-3), cpus ? ['2', '6g', '2'] : ['-', '-', '-'])
+      if (cpus !== '0') assert.deepEqual(readFileSync(capture, 'utf8').trim().split('\n').slice(-4), cpus ? ['2', '6g', '2', '4294967296'] : ['-', '-', '-', '-'])
       else assert.equal(existsSync(capture), false)
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
@@ -90,7 +127,7 @@ host_linux_builder_stop_container() { :; }
 docker() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 ${phase}
 run_builder_phase build
-`, '_', ...Array.from({ length: 17 }, () => 'fixture'), '2', '6g', '2'], {
+`, '_', ...Array.from({ length: 17 }, () => 'fixture'), '2', '6g', '2', '4294967296'], {
     encoding: 'utf8', env: { ...process.env, FIXTURE_HELPER: helper },
   })
   assert.equal(r.status, 0, r.stderr)

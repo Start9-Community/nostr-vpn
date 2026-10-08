@@ -236,6 +236,7 @@ mktemp -d "$runs/nvpn-linux-native-builder.XXXXXX"'
     "${NVPN_HOST_LINUX_VM_BUILD_CPUS:--}" \
     "${NVPN_HOST_LINUX_VM_BUILD_MEMORY:--}" \
     "${NVPN_HOST_LINUX_VM_CARGO_JOBS:--}" \
+    "${NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES:--}" \
     >"$output_tar" <<'REMOTE'
 set -euo pipefail
 root="$1"

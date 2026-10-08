@@ -10,10 +10,12 @@ host_linux_builder_resource_args() {
   local cpus="${NVPN_HOST_LINUX_VM_BUILD_CPUS:-}"
   local memory="${NVPN_HOST_LINUX_VM_BUILD_MEMORY:-}"
   local jobs="${NVPN_HOST_LINUX_VM_CARGO_JOBS:-}"
+  local tmpfs="${NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES:-}"
   [[ -z "$cpus" || "$cpus" =~ ^[1-9][0-9]*$ ]] \
     && [[ -z "$memory" || "$memory" =~ ^[1-9][0-9]*[kKmMgG]?$ ]] \
-    && [[ -z "$jobs" || "$jobs" =~ ^[1-9][0-9]*$ ]] || {
-    echo "Linux builder CPU, memory and Cargo job limits must be positive" >&2
+    && [[ -z "$jobs" || "$jobs" =~ ^[1-9][0-9]*$ ]] \
+    && [[ -z "$tmpfs" || ( "$tmpfs" =~ ^[1-9][0-9]*$ && -n "$memory" ) ]] || {
+    echo "Linux builder limits must be positive; tmpfs requires a memory limit" >&2
     return 2
   }
   HOST_LINUX_BUILDER_RESOURCE_ARGS=(--env CARGO_INCREMENTAL=0)
@@ -118,9 +120,19 @@ host_linux_builder_create_fresh_target_volume() {
   local volume_name="$1"
   local expected_cache_id="$2"
   local expected_generation="$3"
+  local tmpfs="${NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES:-}"
+  local -a storage_args=(--driver local)
+  host_linux_builder_resource_args || return
+  if [[ -n "$tmpfs" ]]; then
+    # Docker may unmount this scratch volume between phases. Set ownership in
+    # the mount options so each fresh mount is writable by the build identity.
+    storage_args+=(--opt type=tmpfs --opt device=tmpfs \
+      --opt "o=size=$tmpfs,mode=0700,uid=$(id -u),gid=$(id -g)")
+  fi
   host_linux_builder_remove_target_volume \
     "$volume_name" "$expected_cache_id" "$expected_generation"
   docker volume create \
+    "${storage_args[@]}" \
     --label "to.nostrvpn.release-builder=host-linux-vm-bundle-target" \
     --label "to.nostrvpn.release-builder-cache=$expected_cache_id" \
     --label "to.nostrvpn.release-builder-generation=$expected_generation" \
