@@ -14,6 +14,7 @@ struct ControlEventStore {
     order: VecDeque<String>,
     paid_offer_watermarks: HashMap<(u16, String, String), Event>,
     rating_events: HashMap<RatingEventStoreKey, RatingEventStoreEntry>,
+    #[cfg(feature = "updater")]
     update_events: UpdateEventCache,
 }
 
@@ -30,6 +31,7 @@ struct RatingEventStoreEntry {
     created_at: u64,
 }
 
+#[cfg(feature = "updater")]
 fn configured_update_events() -> Result<UpdateEventCache> {
     let reference = configured_update_ref()?;
     UpdateEventCache::new(&reference).context("failed to configure update announcement cache")
@@ -37,13 +39,21 @@ fn configured_update_events() -> Result<UpdateEventCache> {
 
 impl ControlEventStore {
     #[cfg(any(feature = "paid-exit", test))]
-    fn load(path: Option<PathBuf>, update_events: UpdateEventCache) -> Result<Self> {
-        Self::load_for_owner(path, update_events, None)
+    fn load(
+        path: Option<PathBuf>,
+        #[cfg(feature = "updater")] update_events: UpdateEventCache,
+    ) -> Result<Self> {
+        Self::load_for_owner(
+            path,
+            #[cfg(feature = "updater")]
+            update_events,
+            None,
+        )
     }
 
     fn load_for_owner(
         path: Option<PathBuf>,
-        update_events: UpdateEventCache,
+        #[cfg(feature = "updater")] update_events: UpdateEventCache,
         graph_root: Option<PublicKey>,
     ) -> Result<Self> {
         let Some(path) = path else {
@@ -54,6 +64,7 @@ impl ControlEventStore {
                 order: VecDeque::new(),
                 paid_offer_watermarks: HashMap::new(),
                 rating_events: HashMap::new(),
+                #[cfg(feature = "updater")]
                 update_events,
             });
         };
@@ -64,6 +75,7 @@ impl ControlEventStore {
             order: VecDeque::new(),
             paid_offer_watermarks: HashMap::new(),
             rating_events: HashMap::new(),
+            #[cfg(feature = "updater")]
             update_events,
         };
         let bytes = match fs::read(&path) {
@@ -86,7 +98,11 @@ impl ControlEventStore {
         let saved_watermark_count = saved.paid_offer_watermarks.len();
         for event in saved.events {
             if event.verify().is_ok()
-                && is_control_event(&event, &store.update_events)
+                && is_control_event(
+                    &event,
+                    #[cfg(feature = "updater")]
+                    &store.update_events,
+                )
                 && control_event_is_persistent(&event)
             {
                 let _ = store.insert_memory(event);
@@ -94,7 +110,11 @@ impl ControlEventStore {
         }
         for event in saved.paid_offer_watermarks {
             if event.verify().is_ok()
-                && is_control_event(&event, &store.update_events)
+                && is_control_event(
+                    &event,
+                    #[cfg(feature = "updater")]
+                    &store.update_events,
+                )
                 && u16::from(event.kind) == PAID_EXIT_OFFER_KIND
             {
                 let _ = store.insert_memory(event);
@@ -120,7 +140,11 @@ impl ControlEventStore {
     }
 
     fn insert_memory(&mut self, event: Event) -> bool {
-        if !is_control_event(&event, &self.update_events) {
+        if !is_control_event(
+            &event,
+            #[cfg(feature = "updater")]
+            &self.update_events,
+        ) {
             return false;
         }
         let event_id = event.id.to_hex();
@@ -191,10 +215,12 @@ impl ControlEventStore {
         } else {
             None
         };
+        #[cfg(feature = "updater")]
         let is_update_event = self
             .update_events
             .filter()
             .match_event(&event, MatchEventOptions::new());
+        #[cfg(feature = "updater")]
         if is_update_event {
             if !self
                 .update_events
@@ -223,11 +249,14 @@ impl ControlEventStore {
                 .iter()
                 .position(|stored_id| {
                     self.events.get(stored_id).is_some_and(|stored| {
-                        !matches!(u16::from(stored.kind), 3 | 10_000)
+                        let evictable = !matches!(u16::from(stored.kind), 3 | 10_000);
+                        #[cfg(feature = "updater")]
+                        let evictable = evictable
                             && !self
                                 .update_events
                                 .filter()
-                                .match_event(stored, MatchEventOptions::new())
+                                .match_event(stored, MatchEventOptions::new());
+                        evictable
                     })
                 })
                 .unwrap_or(0);
@@ -415,16 +444,16 @@ fn rating_event_store_key(event: &Event) -> Option<(RatingEventStoreKey, u64)> {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "updater"))]
 mod tests {
-    use nostr_sdk::{EventBuilder, ToBech32};
-    use nostr_social_graph::Rating;
-    use nostr_social_memory::RatingEventExt;
     #[cfg(feature = "paid-exit")]
     use crate::paid_routes::{
         PAID_ROUTE_OFFER_TTL_SECS, PaidExitConfig, SignedPaidRouteOffer,
         signed_paid_exit_offer_from_config,
     };
+    use nostr_sdk::{EventBuilder, ToBech32};
+    use nostr_social_graph::Rating;
+    use nostr_social_memory::RatingEventExt;
 
     use super::*;
 

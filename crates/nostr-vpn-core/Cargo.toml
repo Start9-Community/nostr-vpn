@@ -20,7 +20,8 @@ updater = [
 ]
 secure-dns = ["dep:reqwest"]
 control-pubsub = [
-  "updater",
+  "dep:nostr-pubsub",
+  "dep:nostr-pubsub-fips",
   "dep:nostr-pubsub-relay",
   "dep:nostr-pubsub-social-graph",
   "dep:nostr-social-memory",

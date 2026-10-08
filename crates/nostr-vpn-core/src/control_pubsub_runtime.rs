@@ -13,13 +13,15 @@ use crate::control_pubsub::{
     PAID_EXIT_OFFER_KIND, RATING_FACT_KIND,
 };
 use crate::paid_routes::{PAID_ROUTE_OFFER_TTL_SECS, SignedPaidRouteOffer};
+#[cfg(feature = "updater")]
 use crate::updater::{UpdateEventCache, configured_update_ref};
 use anyhow::{Context, Result, anyhow};
 use fips_core::FipsEndpoint;
+#[cfg(feature = "updater")]
+use nostr_pubsub::MatchEventOptions;
 use nostr_pubsub::{
-    EventBus, EventSource, MatchEventOptions, MeshPeerPolicy, NostrEventSubscriber,
-    NostrEventSubscription, NostrPubsubRouter, PolicyDecision, QueryEvent, RouterPublishSource,
-    SourceRoute, VerifiedEvent,
+    EventBus, EventSource, MeshPeerPolicy, NostrEventSubscriber, NostrEventSubscription,
+    NostrPubsubRouter, PolicyDecision, QueryEvent, RouterPublishSource, SourceRoute, VerifiedEvent,
 };
 use nostr_pubsub_fips::{
     FipsPubsubClient, FipsPubsubClientOptions, FipsPubsubPolicy, FipsPubsubPolicyOptions,
@@ -102,6 +104,7 @@ impl ControlPubsubFipsRuntime {
             relays,
             store_path,
             None,
+            #[cfg(feature = "updater")]
             None,
             target_peer_npubs,
         )
@@ -121,6 +124,7 @@ impl ControlPubsubFipsRuntime {
             relays,
             store_path,
             Some(peer_policy),
+            #[cfg(feature = "updater")]
             None,
             &[],
         )
@@ -133,12 +137,13 @@ impl ControlPubsubFipsRuntime {
         relays: Vec<String>,
         store_path: Option<PathBuf>,
         peer_policy: Option<Arc<dyn MeshPeerPolicy>>,
-        update_events_override: Option<UpdateEventCache>,
+        #[cfg(feature = "updater")] update_events_override: Option<UpdateEventCache>,
         target_peer_npubs: &[String],
     ) -> Result<Option<Self>> {
         if config.mode == NostrPubsubMode::Off {
             return Ok(None);
         }
+        #[cfg(feature = "updater")]
         let update_events = match update_events_override {
             Some(update_events) => update_events,
             None => configured_update_events()?,
@@ -151,8 +156,12 @@ impl ControlPubsubFipsRuntime {
             .as_deref()
             .map(control_pubsub_outbox_directory_from_store_path);
         let graph_root = PublicKey::parse(endpoint.npub())?;
-        let event_store =
-            ControlEventStore::load_for_owner(store_path, update_events.clone(), Some(graph_root))?;
+        let event_store = ControlEventStore::load_for_owner(
+            store_path,
+            #[cfg(feature = "updater")]
+            update_events.clone(),
+            Some(graph_root),
+        )?;
         let stored_events = event_store.snapshot();
         let pubsub_policy = FipsPubsubPolicy::new(
             Arc::clone(&endpoint),
@@ -176,6 +185,7 @@ impl ControlPubsubFipsRuntime {
         let relay = RelayProvider::start(
             config.mode,
             relays,
+            #[cfg(feature = "updater")]
             &update_events,
             &target_advert_authors,
             graph_root,
@@ -208,6 +218,7 @@ impl ControlPubsubFipsRuntime {
                     events: task_events,
                     peer_policy,
                     pubsub_policy,
+                    #[cfg(feature = "updater")]
                     update_events,
                 },
                 outbox_path,
@@ -338,6 +349,7 @@ struct PubsubRunState {
     events: Arc<Mutex<ControlEventStore>>,
     peer_policy: Arc<dyn MeshPeerPolicy>,
     pubsub_policy: Arc<Mutex<FipsPubsubPolicy>>,
+    #[cfg(feature = "updater")]
     update_events: UpdateEventCache,
 }
 
@@ -352,6 +364,7 @@ struct PublishContext<'a> {
     pubsub: &'a NostrPubsubRouter,
     events: &'a Arc<Mutex<ControlEventStore>>,
     pubsub_policy: &'a Arc<Mutex<FipsPubsubPolicy>>,
+    #[cfg(feature = "updater")]
     update_events: &'a UpdateEventCache,
 }
 
@@ -369,6 +382,7 @@ async fn run(
         events,
         peer_policy,
         pubsub_policy,
+        #[cfg(feature = "updater")]
         update_events,
     } = state;
     let mut maintenance_tick = tokio::time::interval(MAINTENANCE_TICK_INTERVAL);
@@ -384,6 +398,7 @@ async fn run(
         &fips_pubsub,
         peer_policy.as_ref(),
         &events,
+        #[cfg(feature = "updater")]
         &update_events,
         &mut fips_subscription,
     )
@@ -402,6 +417,7 @@ async fn run(
                                 pubsub: &pubsub,
                                 events: &events,
                                 pubsub_policy: &pubsub_policy,
+                                #[cfg(feature = "updater")]
                                 update_events: &update_events,
                             },
                             *event,
@@ -432,6 +448,7 @@ async fn run(
                         pubsub: &pubsub,
                         events: &events,
                         pubsub_policy: &pubsub_policy,
+                        #[cfg(feature = "updater")]
                         update_events: &update_events,
                     },
                     outbox_path.as_deref().expect("outbox path is present"),
@@ -445,6 +462,7 @@ async fn run(
                     relay.as_ref().map(|provider| Arc::clone(&provider.bus)),
                     &events,
                     &pubsub_policy,
+                    #[cfg(feature = "updater")]
                     &update_events,
                     delivery,
                 )
@@ -457,6 +475,7 @@ async fn run(
                     &fips_pubsub,
                     &events,
                     &pubsub_policy,
+                    #[cfg(feature = "updater")]
                     &update_events,
                     delivery,
                 )
@@ -491,6 +510,7 @@ async fn run(
                     &fips_pubsub,
                     peer_policy.as_ref(),
                     &events,
+                    #[cfg(feature = "updater")]
                     &update_events,
                     &mut fips_subscription,
                 )
@@ -501,6 +521,7 @@ async fn run(
                         pubsub: &pubsub,
                         events: &events,
                         pubsub_policy: &pubsub_policy,
+                        #[cfg(feature = "updater")]
                         update_events: &update_events,
                     },
                 )
@@ -511,17 +532,35 @@ async fn run(
 }
 
 async fn publish_local(context: PublishContext<'_>, event: Event) -> Result<bool> {
-    let verified = verify_control_event(event, context.update_events)?;
+    let verified = verify_control_event(
+        event,
+        #[cfg(feature = "updater")]
+        context.update_events,
+    )?;
     publish_verified(context, verified).await
 }
 
-fn verify_control_event(event: Event, update_events: &UpdateEventCache) -> Result<VerifiedEvent> {
-    validate_control_event_shape(&event, update_events)?;
+fn verify_control_event(
+    event: Event,
+    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
+) -> Result<VerifiedEvent> {
+    validate_control_event_shape(
+        &event,
+        #[cfg(feature = "updater")]
+        update_events,
+    )?;
     VerifiedEvent::try_from(event).map_err(anyhow::Error::from)
 }
 
-fn validate_control_event_shape(event: &Event, update_events: &UpdateEventCache) -> Result<()> {
-    if !is_control_event(event, update_events) {
+fn validate_control_event_shape(
+    event: &Event,
+    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
+) -> Result<()> {
+    if !is_control_event(
+        event,
+        #[cfg(feature = "updater")]
+        update_events,
+    ) {
         anyhow::bail!("event is outside control pubsub subscriptions");
     }
     let event_bytes = serde_json::to_vec(&event)?;
@@ -536,7 +575,11 @@ fn validate_control_event_shape(event: &Event, update_events: &UpdateEventCache)
 }
 
 async fn publish_verified(context: PublishContext<'_>, verified: VerifiedEvent) -> Result<bool> {
-    validate_control_event_shape(verified.as_event(), context.update_events)?;
+    validate_control_event_shape(
+        verified.as_event(),
+        #[cfg(feature = "updater")]
+        context.update_events,
+    )?;
     let event = verified.as_event().clone();
     let published = match context
         .pubsub
@@ -707,11 +750,15 @@ async fn process_fips_delivery(
     relay: Option<Arc<RelayEventBus>>,
     events: &Arc<Mutex<ControlEventStore>>,
     pubsub_policy: &Arc<Mutex<FipsPubsubPolicy>>,
-    update_events: &UpdateEventCache,
+    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
     delivery: QueryEvent,
 ) {
     let verified = delivery.event;
-    if !is_control_event(verified.as_event(), update_events) {
+    if !is_control_event(
+        verified.as_event(),
+        #[cfg(feature = "updater")]
+        update_events,
+    ) {
         return;
     }
     if !verified_event_is_admitted(pubsub_policy, &verified, &delivery.source).await {
@@ -742,12 +789,15 @@ async fn process_relay_delivery(
     fips_pubsub: &FipsPubsubClient,
     events: &Arc<Mutex<ControlEventStore>>,
     pubsub_policy: &Arc<Mutex<FipsPubsubPolicy>>,
-    update_events: &UpdateEventCache,
+    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
     delivery: QueryEvent,
 ) {
     let verified = delivery.event;
-    if !is_control_event(verified.as_event(), update_events)
-        || !verified_event_is_admitted(pubsub_policy, &verified, &delivery.source).await
+    if !is_control_event(
+        verified.as_event(),
+        #[cfg(feature = "updater")]
+        update_events,
+    ) || !verified_event_is_admitted(pubsub_policy, &verified, &delivery.source).await
     {
         return;
     }
@@ -792,7 +842,7 @@ async fn sync_fips_subscription(
     fips_pubsub: &FipsPubsubClient,
     peer_policy: &dyn MeshPeerPolicy,
     events: &Arc<Mutex<ControlEventStore>>,
-    update_events: &UpdateEventCache,
+    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
     state: &mut FipsSubscriptionState,
 ) {
     // FIPS replays an active REQ onto newly connected/replacement links.
@@ -805,7 +855,10 @@ async fn sync_fips_subscription(
     if !should_create_fips_subscription(subscription_exists, peers.len()) {
         return;
     }
-    let mut filters = fips_subscription_filters(update_events);
+    let mut filters = fips_subscription_filters(
+        #[cfg(feature = "updater")]
+        update_events,
+    );
     if let Ok(root) = PublicKey::parse(endpoint.npub()) {
         filters.push(exit_graph_filter(root));
     }
@@ -836,12 +889,16 @@ fn should_create_fips_subscription(subscription_exists: bool, connected_peer_cou
     !subscription_exists && connected_peer_count > 0
 }
 
-fn fips_subscription_filters(update_events: &UpdateEventCache) -> Vec<Filter> {
+fn fips_subscription_filters(
+    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
+) -> Vec<Filter> {
+    #[cfg_attr(not(feature = "updater"), allow(unused_mut))]
     let mut filters = vec![
         Filter::new()
             .kinds(control_kinds())
             .limit(FIPS_REPLAY_LIMIT),
     ];
+    #[cfg(feature = "updater")]
     if update_events.filter().kinds.is_some() {
         filters.push(update_events.filter().clone().limit(FIPS_REPLAY_LIMIT));
     }
@@ -955,7 +1012,7 @@ fn control_kinds() -> Vec<Kind> {
 }
 
 fn relay_subscription_filters(
-    update_events: &UpdateEventCache,
+    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
     target_advert_authors: &[PublicKey],
 ) -> Vec<Filter> {
     let mut filters = Vec::with_capacity(5);
@@ -978,21 +1035,35 @@ fn relay_subscription_filters(
         Filter::new()
             .kind(Kind::Custom(RATING_FACT_KIND))
             .limit(RELAY_REPLAY_LIMIT),
+        #[cfg(feature = "updater")]
         update_events.filter().clone().limit(RELAY_REPLAY_LIMIT),
     ]);
     filters
 }
 
-fn is_control_event(event: &Event, update_events: &UpdateEventCache) -> bool {
+fn is_control_event(
+    event: &Event,
+    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
+) -> bool {
     if u16::from(event.kind) == PAID_EXIT_OFFER_KIND {
         return cfg!(feature = "paid-exit");
     }
-    matches!(
+    if matches!(
         u16::from(event.kind),
         FIPS_PEER_ADVERT_KIND | RATING_FACT_KIND | 0 | 3 | 10_000
-    ) || update_events
-        .filter()
-        .match_event(event, MatchEventOptions::new())
+    ) {
+        return true;
+    }
+    #[cfg(feature = "updater")]
+    {
+        update_events
+            .filter()
+            .match_event(event, MatchEventOptions::new())
+    }
+    #[cfg(not(feature = "updater"))]
+    {
+        false
+    }
 }
 
 include!("control_pubsub_runtime/outbox.rs");
@@ -1000,6 +1071,36 @@ include!("control_pubsub_runtime/exit_ratings.rs");
 #[cfg(feature = "paid-exit")]
 include!("control_pubsub_runtime/provider_profiles.rs");
 
-#[cfg(test)]
+#[cfg(all(test, feature = "updater"))]
 #[path = "control_pubsub_runtime/tests.rs"]
 mod fips_update_tests;
+
+#[cfg(all(test, not(feature = "updater")))]
+#[test]
+fn control_pubsub_without_updater_retains_discovery_and_rejects_update_events() {
+    use nostr_sdk::prelude::EventBuilder;
+
+    let keys = Keys::generate();
+    let advert = EventBuilder::new(Kind::Custom(FIPS_PEER_ADVERT_KIND), "peer discovery")
+        .sign_with_keys(&keys)
+        .expect("signed peer advert");
+    let update = EventBuilder::new(Kind::Custom(30_078), "release update")
+        .sign_with_keys(&keys)
+        .expect("signed update event");
+    let mut store = ControlEventStore::load(None).expect("control event store");
+    assert!(verify_control_event(advert.clone()).is_ok());
+    assert!(store.insert(advert.clone()).expect("retain peer advert"));
+    assert!(verify_control_event(update.clone()).is_err());
+    assert!(!store.insert(update).expect("reject update event"));
+    assert_eq!(store.snapshot(), vec![advert]);
+    assert!(
+        relay_subscription_filters(&[])
+            .iter()
+            .all(|filter| filter.kinds.is_some())
+    );
+    assert!(
+        fips_subscription_filters()
+            .iter()
+            .all(|filter| filter.kinds.is_some())
+    );
+}

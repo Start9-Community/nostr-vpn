@@ -18,7 +18,7 @@ impl RelayProvider {
     async fn start(
         mode: NostrPubsubMode,
         relays: Vec<String>,
-        update_events: &UpdateEventCache,
+        #[cfg(feature = "updater")] update_events: &UpdateEventCache,
         target_advert_authors: &[PublicKey],
         graph_root: PublicKey,
     ) -> Result<Option<Self>> {
@@ -35,7 +35,7 @@ impl RelayProvider {
         let subscription = NostrEventSubscriber::subscribe(
             bus.as_ref(),
             {
-                let mut filters = relay_subscription_filters(update_events, target_advert_authors);
+                let mut filters = relay_subscription_filters(#[cfg(feature = "updater")] update_events, target_advert_authors);
                 filters.push(exit_graph_filter(graph_root));
                 filters
             },
