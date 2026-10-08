@@ -1,9 +1,10 @@
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct StoredEventsFile {
+#[serde(bound(deserialize = "E: Deserialize<'de>"))]
+struct StoredEventsFile<E = Event> {
     version: u8,
-    events: Vec<Event>,
+    events: Vec<E>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    paid_offer_watermarks: Vec<Event>,
+    paid_offer_watermarks: Vec<E>,
 }
 
 #[derive(Debug)]
@@ -365,15 +366,15 @@ impl ControlEventStore {
         let mut paid_offer_watermarks = self
             .paid_offer_watermarks
             .values()
-            .cloned()
             .collect::<Vec<_>>();
-        paid_offer_watermarks.sort_by_key(paid_offer_coordinate);
+        paid_offer_watermarks.sort_by_key(|event| paid_offer_coordinate(event));
         let saved = StoredEventsFile {
             version: STORE_VERSION,
             events: self
-                .snapshot()
-                .into_iter()
-                .filter(control_event_is_persistent)
+                .order
+                .iter()
+                .filter_map(|event_id| self.events.get(event_id))
+                .filter(|event| control_event_is_persistent(event))
                 .collect(),
             paid_offer_watermarks,
         };
