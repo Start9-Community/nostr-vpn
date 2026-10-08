@@ -279,17 +279,9 @@ python3 "$CARGO_CACHE_VERIFIER" seed \
   "$DOWNLOAD_CACHE_DIR" "$REMOTE_ROOT/cargo-home" \
   "$REMOTE_ROOT/root-realized.lock" \
   "$REMOTE_ROOT/linux-realized.lock"
-IMAGE_TAG="nostr-vpn-linux-vm-gate:ubuntu24.04-rust${RUST_TOOLCHAIN//./-}-${BUILD_CACHE_ID:0:12}"
-docker build \
-  --platform linux/amd64 \
-  --build-arg "RUST_TOOLCHAIN=$RUST_TOOLCHAIN" \
-  --file "$DOCKERFILE" \
-  --tag "$IMAGE_TAG" \
-  "$REMOTE_ROOT/docker-context"
-CONTAINER_IMAGE_ID="$(
-  docker image inspect --format '{{.Id}}' "$IMAGE_TAG"
-)"
-[[ "$CONTAINER_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+host_linux_builder_prepare_image \
+  "$DOCKERFILE" "$RUST_TOOLCHAIN" linux/amd64 "$REMOTE_ROOT/docker-context"
+CONTAINER_IMAGE_ID="$HOST_LINUX_BUILDER_IMAGE_ID"
 
 # A fresh named Docker volume is root-owned. Prove it is empty, then give the
 # unprivileged build identity ownership before either Cargo phase can mount it.

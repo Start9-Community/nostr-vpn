@@ -2,10 +2,65 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { resolve, join } from 'node:path'
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const helper = resolve('scripts/lib-host-linux-builder-isolation.sh')
+
+test('Linux build environments reuse exact content across worktrees and reject a mismatched image', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nvpn-builder-image-'))
+  try {
+    for (const name of ['one', 'two']) {
+      mkdirSync(join(root, name))
+      writeFileSync(join(root, name, 'Dockerfile'), 'FROM ubuntu:24.04\n')
+    }
+    const r = spawnSync('/bin/bash', ['-c', `
+set -euo pipefail
+source "$1"
+fixture="$2"
+docker() {
+  if [[ "$1" == build ]]; then
+    printf 'build\\n' >>"$fixture/builds"
+    local key= tag= arg
+    shift
+    while (($#)); do
+      arg="$1"; shift
+      case "$arg" in
+        --tag) tag="$1"; shift ;;
+        --label) key="\${1#*=}"; shift ;;
+      esac
+    done
+    printf '%s %s %s\\n' "sha256:$(printf 'a%.0s' {1..64})" linux/amd64 "$key" >"$fixture/\${tag##*:}"
+  elif [[ "$1" == image && "$2" == inspect ]]; then
+    local tag="\${!#}"
+    cat "$fixture/\${tag##*:}" 2>/dev/null
+  else return 99; fi
+}
+host_linux_builder_prepare_image "$fixture/one/Dockerfile" 1.95.0 linux/amd64 "$fixture/one"
+first="$HOST_LINUX_BUILDER_IMAGE_TAG"
+first_receipt="$(cat "$fixture/\${first##*:}")"
+host_linux_builder_prepare_image "$fixture/two/Dockerfile" 1.95.0 linux/amd64 "$fixture/two"
+[[ "$first" == "$HOST_LINUX_BUILDER_IMAGE_TAG" ]]
+[[ "$(wc -l <"$fixture/builds" | tr -d ' ')" == 1 ]]
+host_linux_builder_prepare_image "$fixture/two/Dockerfile" 1.96.0 linux/amd64 "$fixture/two"
+[[ "$first" != "$HOST_LINUX_BUILDER_IMAGE_TAG" ]]
+printf 'RUN true\\n' >>"$fixture/two/Dockerfile"
+host_linux_builder_prepare_image "$fixture/two/Dockerfile" 1.95.0 linux/amd64 "$fixture/two"
+[[ "$first" != "$HOST_LINUX_BUILDER_IMAGE_TAG" ]]
+[[ "$(wc -l <"$fixture/builds" | tr -d ' ')" == 3 ]]
+for corrupt in wrong-key wrong-platform; do
+  if [[ "$corrupt" == wrong-key ]]; then
+    printf 'sha256:%s linux/amd64 invalid\\n' "$(printf 'a%.0s' {1..64})" >"$fixture/\${first##*:}"
+  else
+    printf '%s\\n' "$first_receipt" | sed 's@linux/amd64@linux/arm64@' >"$fixture/\${first##*:}"
+  fi
+  if host_linux_builder_prepare_image "$fixture/one/Dockerfile" 1.95.0 linux/amd64 "$fixture/one"; then exit 3; fi
+done
+[[ "$(wc -l <"$fixture/builds" | tr -d ' ')" == 3 ]]
+`, '_', helper, root], { encoding: 'utf8' })
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 function resourceArgs(env = {}) {
   return spawnSync('/bin/bash', ['-c', `
 set -euo pipefail

@@ -462,18 +462,11 @@ else
   python3 "$CARGO_CACHE_VERIFIER" seed \
     "$DOWNLOAD_CACHE_DIR" "$TEMP_DIR/cargo-home" \
     "$TEMP_DIR/root-realized.lock" "$TEMP_DIR/linux-realized.lock"
-  IMAGE_TAG="nostr-vpn-linux-vm-gate:ubuntu24.04-rust${RUST_TOOLCHAIN//./-}-${BUILD_CACHE_ID:0:12}"
-  docker build \
-    --platform "$DOCKER_PLATFORM" \
-    --build-arg "RUST_TOOLCHAIN=$RUST_TOOLCHAIN" \
-    --file "$TEMP_DIR/source/app/Dockerfile.linux-vm-gate" \
-    --tag "$IMAGE_TAG" \
-    "$TEMP_DIR/docker-context" \
-    >"$TEMP_DIR/docker-build.log"
-  CONTAINER_IMAGE_ID="$(
-    docker image inspect --format '{{.Id}}' "$IMAGE_TAG"
-  )"
-  [[ "$CONTAINER_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+  host_linux_builder_prepare_image \
+    "$TEMP_DIR/source/app/Dockerfile.linux-vm-gate" \
+    "$RUST_TOOLCHAIN" "$DOCKER_PLATFORM" "$TEMP_DIR/docker-context" \
+    2>"$TEMP_DIR/docker-build.log"
+  CONTAINER_IMAGE_ID="$HOST_LINUX_BUILDER_IMAGE_ID"
 
   assert_local_target_empty() {
     docker run --rm \

@@ -3,6 +3,45 @@
 # Exact cleanup for the daemon-owned container used by the host Linux release
 # builder. Callers serialize a cache root before invoking this helper.
 
+host_linux_builder_prepare_image() {
+  # Candidate sources are mounted separately. Reuse the tooling image across
+  # checkouts when its Dockerfile, Rust toolchain, and platform are identical.
+  local dockerfile="$1" rust_toolchain="$2" platform="$3" context="$4"
+  local key metadata image_id actual_platform actual_key
+  key="$(python3 - "$dockerfile" "$rust_toolchain" "$platform" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+source = hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest()
+print(hashlib.sha256(f"v1\n{source}\n{sys.argv[2]}\n{sys.argv[3]}\n".encode()).hexdigest())
+PY
+  )" || return
+  HOST_LINUX_BUILDER_IMAGE_TAG="nostr-vpn-linux-vm-gate:sha256-$key"
+  local format='{{.Id}} {{.Os}}/{{.Architecture}} {{index .Config.Labels "to.nostrvpn.builder-environment-key"}}'
+  if ! metadata="$(docker image inspect --format "$format" \
+    "$HOST_LINUX_BUILDER_IMAGE_TAG" 2>/dev/null)"
+  then
+    docker build \
+      --platform "$platform" \
+      --build-arg "RUST_TOOLCHAIN=$rust_toolchain" \
+      --label "to.nostrvpn.builder-environment-key=$key" \
+      --file "$dockerfile" \
+      --tag "$HOST_LINUX_BUILDER_IMAGE_TAG" \
+      "$context" >&2 || return
+    metadata="$(docker image inspect --format "$format" \
+      "$HOST_LINUX_BUILDER_IMAGE_TAG")" || return
+  fi
+  read -r image_id actual_platform actual_key <<<"$metadata"
+  [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ \
+    && "$actual_platform" == "$platform" && "$actual_key" == "$key" \
+    && "$metadata" == "$image_id $platform $key" ]] || {
+    echo "Cached Linux build environment does not match its content identity" >&2
+    return 2
+  }
+  HOST_LINUX_BUILDER_IMAGE_ID="$image_id"
+}
+
 # Operational limits preserve the existing source and receipt validation.
 # Keeping the existing environment argument makes this array safe on Bash 3
 # even when no limits are configured.
