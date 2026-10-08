@@ -28,7 +28,8 @@ settings and identities. iOS does not support paid exits.
   buyer refund eligibility, retaining settlement retries.
 - Keep shared peer discovery available on iOS without including desktop
   self-update code.
-- Batch received discovery-cache writes to reduce background disk activity.
+- Batch received discovery-cache writes and reuse unchanged event encodings
+  to reduce background disk and CPU activity.
 - Reduce repeated discovery scans and idle packet-processing allocations.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe

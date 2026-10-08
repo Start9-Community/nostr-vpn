@@ -14,6 +14,7 @@ struct ControlEventStore {
     dirty: bool,
     events: HashMap<String, Event>,
     order: VecDeque<String>,
+    encoded_events: HashMap<nostr_sdk::prelude::EventId, Box<serde_json::value::RawValue>>,
     paid_offer_watermarks: HashMap<(u16, String, String), Event>,
     rating_events: HashMap<RatingEventStoreKey, RatingEventStoreEntry>,
     #[cfg(feature = "updater")]
@@ -65,6 +66,7 @@ impl ControlEventStore {
                 dirty: false,
                 events: HashMap::new(),
                 order: VecDeque::new(),
+                encoded_events: HashMap::new(),
                 paid_offer_watermarks: HashMap::new(),
                 rating_events: HashMap::new(),
                 #[cfg(feature = "updater")]
@@ -77,6 +79,7 @@ impl ControlEventStore {
             dirty: false,
             events: HashMap::new(),
             order: VecDeque::new(),
+            encoded_events: HashMap::new(),
             paid_offer_watermarks: HashMap::new(),
             rating_events: HashMap::new(),
             #[cfg(feature = "updater")]
@@ -363,20 +366,45 @@ impl ControlEventStore {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let mut paid_offer_watermarks = self
-            .paid_offer_watermarks
-            .values()
-            .collect::<Vec<_>>();
+        let mut paid_offer_watermarks = self.paid_offer_watermarks.values().collect::<Vec<_>>();
         paid_offer_watermarks.sort_by_key(|event| paid_offer_coordinate(event));
+        let events = self
+            .order
+            .iter()
+            .filter_map(|event_id| self.events.get(event_id))
+            .filter(|event| control_event_is_persistent(event))
+            .collect::<Vec<_>>();
+        // Signed events are immutable by ID. Encode new records once instead
+        // of converting every signature, key, and tag on each snapshot write.
+        // Keep only encodings referenced by this exact snapshot, including
+        // hidden paid-offer watermarks retained for replay protection.
+        let retained_ids = events
+            .iter()
+            .chain(&paid_offer_watermarks)
+            .map(|event| event.id)
+            .collect::<HashSet<_>>();
+        self.encoded_events
+            .retain(|id, _| retained_ids.contains(id));
+        for event in events.iter().chain(&paid_offer_watermarks) {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.encoded_events.entry(event.id)
+            {
+                entry.insert(
+                    serde_json::value::to_raw_value(*event)
+                        .context("failed to encode control event")?,
+                );
+            }
+        }
         let saved = StoredEventsFile {
             version: STORE_VERSION,
-            events: self
-                .order
+            events: events
                 .iter()
-                .filter_map(|event_id| self.events.get(event_id))
-                .filter(|event| control_event_is_persistent(event))
+                .map(|event| self.encoded_events[&event.id].as_ref())
                 .collect(),
-            paid_offer_watermarks,
+            paid_offer_watermarks: paid_offer_watermarks
+                .iter()
+                .map(|event| self.encoded_events[&event.id].as_ref())
+                .collect(),
         };
         let bytes = serde_json::to_vec(&saved).context("failed to encode control pubsub store")?;
         crate::config::write_private_file_preserving_user_owner(path, &bytes)
@@ -490,7 +518,9 @@ mod tests {
             )));
         }
         assert!(!path.exists(), "received events wait for maintenance");
-        store.prune_expired_events(now).expect("flush received batch");
+        store
+            .prune_expired_events(now)
+            .expect("flush received batch");
         let reloaded = ControlEventStore::load(Some(path.clone()), test_update_events())
             .expect("reload received events");
         assert_eq!(reloaded.snapshot(), store.snapshot());
@@ -509,10 +539,61 @@ mod tests {
         )));
         assert!(store.prune_expired_events(now).is_err());
         fs::remove_dir(&path).expect("restore writable cache path");
-        store.prune_expired_events(now).expect("retry received batch");
+        store
+            .prune_expired_events(now)
+            .expect("retry received batch");
         let reloaded = ControlEventStore::load(Some(path), test_update_events())
             .expect("reload retried events");
         assert_eq!(reloaded.snapshot(), store.snapshot());
+        fs::remove_dir_all(directory).expect("remove event store directory");
+    }
+
+    #[test]
+    fn cached_event_encoding_preserves_snapshots_and_releases_replaced_records() {
+        let author = Keys::generate();
+        let subject = Keys::generate().public_key().to_hex();
+        let now = now_ms() / 1_000;
+        let directory = std::env::temp_dir().join(format!(
+            "nvpn-control-encoding-{}-{}",
+            std::process::id(),
+            author.public_key()
+        ));
+        let path = directory.join("control-events.json");
+        let mut store =
+            ControlEventStore::load(Some(path.clone()), test_update_events()).expect("event store");
+        let older = rating_event(&author, &subject, "fips.peer", 20, now.saturating_sub(1));
+        let newer = rating_event(&author, &subject, "fips.peer", 80, now);
+        assert!(store.insert(older.clone()).expect("save initial rating"));
+        assert!(store.insert(newer.clone()).expect("replace rating"));
+        assert_eq!(store.encoded_events.len(), 1, "replaced bytes are released");
+        assert!(!store.encoded_events.contains_key(&older.id));
+
+        let expected = StoredEventsFile {
+            version: STORE_VERSION,
+            events: vec![newer],
+            paid_offer_watermarks: vec![],
+        };
+        assert_eq!(
+            fs::read(&path).expect("saved bytes"),
+            serde_json::to_vec(&expected).expect("canonical event encoding")
+        );
+        let reloaded = ControlEventStore::load(Some(path.clone()), test_update_events())
+            .expect("reload encoded events");
+        assert_eq!(reloaded.snapshot(), store.snapshot());
+
+        assert_eq!(
+            store
+                .prune_expired_events(now + PEER_RATING_MAX_AGE.as_secs() + 1)
+                .expect("expire cached rating"),
+            1
+        );
+        assert!(
+            store.encoded_events.is_empty(),
+            "expired bytes are released"
+        );
+        let reloaded =
+            ControlEventStore::load(Some(path), test_update_events()).expect("reload empty cache");
+        assert!(reloaded.snapshot().is_empty());
         fs::remove_dir_all(directory).expect("remove event store directory");
     }
 
