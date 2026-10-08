@@ -296,18 +296,37 @@ def check_health(spec):
     if kind == "ios-device":
         if platform.system() != "Darwin" or not shutil.which("xcrun"):
             return {"spec": spec, "available": False, "detail": "devicectl requires macOS"}
-        ok, output = probe(["xcrun", "devicectl", "list", "devices"], timeout=20)
+        ok, output = probe(
+            ["xcrun", "devicectl", "list", "devices", "--quiet", "--json-output", "-"],
+            timeout=20,
+        )
         if not ok:
             return {"spec": spec, "available": False, "detail": output}
         devices = []
-        for row in output.splitlines()[2:]:
-            columns = [column.strip() for column in row.split("  ") if column.strip()]
-            if len(columns) >= 4 and columns[3].startswith(("available", "connected")):
-                devices.append({"name": columns[0], "identifier": columns[2]})
+        try:
+            entries = json.loads(output)["result"]["devices"]
+            for entry in entries:
+                properties = entry.get("properties", {})
+                hardware = properties.get("hardware", entry.get("hardwareProperties", {}))
+                connection = properties.get("connection", entry.get("connectionProperties", {}))
+                state = connection.get("state", connection.get("tunnelState", ""))
+                if hardware.get("reality") != "physical" or state not in {"available", "connected"}:
+                    continue
+                if hardware.get("platform") != "iOS":
+                    continue
+                name = properties.get("state", {}).get("name", entry.get("deviceProperties", {}).get("name", ""))
+                devices.append({
+                    "name": name,
+                    "identifier": hardware.get("udid") or entry["identifier"],
+                    "core_device_id": entry["identifier"],
+                    "state": state,
+                })
+        except (KeyError, TypeError, ValueError) as error:
+            return {"spec": spec, "available": False, "detail": f"invalid devicectl response: {error}"}
         matches = (
             devices
             if value == "auto"
-            else [item for item in devices if value in (item["name"], item["identifier"])]
+            else [device for device in devices if value in (device["name"], device["identifier"], device["core_device_id"])]
         )
         return {
             "spec": spec,

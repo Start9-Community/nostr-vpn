@@ -134,5 +134,9 @@ try {
   if ((Test-Path $Bin) -and (Test-Path $Config)) {
     & $Bin stop --config $Config --force 2>$null | Out-Null
   }
+  $daemonLog = Join-Path $Fixture 'daemon.log'
+  if (Test-Path -LiteralPath $daemonLog -PathType Leaf) {
+    Copy-Item -LiteralPath $daemonLog -Destination (Join-Path $ArtifactRoot 'daemon.log')
+  }
   Remove-Item -Recurse -Force $Fixture -ErrorAction SilentlyContinue
 }

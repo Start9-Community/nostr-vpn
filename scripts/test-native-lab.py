@@ -117,22 +117,31 @@ class NativeLabTests(unittest.TestCase):
         process.communicate(timeout=5)
 
     def test_ios_health_accepts_connected_selected_device(self) -> None:
-        inventory = (
-            "Name  Hostname  Identifier  State  Model\n"
-            "----  --------  ----------  -----  -----\n"
-            "Selected phone  selected.local  selected-id  connected  iPhone\n"
-            "Other phone  other.local  other-id  available (paired)  iPhone\n"
-            "Offline phone  offline.local  offline-id  unavailable  iPhone\n"
-        )
+        inventory = json.dumps({"result": {"devices": [
+            {"identifier": "selected-core-id", "hardwareProperties": {
+                "udid": "selected-id", "reality": "physical", "platform": "iOS"},
+             "connectionProperties": {"tunnelState": "connected"},
+             "deviceProperties": {"name": "Selected phone"}},
+            {"identifier": "other-core-id", "hardwareProperties": {
+                "udid": "other-id", "reality": "physical", "platform": "iOS"},
+             "connectionProperties": {"tunnelState": "available"},
+             "deviceProperties": {"name": "Other phone"}},
+            {"identifier": "offline-id", "hardwareProperties": {
+                "reality": "physical", "platform": "iOS"},
+             "connectionProperties": {"tunnelState": "disconnected"}},
+            {"identifier": "virtual-id", "hardwareProperties": {
+                "reality": "virtual", "platform": "iOS"},
+             "connectionProperties": {"tunnelState": "connected"}},
+        ]}})
         with (
             mock.patch.object(NATIVE_LAB.platform, "system", return_value="Darwin"),
             mock.patch.object(NATIVE_LAB.shutil, "which", return_value="/usr/bin/xcrun"),
             mock.patch.object(NATIVE_LAB, "probe", return_value=(True, inventory)),
         ):
-            for selected in ("Selected phone", "selected-id", "Other phone", "offline-id", "missing"):
+            for selected in ("Selected phone", "selected-id", "selected-core-id", "Other phone", "offline-id", "virtual-id", "missing"):
                 with self.subTest(selected=selected):
                     result = NATIVE_LAB.check_health(f"ios-device:{selected}")
-                    expected = "selected-id" if selected in ("Selected phone", "selected-id") else (
+                    expected = "selected-id" if selected in ("Selected phone", "selected-id", "selected-core-id") else (
                         "other-id" if selected == "Other phone" else ""
                     )
                     self.assertEqual(result["available"], bool(expected))
