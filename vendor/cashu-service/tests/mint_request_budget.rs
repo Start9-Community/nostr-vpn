@@ -58,11 +58,24 @@ impl Mint {
                 } else if paid && path.starts_with("/v1/keys") {
                     serde_json::json!({"keysets": [{"id": id, "unit": "sat", "keys": keys}]})
                         .to_string()
-                } else if paid && path == "/v1/mint/bolt11" {
-                    let request: cdk::nuts::MintRequest<String> =
-                        serde_json::from_slice(&payload).unwrap();
-                    let signatures: Vec<_> = request
-                        .outputs
+                } else if paid && (path == "/v1/mint/bolt11" || path == "/v1/swap") {
+                    let request: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                    if path == "/v1/swap" {
+                        for proof in request["inputs"].as_array().unwrap() {
+                            let secret = proof["secret"].as_str().unwrap();
+                            if let Ok(condition) = serde_json::from_str::<serde_json::Value>(secret)
+                            {
+                                assert_ne!(
+                                    condition[1].get("tags"),
+                                    Some(&serde_json::Value::Null),
+                                    "wallet sent a malformed legacy refund to the mint"
+                                );
+                            }
+                        }
+                    }
+                    let outputs: Vec<cdk::nuts::BlindedMessage> =
+                        serde_json::from_value(request["outputs"].clone()).unwrap();
+                    let signatures: Vec<_> = outputs
                         .iter()
                         .map(|output| {
                             let mut signature = cdk::nuts::BlindSignature {
@@ -351,3 +364,5 @@ async fn direct_mint_requests_are_paced_across_concurrent_clients() {
     assert!(started.elapsed() >= std::time::Duration::from_secs(4));
     assert_eq!(mint.requests.lock().unwrap().len(), 3);
 }
+
+mod wallet_refunds;
