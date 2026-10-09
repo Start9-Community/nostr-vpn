@@ -189,6 +189,7 @@ impl ControlPubsubFipsRuntime {
             #[cfg(feature = "updater")]
             &update_events,
             &target_advert_authors,
+            graph_root,
             &rating_filter,
         )
         .await?;
@@ -356,11 +357,6 @@ struct PubsubRunState {
     update_events: UpdateEventCache,
 }
 
-#[derive(Default)]
-struct FipsSubscriptionState {
-    subscription: Option<FipsPubsubSubscription>,
-}
-
 #[derive(Clone, Copy)]
 struct PublishContext<'a> {
     endpoint: &'a FipsEndpoint,
@@ -460,7 +456,7 @@ async fn run(
                 )
                 .await;
             }
-            delivery = fips_notification(&mut fips_subscription.subscription) => {
+            delivery = fips_subscription.recv() => {
                 let Some(delivery) = delivery else { continue; };
                 process_fips_delivery(
                     &endpoint,
@@ -834,53 +830,6 @@ async fn ingest_into_fips_discovery(endpoint: &FipsEndpoint, event: &Event) {
     }
 }
 
-async fn sync_fips_subscription(
-    endpoint: &FipsEndpoint,
-    fips_pubsub: &FipsPubsubClient,
-    peer_policy: &dyn MeshPeerPolicy,
-    events: &Arc<Mutex<ControlEventStore>>,
-    rating_filter: &Filter,
-    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
-    state: &mut FipsSubscriptionState,
-) {
-    // FIPS replays an active REQ onto newly connected/replacement links.
-    // Recreating it on peer churn would replay retained events to all peers.
-    let subscription_exists = state.subscription.is_some();
-    if subscription_exists {
-        return;
-    }
-    let peers = connected_peers(endpoint, peer_policy).await;
-    if !should_create_fips_subscription(subscription_exists, peers.len()) {
-        return;
-    }
-    let filters = fips_subscription_filters(
-        rating_filter,
-        #[cfg(feature = "updater")]
-        update_events,
-    );
-    let next = match fips_pubsub.subscribe(filters).await {
-        Ok(subscription) => subscription,
-        Err(error) => {
-            tracing::debug!(%error, "standard FIPS pubsub subscription deferred");
-            return;
-        }
-    };
-    state.subscription = Some(next);
-
-    for event in bounded_fips_replay(events.lock().await.snapshot()) {
-        let event_id = event.id;
-        let Ok(event) = VerifiedEvent::try_from(event) else {
-            continue;
-        };
-        if let Err(error) = fips_pubsub
-            .publish(event, EventSource::local_index(endpoint.npub().to_string()))
-            .await
-        {
-            tracing::debug!(%error, %event_id, "stored FIPS pubsub replay deferred");
-        }
-    }
-}
-
 fn should_create_fips_subscription(subscription_exists: bool, connected_peer_count: usize) -> bool {
     !subscription_exists && connected_peer_count > 0
 }
@@ -919,22 +868,6 @@ fn subscription_peer_ids(peers: Vec<(String, u64)>) -> Vec<String> {
     peer_ids.sort();
     peer_ids.dedup();
     peer_ids
-}
-
-async fn fips_notification(
-    subscription: &mut Option<FipsPubsubSubscription>,
-) -> Option<QueryEvent> {
-    let Some(active) = subscription.as_mut() else {
-        return std::future::pending().await;
-    };
-    let delivery = active.recv().await;
-    if delivery.is_none() {
-        // Terminal subscriptions drain their admitted bodies before EOF.
-        // Disable this select branch until the existing maintenance tick can
-        // restore live delivery; reopening is not a missed-history recovery.
-        subscription.take();
-    }
-    delivery
 }
 
 async fn verified_event_is_admitted(

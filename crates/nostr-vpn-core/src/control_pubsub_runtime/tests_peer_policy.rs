@@ -225,22 +225,6 @@ fn subscriptions_do_not_request_untrusted_machine_ratings() {
         relay_subscription_filters(&peer_rating_filter(&owner), &updates, &[]),
         fips_subscription_filters(&peer_rating_filter(&owner), &updates),
     ] {
-        for kind in [Kind::ContactList, Kind::MuteList] {
-            let own = EventBuilder::new(kind, "").sign_with_keys(&owner).unwrap();
-            let other = EventBuilder::new(kind, "")
-                .sign_with_keys(&stranger)
-                .unwrap();
-            assert!(
-                filters
-                    .iter()
-                    .any(|f| f.match_event(&own, MatchEventOptions::new()))
-            );
-            assert!(
-                filters
-                    .iter()
-                    .all(|f| !f.match_event(&other, MatchEventOptions::new()))
-            );
-        }
         assert!(
             filters
                 .iter()
@@ -259,4 +243,83 @@ fn subscriptions_do_not_request_untrusted_machine_ratings() {
             "untrusted machine ratings must not be requested from relays or peers"
         );
     }
+}
+
+#[test]
+#[cfg(feature = "paid-exit")]
+fn owner_graph_replay_is_not_crowded_out_by_recent_machine_ratings() {
+    run_async_test("owner-graph-replay", || async {
+        let owner = Keys::generate();
+        let provider = Keys::generate();
+        let owner_npub = owner.public_key().to_bech32().unwrap();
+        let provider_npub = provider.public_key().to_bech32().unwrap();
+        let [owner_port, provider_port, _] = available_udp_ports();
+        let owner_endpoint = endpoint(
+            &owner,
+            endpoint_config(owner_port, &[(&provider_npub, provider_port)]),
+        )
+        .await;
+        let provider_endpoint = endpoint(
+            &provider,
+            endpoint_config(provider_port, &[(&owner_npub, owner_port)]),
+        )
+        .await;
+        wait_connected(&owner_endpoint, &provider_npub).await;
+        let provider_bus = FipsPubsubClient::start(
+            Arc::clone(&provider_endpoint),
+            FipsPubsubClientOptions {
+                max_replay_events: 256,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let now = Timestamp::now().as_secs();
+        let contacts = EventBuilder::new(Kind::ContactList, "")
+            .custom_created_at(Timestamp::from(now - 120))
+            .sign_with_keys(&owner)
+            .unwrap();
+        let mute = EventBuilder::new(Kind::MuteList, "")
+            .custom_created_at(Timestamp::from(now - 119))
+            .sign_with_keys(&owner)
+            .unwrap();
+        for index in 0..129 {
+            let mut rating = Rating::new(
+                owner.public_key().to_hex(),
+                Keys::generate().public_key().to_hex(),
+                80,
+                0,
+                100,
+            );
+            rating.scope = Some("fips.peer".into());
+            rating.created_at = now - 129 + index;
+            provider_bus
+                .publish(
+                    VerifiedEvent::try_from(rating.to_event(&owner).unwrap()).unwrap(),
+                    EventSource::local_index(&owner_npub),
+                )
+                .await
+                .unwrap();
+        }
+        for event in [contacts.clone(), mute.clone()] {
+            provider_bus
+                .publish(
+                    VerifiedEvent::try_from(event).unwrap(),
+                    EventSource::local_index(&owner_npub),
+                )
+                .await
+                .unwrap();
+        }
+        let runtime = start_pubsub(
+            Arc::clone(&owner_endpoint),
+            update_events(&provider, "releases/owner-graph-replay"),
+        )
+        .await;
+        wait_for_event(&runtime, contacts.id).await;
+        wait_for_event(&runtime, mute.id).await;
+        runtime.stop().await;
+        provider_bus.shutdown_shared().await;
+        owner_endpoint.shutdown().await.unwrap();
+        provider_endpoint.shutdown().await.unwrap();
+    });
 }

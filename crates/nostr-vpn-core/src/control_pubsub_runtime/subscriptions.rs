@@ -21,15 +21,8 @@ fn fips_subscription_filters(
 }
 
 fn rating_subscription_filters(peer_ratings: &Filter, replay_limit: usize) -> Vec<Filter> {
-    // The default policy's sole rating authority is the local owner. Share its
-    // signed state filter with contacts/mutes to stay within legacy peers' four
-    // filters per REQ while keeping unrelated machine ratings off the wire.
-    let mut owner_state = peer_ratings.clone();
-    owner_state.generic_tags.clear();
     vec![
-        owner_state
-            .kinds([Kind::ContactList, Kind::MuteList])
-            .limit(replay_limit),
+        peer_ratings.clone().limit(replay_limit),
         #[cfg(feature = "paid-exit")]
         Filter::new()
             .kind(Kind::Custom(RATING_FACT_KIND))
@@ -149,4 +142,109 @@ fn control_pubsub_without_updater_retains_discovery_and_rejects_update_events() 
             .iter()
             .all(|filter| filter.kinds.is_some())
     );
+}
+
+// Keep independent replay budgets for ratings and owner graph state. Combining
+// them can hide an older contact/mute list behind a busy owner's recent ratings.
+fn exit_graph_filter(root: PublicKey) -> Filter {
+    Filter::new()
+        .author(root)
+        .kinds([Kind::ContactList, Kind::MuteList])
+        .limit(2)
+}
+
+#[derive(Default)]
+struct FipsSubscriptionState {
+    subscription: Option<FipsPubsubSubscription>,
+    owner_subscription: Option<FipsPubsubSubscription>,
+}
+
+impl FipsSubscriptionState {
+    async fn recv(&mut self) -> Option<QueryEvent> {
+        let delivery = tokio::select! {
+            event = fips_notification(&mut self.subscription) => event,
+            event = fips_notification(&mut self.owner_subscription) => event,
+        };
+        if delivery.is_none() {
+            // Re-establish the pair on the existing maintenance tick; a closed
+            // half must neither spin nor silently drop its class of events.
+            self.subscription.take();
+            self.owner_subscription.take();
+        }
+        delivery
+    }
+}
+
+async fn sync_fips_subscription(
+    endpoint: &FipsEndpoint,
+    fips_pubsub: &FipsPubsubClient,
+    peer_policy: &dyn MeshPeerPolicy,
+    events: &Arc<Mutex<ControlEventStore>>,
+    rating_filter: &Filter,
+    #[cfg(feature = "updater")] update_events: &UpdateEventCache,
+    state: &mut FipsSubscriptionState,
+) {
+    // FIPS replays an active REQ onto newly connected/replacement links.
+    // Recreating it on peer churn would replay retained events to all peers.
+    let subscription_exists = state.subscription.is_some();
+    if subscription_exists {
+        return;
+    }
+    let peers = connected_peers(endpoint, peer_policy).await;
+    if !should_create_fips_subscription(subscription_exists, peers.len()) {
+        return;
+    }
+    let filters = fips_subscription_filters(
+        rating_filter,
+        #[cfg(feature = "updater")]
+        update_events,
+    );
+    let next = match fips_pubsub.subscribe(filters).await {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            tracing::debug!(%error, "standard FIPS pubsub subscription deferred");
+            return;
+        }
+    };
+    let Ok(root) = PublicKey::parse(endpoint.npub()) else {
+        return;
+    };
+    let owner = match fips_pubsub.subscribe(vec![exit_graph_filter(root)]).await {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            tracing::debug!(%error, "owner graph subscription deferred");
+            return;
+        }
+    };
+    state.subscription = Some(next);
+    state.owner_subscription = Some(owner);
+
+    for event in bounded_fips_replay(events.lock().await.snapshot()) {
+        let event_id = event.id;
+        let Ok(event) = VerifiedEvent::try_from(event) else {
+            continue;
+        };
+        if let Err(error) = fips_pubsub
+            .publish(event, EventSource::local_index(endpoint.npub().to_string()))
+            .await
+        {
+            tracing::debug!(%error, %event_id, "stored FIPS pubsub replay deferred");
+        }
+    }
+}
+
+async fn fips_notification(
+    subscription: &mut Option<FipsPubsubSubscription>,
+) -> Option<QueryEvent> {
+    let Some(active) = subscription.as_mut() else {
+        return std::future::pending().await;
+    };
+    let delivery = active.recv().await;
+    if delivery.is_none() {
+        // Terminal subscriptions drain their admitted bodies before EOF.
+        // Disable this select branch until the existing maintenance tick can
+        // restore live delivery; reopening is not a missed-history recovery.
+        subscription.take();
+    }
+    delivery
 }
