@@ -62,14 +62,8 @@
             runtime.dispatch(NativeAppAction::Tick);
         }
         assert_eq!(runtime.config.internet_source, InternetSource::Direct);
-        assert!(runtime.config.exit_node.is_empty());
-        assert!(
-            runtime
-                .state()
-                .paid_route_market
-                .manual_provider_link
-                .is_empty()
-        );
+        assert_eq!(runtime.config.exit_node, "");
+        assert_eq!(runtime.state().paid_route_market.manual_provider_link, "");
         assert!(
             load_paid_route_store(&paid_route_store_file_path(&runtime.config_path))
                 .unwrap()

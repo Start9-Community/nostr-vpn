@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## 4.1.18 - 2026-10-08
+## 4.1.18 - 2026-10-09
 
 ### Release notes
 
@@ -33,6 +33,8 @@ settings and identities. iOS does not support paid exits.
 - Reduce repeated discovery scans and idle packet-processing allocations.
 - Request machine ratings only from the local reputation authority while
   preserving paid-exit feedback and signed contact/mute recovery.
+- Bound mint polling and share request cooldowns across wallet and channel work.
+- Preserve malformed legacy refunds without counting them as spendable funds.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.
