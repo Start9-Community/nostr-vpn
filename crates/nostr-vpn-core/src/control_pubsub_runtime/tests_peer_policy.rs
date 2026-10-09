@@ -189,9 +189,12 @@ fn peerfinding_without_paid_exit_never_subscribes_to_or_retains_paid_offers() {
     let offer = EventBuilder::new(Kind::Custom(PAID_EXIT_OFFER_KIND), "offer")
         .sign_with_keys(&publisher)
         .unwrap();
-    for filter in relay_subscription_filters(&updates, &[])
+    for filter in relay_subscription_filters(&peer_rating_filter(&publisher), &updates, &[])
         .into_iter()
-        .chain(fips_subscription_filters(&updates))
+        .chain(fips_subscription_filters(
+            &peer_rating_filter(&publisher),
+            &updates,
+        ))
     {
         assert!(!filter.match_event(&offer, MatchEventOptions::new()));
     }
@@ -199,4 +202,61 @@ fn peerfinding_without_paid_exit_never_subscribes_to_or_retains_paid_offers() {
     let mut store = ControlEventStore::load(None, updates).unwrap();
     assert!(!store.insert(offer).unwrap());
     assert!(store.snapshot().is_empty());
+}
+
+#[test]
+fn subscriptions_do_not_request_untrusted_machine_ratings() {
+    let owner = Keys::generate();
+    let stranger = Keys::generate();
+    let updates = update_events(&owner, "releases/rating-scope");
+    let rating = EventBuilder::new(Kind::Custom(RATING_FACT_KIND), "")
+        .tag(Tag::custom(TagKind::Custom("i".into()), ["fips.peer"]))
+        .sign_with_keys(&stranger)
+        .unwrap();
+    let own_rating = EventBuilder::new(Kind::Custom(RATING_FACT_KIND), "")
+        .tag(Tag::custom(TagKind::Custom("i".into()), ["fips.peer"]))
+        .sign_with_keys(&owner)
+        .unwrap();
+    let exit_rating = EventBuilder::new(Kind::Custom(RATING_FACT_KIND), "")
+        .tag(Tag::custom(TagKind::Custom("i".into()), ["vpn.exit"]))
+        .sign_with_keys(&stranger)
+        .unwrap();
+    for filters in [
+        relay_subscription_filters(&peer_rating_filter(&owner), &updates, &[]),
+        fips_subscription_filters(&peer_rating_filter(&owner), &updates),
+    ] {
+        for kind in [Kind::ContactList, Kind::MuteList] {
+            let own = EventBuilder::new(kind, "").sign_with_keys(&owner).unwrap();
+            let other = EventBuilder::new(kind, "")
+                .sign_with_keys(&stranger)
+                .unwrap();
+            assert!(
+                filters
+                    .iter()
+                    .any(|f| f.match_event(&own, MatchEventOptions::new()))
+            );
+            assert!(
+                filters
+                    .iter()
+                    .all(|f| !f.match_event(&other, MatchEventOptions::new()))
+            );
+        }
+        assert!(
+            filters
+                .iter()
+                .any(|f| f.match_event(&own_rating, MatchEventOptions::new()))
+        );
+        assert_eq!(
+            filters
+                .iter()
+                .any(|f| f.match_event(&exit_rating, MatchEventOptions::new())),
+            cfg!(feature = "paid-exit")
+        );
+        assert!(
+            filters
+                .iter()
+                .all(|f| !f.match_event(&rating, MatchEventOptions::new())),
+            "untrusted machine ratings must not be requested from relays or peers"
+        );
+    }
 }

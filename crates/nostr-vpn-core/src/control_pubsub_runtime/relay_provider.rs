@@ -20,7 +20,7 @@ impl RelayProvider {
         relays: Vec<String>,
         #[cfg(feature = "updater")] update_events: &UpdateEventCache,
         target_advert_authors: &[PublicKey],
-        graph_root: PublicKey,
+        rating_filter: &Filter,
     ) -> Result<Option<Self>> {
         if mode != NostrPubsubMode::Relay || relays.is_empty() {
             return Ok(None);
@@ -34,11 +34,7 @@ impl RelayProvider {
         let ingress_tx = notification_tx.clone();
         let subscription = NostrEventSubscriber::subscribe(
             bus.as_ref(),
-            {
-                let mut filters = relay_subscription_filters(#[cfg(feature = "updater")] update_events, target_advert_authors);
-                filters.push(exit_graph_filter(graph_root));
-                filters
-            },
+            relay_subscription_filters(rating_filter, #[cfg(feature = "updater")] update_events, target_advert_authors),
             Arc::new(move |event| {
                 if ingress_tx.try_send(event).is_err() {
                     tracing::warn!("dropping control pubsub relay event because the bounded ingress queue is full");

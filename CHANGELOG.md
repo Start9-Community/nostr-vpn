@@ -31,6 +31,8 @@ settings and identities. iOS does not support paid exits.
 - Batch received discovery-cache writes and reuse unchanged event encodings
   to reduce background disk and CPU activity.
 - Reduce repeated discovery scans and idle packet-processing allocations.
+- Request machine ratings only from the local reputation authority while
+  preserving paid-exit feedback and signed contact/mute recovery.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.

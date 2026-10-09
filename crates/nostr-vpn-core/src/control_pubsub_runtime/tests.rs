@@ -24,6 +24,14 @@ use super::*;
 
 const FIPS_TEST_EVENTUAL_TIMEOUT: Duration = Duration::from_secs(15);
 
+fn peer_rating_filter(owner: &Keys) -> Filter {
+    nostr_pubsub_social_graph::PeerReputation::new(&owner.public_key().to_hex(), Default::default())
+        .unwrap()
+        .0
+        .rating_filter()
+        .unwrap()
+}
+
 fn available_udp_ports() -> [u16; 3] {
     let sockets = (0..3)
         .map(|_| UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral UDP port"))
@@ -228,11 +236,12 @@ fn relay_subscriptions_bound_retained_replay() {
     let target = Keys::generate().public_key();
     let update_events = update_events(&publisher, "releases/bounded-relay-replay");
 
-    let filters = relay_subscription_filters(&update_events, &[target]);
+    let filters =
+        relay_subscription_filters(&peer_rating_filter(&publisher), &update_events, &[target]);
 
     assert_eq!(
         filters.len(),
-        if cfg!(feature = "paid-exit") { 5 } else { 4 }
+        if cfg!(feature = "paid-exit") { 6 } else { 4 }
     );
     assert!(
         filters.iter().all(|filter| filter.limit.is_some()),
@@ -252,7 +261,7 @@ fn relay_subscriptions_bound_retained_replay() {
             filter
                 .kinds
                 .as_ref()
-                .is_some_and(|kinds| kinds.len() == 1 && kinds.contains(&Kind::Custom(kind)))
+                .is_some_and(|kinds| kinds.contains(&Kind::Custom(kind)))
         }));
     }
 }
@@ -387,17 +396,20 @@ fn standard_fips_pubsub_bounds_retained_replay() {
     let publisher = Keys::generate();
     let update_events = update_events(&publisher, "releases/bounded-fips-replay");
     let options = fips_pubsub_options(CONTROL_PUBSUB_MAX_EVENT_BYTES, 4);
-    let filters = fips_subscription_filters(&update_events);
+    let filters = fips_subscription_filters(&peer_rating_filter(&publisher), &update_events);
 
     assert_eq!(options.max_replay_events, FIPS_REPLAY_LIMIT);
-    assert_eq!(filters.len(), 2);
     assert_eq!(
-        filters[0].kinds.as_ref(),
-        Some(&control_kinds().into_iter().collect())
+        filters.len(),
+        if cfg!(feature = "paid-exit") { 4 } else { 2 }
     );
+    assert_eq!(filters[0].authors, peer_rating_filter(&publisher).authors);
+    assert!(filters.len() <= options.max_filters_per_subscription);
     let update = signed_update_root(&publisher, "releases/bounded-fips-replay", 1, "ab");
     assert!(
-        filters[1].match_event(&update, MatchEventOptions::new()),
+        filters
+            .iter()
+            .any(|filter| filter.match_event(&update, MatchEventOptions::new())),
         "configured hashtree updates must remain in the long-lived FIPS subscription"
     );
     assert!(
@@ -500,7 +512,7 @@ async fn offers_ratings_and_updates_are_carried_p2p_without_relays_run() {
         0,
         100,
     );
-    rating.scope = Some("fips.peer".to_string());
+    rating.scope = Some(crate::paid_route_ratings::EXIT_RATING_SCOPE.to_string());
     let rating = rating.to_event(&buyer).expect("signed rating event");
     assert!(
         buyer_pubsub

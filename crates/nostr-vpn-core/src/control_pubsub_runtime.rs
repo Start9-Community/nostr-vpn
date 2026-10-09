@@ -168,6 +168,7 @@ impl ControlPubsubFipsRuntime {
             stored_events.iter(),
             FipsPubsubPolicyOptions::default(),
         )?;
+        let rating_filter = pubsub_policy.rating_filter()?;
         let event_policy = pubsub_policy.event_policy();
         let peer_policy = peer_policy.unwrap_or_else(|| pubsub_policy.peer_policy());
         let pubsub_policy = Arc::new(Mutex::new(pubsub_policy));
@@ -188,7 +189,7 @@ impl ControlPubsubFipsRuntime {
             #[cfg(feature = "updater")]
             &update_events,
             &target_advert_authors,
-            graph_root,
+            &rating_filter,
         )
         .await?;
         let relay_client = relay.as_ref().map(|provider| provider.bus.client().clone());
@@ -218,6 +219,7 @@ impl ControlPubsubFipsRuntime {
                     events: task_events,
                     peer_policy,
                     pubsub_policy,
+                    rating_filter,
                     #[cfg(feature = "updater")]
                     update_events,
                 },
@@ -349,6 +351,7 @@ struct PubsubRunState {
     events: Arc<Mutex<ControlEventStore>>,
     peer_policy: Arc<dyn MeshPeerPolicy>,
     pubsub_policy: Arc<Mutex<FipsPubsubPolicy>>,
+    rating_filter: Filter,
     #[cfg(feature = "updater")]
     update_events: UpdateEventCache,
 }
@@ -382,6 +385,7 @@ async fn run(
         events,
         peer_policy,
         pubsub_policy,
+        rating_filter,
         #[cfg(feature = "updater")]
         update_events,
     } = state;
@@ -398,6 +402,7 @@ async fn run(
         &fips_pubsub,
         peer_policy.as_ref(),
         &events,
+        &rating_filter,
         #[cfg(feature = "updater")]
         &update_events,
         &mut fips_subscription,
@@ -510,6 +515,7 @@ async fn run(
                     &fips_pubsub,
                     peer_policy.as_ref(),
                     &events,
+                    &rating_filter,
                     #[cfg(feature = "updater")]
                     &update_events,
                     &mut fips_subscription,
@@ -833,6 +839,7 @@ async fn sync_fips_subscription(
     fips_pubsub: &FipsPubsubClient,
     peer_policy: &dyn MeshPeerPolicy,
     events: &Arc<Mutex<ControlEventStore>>,
+    rating_filter: &Filter,
     #[cfg(feature = "updater")] update_events: &UpdateEventCache,
     state: &mut FipsSubscriptionState,
 ) {
@@ -846,13 +853,11 @@ async fn sync_fips_subscription(
     if !should_create_fips_subscription(subscription_exists, peers.len()) {
         return;
     }
-    let mut filters = fips_subscription_filters(
+    let filters = fips_subscription_filters(
+        rating_filter,
         #[cfg(feature = "updater")]
         update_events,
     );
-    if let Ok(root) = PublicKey::parse(endpoint.npub()) {
-        filters.push(exit_graph_filter(root));
-    }
     let next = match fips_pubsub.subscribe(filters).await {
         Ok(subscription) => subscription,
         Err(error) => {
