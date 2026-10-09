@@ -161,17 +161,10 @@ struct FipsSubscriptionState {
 
 impl FipsSubscriptionState {
     async fn recv(&mut self) -> Option<QueryEvent> {
-        let delivery = tokio::select! {
+        tokio::select! {
             event = fips_notification(&mut self.subscription) => event,
             event = fips_notification(&mut self.owner_subscription) => event,
-        };
-        if delivery.is_none() {
-            // Re-establish the pair on the existing maintenance tick; a closed
-            // half must neither spin nor silently drop its class of events.
-            self.subscription.take();
-            self.owner_subscription.take();
         }
-        delivery
     }
 }
 
@@ -186,12 +179,28 @@ async fn sync_fips_subscription(
 ) {
     // FIPS replays an active REQ onto newly connected/replacement links.
     // Recreating it on peer churn would replay retained events to all peers.
-    let subscription_exists = state.subscription.is_some();
-    if subscription_exists {
+    if state.subscription.is_some() && state.owner_subscription.is_some() {
         return;
     }
     let peers = connected_peers(endpoint, peer_policy).await;
-    if !should_create_fips_subscription(subscription_exists, peers.len()) {
+    if peers.is_empty() {
+        return;
+    }
+    // Each stream owns its admitted bodies. A terminal ratings stream must
+    // not discard owner graph records waiting on the other stream.
+    if state.owner_subscription.is_none() {
+        let Ok(root) = PublicKey::parse(endpoint.npub()) else {
+            return;
+        };
+        match fips_pubsub.subscribe(vec![exit_graph_filter(root)]).await {
+            Ok(subscription) => state.owner_subscription = Some(subscription),
+            Err(error) => {
+                tracing::debug!(%error, "owner graph subscription deferred");
+                return;
+            }
+        }
+    }
+    if !should_create_fips_subscription(state.subscription.is_some(), peers.len()) {
         return;
     }
     let filters = fips_subscription_filters(
@@ -199,27 +208,15 @@ async fn sync_fips_subscription(
         #[cfg(feature = "updater")]
         update_events,
     );
-    let next = match fips_pubsub.subscribe(filters).await {
-        Ok(subscription) => subscription,
+    match fips_pubsub.subscribe(filters).await {
+        Ok(subscription) => state.subscription = Some(subscription),
         Err(error) => {
             tracing::debug!(%error, "standard FIPS pubsub subscription deferred");
             return;
         }
-    };
-    let Ok(root) = PublicKey::parse(endpoint.npub()) else {
-        return;
-    };
-    let owner = match fips_pubsub.subscribe(vec![exit_graph_filter(root)]).await {
-        Ok(subscription) => subscription,
-        Err(error) => {
-            tracing::debug!(%error, "owner graph subscription deferred");
-            return;
-        }
-    };
-    state.subscription = Some(next);
-    state.owner_subscription = Some(owner);
+    }
 
-    for event in bounded_fips_replay(events.lock().await.snapshot()) {
+    for event in bounded_fips_replay(events.lock().await.snapshot(), rating_filter) {
         let event_id = event.id;
         let Ok(event) = VerifiedEvent::try_from(event) else {
             continue;

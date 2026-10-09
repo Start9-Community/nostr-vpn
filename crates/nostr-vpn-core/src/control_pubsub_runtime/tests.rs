@@ -431,7 +431,7 @@ fn standard_fips_pubsub_bounds_retained_replay() {
         .iter()
         .map(|event| event.id)
         .collect::<Vec<_>>();
-    let replay_ids = bounded_fips_replay(stored)
+    let replay_ids = bounded_fips_replay(stored, &peer_rating_filter(&publisher))
         .into_iter()
         .map(|event| event.id)
         .collect::<Vec<_>>();
@@ -649,8 +649,13 @@ fn ended_fips_subscription_disables_notifications_until_maintenance() {
         client.shutdown_shared().await;
         assert!(state.recv().await.is_none());
         assert!(
+            state.subscription.is_some() || state.owner_subscription.is_some(),
+            "one EOF must preserve the other stream's admitted records"
+        );
+        assert!(state.recv().await.is_none());
+        assert!(
             state.subscription.is_none() && state.owner_subscription.is_none(),
-            "EOF must release both terminal handles"
+            "each terminal handle is released after its own EOF"
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(25), state.recv())

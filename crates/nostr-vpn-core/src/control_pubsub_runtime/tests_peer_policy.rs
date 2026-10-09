@@ -276,11 +276,11 @@ fn owner_graph_replay_is_not_crowded_out_by_recent_machine_ratings() {
         .unwrap();
         let now = Timestamp::now().as_secs();
         let contacts = EventBuilder::new(Kind::ContactList, "")
-            .custom_created_at(Timestamp::from(now - 120))
+            .custom_created_at(Timestamp::from(now - 300))
             .sign_with_keys(&owner)
             .unwrap();
         let mute = EventBuilder::new(Kind::MuteList, "")
-            .custom_created_at(Timestamp::from(now - 119))
+            .custom_created_at(Timestamp::from(now - 299))
             .sign_with_keys(&owner)
             .unwrap();
         for index in 0..129 {
@@ -315,11 +315,138 @@ fn owner_graph_replay_is_not_crowded_out_by_recent_machine_ratings() {
             update_events(&provider, "releases/owner-graph-replay"),
         )
         .await;
-        wait_for_event(&runtime, contacts.id).await;
-        wait_for_event(&runtime, mute.id).await;
+        let graph_result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let received = runtime.events().await;
+                if received.iter().any(|event| event.id == contacts.id)
+                    && received.iter().any(|event| event.id == mute.id)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            graph_result.is_ok(),
+            "received kinds: {:?}; provider: {:?}",
+            runtime
+                .events()
+                .await
+                .iter()
+                .map(|e| e.kind)
+                .collect::<Vec<_>>(),
+            provider_bus.delivery_snapshot()
+        );
         runtime.stop().await;
         provider_bus.shutdown_shared().await;
         owner_endpoint.shutdown().await.unwrap();
         provider_endpoint.shutdown().await.unwrap();
     });
+}
+
+#[test]
+fn legacy_foreign_ratings_do_not_crowd_out_owner_replay() {
+    run_async_test(
+        "legacy-rating-replay",
+        legacy_foreign_ratings_do_not_crowd_out_owner_replay_run,
+    );
+}
+
+async fn legacy_foreign_ratings_do_not_crowd_out_owner_replay_run() {
+    let owner = Keys::generate();
+    let observer = Keys::generate();
+    let stranger = Keys::generate();
+    let owner_npub = owner.public_key().to_bech32().unwrap();
+    let observer_npub = observer.public_key().to_bech32().unwrap();
+    let directory = std::env::temp_dir().join(format!("nvpn-legacy-replay-{}", owner.public_key()));
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("events.json");
+    let updates = update_events(&owner, "releases/legacy-ratings");
+    let mut store = ControlEventStore::load(Some(path.clone()), updates.clone()).unwrap();
+    let mut own = Rating::new(
+        owner.public_key().to_hex(),
+        stranger.public_key().to_hex(),
+        80,
+        0,
+        100,
+    );
+    own.scope = Some("fips.peer".to_string());
+    let own = own.to_event(&owner).unwrap();
+    store.insert(own.clone()).unwrap();
+    let mut foreign_ids = HashSet::new();
+    for _ in 0..FIPS_REPLAY_LIMIT + 8 {
+        let subject = Keys::generate().public_key().to_hex();
+        let mut rating = Rating::new(stranger.public_key().to_hex(), subject, 80, 0, 100);
+        rating.scope = Some("fips.peer".to_string());
+        let event = rating.to_event(&stranger).unwrap();
+        foreign_ids.insert(event.id);
+        store.insert(event).unwrap();
+    }
+    drop(store);
+    let [owner_port, observer_port, _] = available_udp_ports();
+    let owner_endpoint = endpoint(&owner, endpoint_config(owner_port, &[])).await;
+    let owner_runtime = ControlPubsubFipsRuntime::start_inner(
+        Arc::clone(&owner_endpoint),
+        NostrPubsubConfig {
+            mode: NostrPubsubMode::Client,
+            ..Default::default()
+        },
+        Vec::new(),
+        Some(path),
+        None,
+        Some(updates),
+        &[],
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let observer_endpoint = endpoint(
+        &observer,
+        endpoint_config(observer_port, &[(&owner_npub, owner_port)]),
+    )
+    .await;
+    let observer_pubsub = FipsPubsubClient::start(
+        Arc::clone(&observer_endpoint),
+        FipsPubsubClientOptions::default(),
+    )
+    .await
+    .unwrap();
+    let mut subscription = observer_pubsub
+        .subscribe(vec![
+            Filter::new()
+                .kind(Kind::Custom(RATING_FACT_KIND))
+                .limit(128),
+        ])
+        .await
+        .unwrap();
+    owner_endpoint
+        .update_peers(vec![PeerConfig::new(
+            &observer_npub,
+            "udp",
+            format!("127.0.0.1:{observer_port}"),
+        )])
+        .await
+        .unwrap();
+    wait_connected(&owner_endpoint, &observer_npub).await;
+    wait_connected(&observer_endpoint, &owner_npub).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = subscription.recv().await.unwrap().event;
+            assert!(
+                !foreign_ids.contains(&event.as_event().id),
+                "obsolete foreign ratings must not be republished from the old cache"
+            );
+            if event.as_event().id == own.id {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("owner rating survives the legacy cache backlog");
+    owner_runtime.stop().await;
+    observer_pubsub.shutdown().await;
+    owner_endpoint.shutdown().await.unwrap();
+    observer_endpoint.shutdown().await.unwrap();
+    fs::remove_dir_all(directory).unwrap();
 }

@@ -836,7 +836,17 @@ fn should_create_fips_subscription(subscription_exists: bool, connected_peer_cou
 
 include!("control_pubsub_runtime/subscriptions.rs");
 
-fn bounded_fips_replay(mut events: Vec<Event>) -> Vec<Event> {
+fn bounded_fips_replay(mut events: Vec<Event>, peer_ratings: &Filter) -> Vec<Event> {
+    // Old caches can contain ratings collected by the former unscoped request.
+    // Filter those before the replay cap so they neither consume bandwidth nor
+    // displace the owner's useful records after an upgrade.
+    let rating_filters = rating_subscription_filters(peer_ratings, FIPS_REPLAY_LIMIT);
+    events.retain(|event| {
+        event.kind != Kind::Custom(RATING_FACT_KIND)
+            || rating_filters
+                .iter()
+                .any(|filter| filter.match_event(event, nostr_pubsub::MatchEventOptions::new()))
+    });
     let drop_count = events.len().saturating_sub(FIPS_REPLAY_LIMIT);
     events.drain(..drop_count);
     events
