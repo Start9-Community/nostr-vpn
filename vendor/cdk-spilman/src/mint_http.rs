@@ -17,6 +17,9 @@ struct MintRequests {
 /// All direct Spilman HTTP paths share one paced connection slot per origin.
 /// This survives creating new clients and spans buyer, refund and seller work.
 /// CDK wallet requests have their own, persisted repository rate limiter.
+///
+/// # Panics
+/// Panics if another thread poisoned the shared mint request map.
 pub async fn send_mint_request(
     builder: reqwest::RequestBuilder,
 ) -> anyhow::Result<reqwest::Response> {

@@ -22,6 +22,9 @@ use crate::helper::{CashuLightningPayment, CashuMintBalance, CashuReceivedPaymen
 mod cross_mint;
 pub use cross_mint::*;
 
+mod legacy_refunds;
+use legacy_refunds::{hold_legacy_refunds, is_legacy_refund};
+
 mod persistence;
 mod polling;
 pub use persistence::*;
@@ -391,14 +394,22 @@ impl CashuWalletService {
         let repository = self.repository();
         let mut warnings = Vec::new();
 
-        if refresh_quotes {
-            for wallet in repository.get_wallets().await {
+        for wallet in repository.get_wallets().await {
+            if refresh_quotes {
                 match self.refresh_pending_wallet(&wallet).await {
                     Ok(report) => warnings.extend(report.warnings),
                     Err(error) => {
                         warnings.push(format!("Failed to refresh Cashu wallet: {error:#}"))
                     }
                 }
+            }
+            let held = hold_legacy_refunds(&wallet).await?;
+            if held > 0 {
+                warnings.push(format!(
+                    "{held} {} in legacy channel refunds at {} are excluded from the spendable balance: \
+                     their token format is invalid. The original proofs are preserved for mint-assisted recovery.",
+                    wallet.unit, wallet.mint_url
+                ));
             }
         }
 
@@ -519,7 +530,8 @@ impl CashuWalletService {
         let mint_url =
             MintUrl::from_str(&normalized_mint).context("Failed to parse normalized mint URL")?;
         let _guard = self.lock_operation().await;
-        ensure_sat_wallet(self.repository(), &mint_url).await?;
+        let wallet = ensure_sat_wallet(self.repository(), &mint_url).await?;
+        hold_legacy_refunds(&wallet).await?;
 
         let balance_sat = self
             .repository()
@@ -694,8 +706,13 @@ impl CashuWalletService {
 
         let mut proof_infos = Vec::with_capacity(proofs.len());
         for proof in proofs {
+            let state = if is_legacy_refund(&proof) {
+                State::Reserved
+            } else {
+                State::Unspent
+            };
             proof_infos.push(
-                ProofInfo::new(proof, mint_url.clone(), State::Unspent, CurrencyUnit::Sat)
+                ProofInfo::new(proof, mint_url.clone(), state, CurrencyUnit::Sat)
                     .context("Failed to prepare Cashu proof import")?,
             );
         }
@@ -866,6 +883,7 @@ async fn send_lightning_payment_with_wallet(
         .recover_incomplete_sagas()
         .await
         .context("Failed to recover Cashu wallet state before sending Lightning payment")?;
+    hold_legacy_refunds(wallet).await?;
 
     let quote = wallet
         .melt_quote(PaymentMethod::BOLT11, payment_request, None, None)

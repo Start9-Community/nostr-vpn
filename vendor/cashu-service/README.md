@@ -56,6 +56,15 @@ warnings and leaves the runtime usable. An unreadable database is never silently
 recreated; `preserve_cashu_wallet_database` explicitly moves the SQLite file,
 WAL, shared-memory file, and rollback journal together into a recovery directory.
 
+Legacy Spilman settlement proofs containing `"tags": null` do not conform to
+NUT-10 and are rejected by strict mints. The wallet preserves these proofs as
+reserved, without an operation owner, and excludes them from payment selection
+and spendable balances. Wallet overview warnings report the held amount.
+In-flight operations retain ownership of their proofs. Recovery of already
+issued malformed proofs requires mint assistance: editing their secrets would
+invalidate their mint signatures. Existing channel commitments and deterministic
+output encoding remain unchanged.
+
 This conversion leaves proofs in the caller's destination-mint wallet; it is not
 evidence that a counterparty received payment. A payout application must durably
 journal `settlement_id -> exact bearer token -> authenticated receiver ACK` and
