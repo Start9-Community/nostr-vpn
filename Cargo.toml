@@ -41,8 +41,8 @@ cashu = { version = "=0.18.0", default-features = false }
 cdk-spilman = { package = "nvpn-cdk-spilman", version = "=0.17.6", path = "vendor/cdk-spilman" }
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "6"
-nvpn-fips-endpoint = { version = "=0.4.94" }
-nvpn-fips-core = { version = "=0.4.94", features = ["webrtc-transport"] }
+nvpn-fips-endpoint = { version = "=0.4.96" }
+nvpn-fips-core = { version = "=0.4.96", features = ["webrtc-transport"] }
 nvpn-fips-tcp = { version = "=0.2.4" }
 nvpn-fips-tcp-endpoint = { version = "=0.2.29" }
 futures = "0.3"
