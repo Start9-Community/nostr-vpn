@@ -102,19 +102,27 @@ final class FipsBonjourDiscovery: NSObject, NetServiceBrowserDelegate, NetServic
             guard family == AF_INET || family == AF_INET6 else { return nil }
             let size = family == AF_INET ? MemoryLayout<sockaddr_in>.size : MemoryLayout<sockaddr_in6>.size
             guard bytes.count >= size else { return nil }
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            var port = [CChar](repeating: 0, count: Int(NI_MAXSERV))
-            guard getnameinfo(address, socklen_t(size), &host, socklen_t(host.count),
-                              &port, socklen_t(port.count), NI_NUMERICHOST | NI_NUMERICSERV) == 0
-            else { return nil }
+            var host = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            let port: UInt16
+            var scope: UInt32 = 0
+            // These are already numeric addresses. getnameinfo also queries
+            // system interfaces for IPv6 scopes, even with numeric flags.
+            if family == AF_INET {
+                var v4 = bytes.loadUnaligned(as: sockaddr_in.self)
+                guard inet_ntop(family, &v4.sin_addr, &host, socklen_t(host.count)) != nil else { return nil }
+                port = UInt16(bigEndian: v4.sin_port)
+            } else {
+                var v6 = bytes.loadUnaligned(as: sockaddr_in6.self)
+                guard inet_ntop(family, &v6.sin6_addr, &host, socklen_t(host.count)) != nil else { return nil }
+                port = UInt16(bigEndian: v6.sin6_port)
+                scope = v6.sin6_scope_id
+            }
             var hostname = String(cString: host)
             if family == AF_INET6 {
-                let v6 = bytes.loadUnaligned(as: sockaddr_in6.self)
-                hostname = String(hostname.prefix(while: { $0 != "%" }))
-                if v6.sin6_scope_id != 0 { hostname += "%\(v6.sin6_scope_id)" }
+                if scope != 0 { hostname += "%\(scope)" }
                 hostname = "[\(hostname)]"
             }
-            return "\(hostname):\(String(cString: port))"
+            return "\(hostname):\(port)"
         }
     }
 }
