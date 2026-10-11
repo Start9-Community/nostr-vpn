@@ -103,6 +103,20 @@ INVALID KEY=nope
   })
 })
 
+test('parseEnvFile preserves literal Windows paths and only expands double-quoted escapes', () => {
+  const parsed = parseEnvFile(String.raw`
+NVPN_WINDOWS_GUEST_REPO_PATH=C:\src\nvpn-release\target
+NVPN_WINDOWS_GUEST_FIPS_REPO_PATH='C:\src\release\fips'
+NVPN_NOTE="line one\nline two\r\ttail"
+`)
+
+  assert.deepEqual(parsed, {
+    NVPN_WINDOWS_GUEST_REPO_PATH: String.raw`C:\src\nvpn-release\target`,
+    NVPN_WINDOWS_GUEST_FIPS_REPO_PATH: String.raw`C:\src\release\fips`,
+    NVPN_NOTE: 'line one\nline two\r\ttail',
+  })
+})
+
 test('GitHub publication derives one explicit repository from the github remote', () => {
   for (const remote of [
     'git@github.com:mmalmi/nostr-vpn.git',
