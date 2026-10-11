@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "nvpn-cashu-service"
-version = "0.4.8"
+version = "0.4.9"
 authors = ["Martti Malmi"]
 build = false
 autolib = false
@@ -152,7 +152,7 @@ package = "cdk-common"
 
 [dependencies.cdk-spilman]
 package = "nvpn-cdk-spilman"
-version = "=0.17.6"
+version = "=0.17.7"
 path = "../cdk-spilman"
 optional = true
 default-features = false
