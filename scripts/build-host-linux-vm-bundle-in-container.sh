@@ -81,6 +81,12 @@ python3 "$cargo_cache_verifier" audit \
   /workspace/app/Cargo.lock /workspace/app/linux/Cargo.lock
 export CARGO_NET_OFFLINE=true
 
+cd /workspace/app/linux
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo "${fips_config[@]}" check --frozen
+# The check is complete; release builds own the bounded target volume next.
+cargo "${fips_config[@]}" clean --profile dev
+
 cd /workspace/app
 cargo "${fips_config[@]}" build --frozen --release -p nvpn
 cargo "${fips_config[@]}" build --frozen --release \
