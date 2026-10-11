@@ -398,13 +398,15 @@
 
     #[test]
     fn mobile_fips_exit_node_routes_default_traffic_to_selected_member() {
-        let runtime = RuntimeBuilder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_stack_size(4 * 1024 * 1024)
-            .build()
-            .expect("mobile FIPS test runtime");
-        runtime.block_on(Box::pin(run_mobile_fips_exit_node_route_test()));
+        for workers in [1, 2] {
+            let runtime = RuntimeBuilder::new_multi_thread()
+                .worker_threads(workers)
+                .enable_all()
+                .thread_stack_size(4 * 1024 * 1024)
+                .build()
+                .expect("mobile FIPS test runtime");
+            runtime.block_on(Box::pin(run_mobile_fips_exit_node_route_test()));
+        }
     }
 
     async fn run_mobile_fips_exit_node_route_test() {
@@ -501,6 +503,8 @@
         nostr_vpn_core::packet_checksums::finalize_ipv4_transport_checksum(&mut expected_reply_two);
         let expected_replies = vec![expected_reply, expected_reply_two];
         receive_mobile_inbound_packets_until(&mut started, &expected_replies).await;
+
+        assert_mobile_fips_packet_bursts(&mut started, &exit_endpoint, client_tunnel_ip).await;
 
         shutdown_started_mobile_tunnel(started).await;
         exit_endpoint

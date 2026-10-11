@@ -438,6 +438,115 @@
         panic!("recipient should receive mobile packets over FIPS");
     }
 
+    async fn assert_mobile_fips_packet_bursts(
+        started: &mut MobileTunnelStarted,
+        exit: &FipsEndpoint,
+        client_ip: Ipv4Addr,
+    ) {
+        let client = PeerIdentity::from_npub(started.endpoint.npub()).expect("client identity");
+        // Exercise more than a queue turn in both directions, without retries
+        // masking dropped packets or a worker that stops making progress.
+        for burst in 0_u32..16 {
+            let packets = (0_u32..64)
+                .map(|index| {
+                    let mut payload = vec![0x5a; usize::from(nostr_vpn_core::MESH_TUNNEL_MTU) - 28];
+                    payload[..4].copy_from_slice(&(burst * 64 + index).to_be_bytes());
+                    ipv4_udp_packet(client_ip, Ipv4Addr::new(8, 8, 8, 8), 53124, 443, &payload)
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                started
+                    .mesh
+                    .read()
+                    .expect("mesh")
+                    .route_outbound_packet_peer(&packets[0])
+                    .is_some(),
+                "exit route disappeared before burst {burst}"
+            );
+            let received = std::cell::Cell::new(0);
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                let receive = async {
+                    let mut remaining = packets.iter().cloned().collect::<HashSet<_>>();
+                    let mut batch = Vec::new();
+                    while !remaining.is_empty() {
+                        assert!(
+                            exit.recv_batch_into(&mut batch, 64).await.is_some(),
+                            "exit receive channel closed during burst"
+                        );
+                        for message in batch.drain(..) {
+                            // Startup capability messages and handshake probes
+                            // share this endpoint. Count only the burst flow.
+                            if message.source_peer.pubkey() == client.pubkey()
+                                && message.data.as_slice().first() == Some(&0x45)
+                                && message.data.as_slice().get(9) == Some(&17)
+                                && message.data.as_slice().get(20..22)
+                                    == Some(53124_u16.to_be_bytes().as_slice())
+                            {
+                                assert!(
+                                    remaining.remove(message.data.as_slice()),
+                                    "unexpected or duplicate outbound packet"
+                                );
+                                received.set(received.get() + 1);
+                            }
+                        }
+                    }
+                };
+                let send = async {
+                    started
+                        .outbound_tx
+                        .send(packets.clone())
+                        .await
+                        .expect("queue outbound burst");
+                };
+                tokio::join!(send, receive);
+            })
+            .await;
+            assert!(
+                result.is_ok(),
+                "outbound burst {burst}: received {}/64",
+                received.get()
+            );
+
+            let replies = packets
+                .iter()
+                .map(|packet| {
+                    ipv4_udp_packet(
+                        Ipv4Addr::new(8, 8, 8, 8),
+                        client_ip,
+                        443,
+                        53124,
+                        &packet[28..],
+                    )
+                })
+                .collect::<Vec<_>>();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let receive = async {
+                    let mut remaining = replies.iter().cloned().collect::<HashSet<_>>();
+                    while !remaining.is_empty() {
+                        let batch = started
+                            .inbound_rx
+                            .recv()
+                            .await
+                            .expect("mobile inbound burst");
+                        for packet in batch {
+                            assert!(
+                                remaining.remove(packet.as_slice()),
+                                "unexpected or duplicate inbound packet"
+                            );
+                        }
+                    }
+                };
+                let send = async {
+                    exit.send_batch_to_peer(client, replies.clone())
+                        .await
+                        .expect("send inbound burst");
+                };
+                tokio::join!(send, receive);
+            })
+            .await
+            .expect("inbound burst must drain without retransmission");
+        }
+    }
     async fn receive_mobile_inbound_packets_until(
         started: &mut MobileTunnelStarted,
         packets: &[Vec<u8>],

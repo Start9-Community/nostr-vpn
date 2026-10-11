@@ -33,7 +33,11 @@ impl MobileTunnel {
             config
         };
         mobile_debug_log("MobileTunnel::start building tokio runtime");
-        let runtime = RuntimeBuilder::new_multi_thread()
+        let mut runtime = RuntimeBuilder::new_multi_thread();
+        // Keep iOS async I/O on one worker; FIPS crypto has its own worker pool.
+        #[cfg(target_os = "ios")]
+        runtime.worker_threads(1);
+        let runtime = runtime
             .enable_all()
             .thread_name("nvpn-mobile-fips")
             .thread_stack_size(MOBILE_TUNNEL_WORKER_STACK_SIZE)

@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## 4.1.18 - 2026-10-09
+## 4.1.18 - 2026-10-11
 
 ### Release notes
 
@@ -31,6 +31,10 @@ settings and identities. iOS does not support paid exits.
 - Batch received discovery-cache writes and reuse unchanged event encodings
   to reduce background disk and CPU activity.
 - Reduce repeated discovery scans and idle packet-processing allocations.
+- Reduce iOS tunnel wakeups with lightweight link reports and one async I/O
+  worker, retaining the separate cryptographic worker pool.
+- Schedule TCP work at its actual deadlines and finish selected receive batches
+  before handling another command or timer.
 - Request machine ratings only from the local reputation authority while
   preserving paid-exit feedback and signed contact/mute recovery.
 - Bound mint polling and share request cooldowns across wallet and channel work.

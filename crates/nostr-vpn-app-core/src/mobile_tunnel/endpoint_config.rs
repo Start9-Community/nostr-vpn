@@ -195,6 +195,10 @@ fn fips_endpoint_config_for_platform(
     platform: RuntimePlatform,
 ) -> FipsConfig {
     let mut config = FipsConfig::new();
+    if platform == RuntimePlatform::Ios {
+        // Receiver reports retain link health with less idle reporting work.
+        config.node.mmp.mode = fips_core::mmp::MmpMode::Lightweight;
+    }
     // A first-adjacency seed may authenticate before its tree/bloom adverts
     // have converged. Reply-learned discovery can ask that live adjacency for
     // an addressless roster peer immediately instead of recording a bloom
