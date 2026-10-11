@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# This harness exercises concurrent lanes even when the parent release runs
+# serially. Serial runner behavior has separate orchestration coverage.
+export NVPN_RELEASE_GATE_SERIAL=0
 # Keep the escalation path covered without making this focused harness pay the
 # production two-second grace period.
 # shellcheck disable=SC2034 # Read by the sourced runner.
