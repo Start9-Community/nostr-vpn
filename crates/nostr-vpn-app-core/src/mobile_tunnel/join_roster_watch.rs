@@ -9,6 +9,9 @@ pub(super) struct JoinRosterWatch {
 }
 
 impl JoinRosterWatch {
+    // Apple creates a fallible kernel watcher; keep one constructor contract
+    // for callers on platforms whose polling watcher needs no setup.
+    #[cfg_attr(not(target_vendor = "apple"), allow(clippy::unnecessary_wraps))]
     pub(super) fn new(config_path: &Path) -> io::Result<Self> {
         #[cfg(not(target_vendor = "apple"))]
         let _ = config_path;
