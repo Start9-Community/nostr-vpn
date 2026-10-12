@@ -6,8 +6,6 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use std::net::Ipv6Addr;
-#[cfg(target_os = "linux")]
-use std::net::ToSocketAddrs;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command as ProcessCommand;
 
@@ -19,10 +17,6 @@ use anyhow::Result;
 use anyhow::anyhow;
 #[cfg(target_os = "linux")]
 use netdev::get_interfaces;
-#[cfg(target_os = "linux")]
-use netdev::interface::interface::Interface as NetworkInterface;
-#[cfg(target_os = "linux")]
-use nostr_vpn_core::config::AppConfig;
 
 #[cfg(target_os = "macos")]
 use crate::MacosRouteSpec;

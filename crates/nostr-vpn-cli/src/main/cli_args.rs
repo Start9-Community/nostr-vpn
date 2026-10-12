@@ -123,6 +123,13 @@ enum Command {
     /// Internal daemon entrypoint. Use `nvpn start --daemon`.
     #[command(hide = true)]
     Daemon(DaemonArgs),
+    /// Restore saved Linux egress protection before host networking starts.
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    EgressGuard {
+        #[arg(long)]
+        config: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Args)]

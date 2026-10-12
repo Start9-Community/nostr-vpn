@@ -15,6 +15,8 @@ async fn sync_fips_private_runtime(
     runtime: &mut Option<crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
     context: SyncFipsPrivateRuntimeContext<'_>,
 ) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    crate::linux_exit_intent::update(context.app, context.vpn_enabled)?;
     if !fips_private_runtime_active(context.app, context.vpn_enabled) {
         let runtime_replaced = runtime.is_some();
         finish_join_roster_deliveries_before_runtime_sync(

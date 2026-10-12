@@ -169,6 +169,23 @@ fn paid_exit_spilman_receiver_config(
     })
 }
 
+fn load_paid_exit_spilman_receiver(
+    data_dir: &Path,
+    config: FileSpilmanPaymentReceiverConfig,
+) -> Result<FileSpilmanPaymentReceiver, String> {
+    let client = crate::cashu_wallet_daemon::mint_http_client().map_err(|error| error.to_string())?;
+    Ok(FileSpilmanPaymentReceiver::load(data_dir, config)?.with_http_client(client))
+}
+
+async fn load_paid_exit_spilman_receiver_with_keyset_refresh(
+    data_dir: &Path,
+    config: FileSpilmanPaymentReceiverConfig,
+) -> Result<FileSpilmanPaymentReceiver, String> {
+    let receiver = load_paid_exit_spilman_receiver(data_dir, config)?;
+    receiver.refresh_keysets().await?;
+    Ok(receiver)
+}
+
 async fn try_load_paid_exit_spilman_receiver(
     config_path: &Path,
     paid_exit: &PaidExitConfig,
@@ -176,7 +193,7 @@ async fn try_load_paid_exit_spilman_receiver(
     let Some(receiver_config) = paid_exit_spilman_receiver_config(paid_exit) else {
         return (None, Some("no accepted Cashu mints configured".to_string()));
     };
-    match FileSpilmanPaymentReceiver::load_with_keyset_refresh(
+    match load_paid_exit_spilman_receiver_with_keyset_refresh(
         &paid_exit_wallet_data_dir(config_path),
         receiver_config,
     )

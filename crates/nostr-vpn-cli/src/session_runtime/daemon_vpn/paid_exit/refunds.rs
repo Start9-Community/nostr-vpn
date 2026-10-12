@@ -429,11 +429,13 @@ async fn restore_spilman_refund_through_daemon_wallet(
     client_store_lock: SharedSpilmanClientStoreLock,
     contacted_mint: &mut bool,
 ) -> Result<cashu_service::StreamingRouteRestoreCashuSpilmanRefundResult> {
-    cashu_service::restore_streaming_route_cashu_spilman_refund_with_wallet(
+    let client = crate::cashu_wallet_daemon::mint_http_client()?;
+    cashu_service::restore_streaming_route_cashu_spilman_refund_with_wallet_and_client(
         &paid_exit_wallet_data_dir(config_path),
         channel_id,
         client_store_lock,
         contacted_mint,
+        &client,
         |mint_url, unit, proofs_json| async move {
             let imported: cashu_service::CashuReceivedPayment = serde_json::from_value(
                 crate::cashu_wallet_daemon::request_daemon_cashu_wallet_worker(

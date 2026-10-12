@@ -537,10 +537,10 @@ installed_size = sum(
     1 + (len(raw) + 1023) // 1024 for raw, _mode in data_files.values()
 )
 depends = (
-    "curl, libadwaita-1-0 (>= 1.5~beta), libc6 (>= 2.39), "
+    "curl, iproute2, libadwaita-1-0 (>= 1.5~beta), libc6 (>= 2.39), "
     "libcairo2 (>= 1.2.4), libdbus-1-3 (>= 1.9.14), "
     "libglib2.0-0t64 (>= 2.54.0), libgtk-4-1 (>= 4.12.0), "
-    "xdg-utils, zbar-tools"
+    "nftables, xdg-utils, zbar-tools"
 )
 control = (
     "Package: nostr-vpn\n"

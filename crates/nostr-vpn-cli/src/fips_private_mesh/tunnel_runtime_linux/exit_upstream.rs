@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 impl FipsPrivateTunnelRuntime {
-    fn reconcile_linux_exit_node_forwarding(
+    async fn reconcile_linux_exit_node_forwarding(
         &mut self,
         config: &FipsPrivateTunnelConfig,
         seller_egress_ready: bool,
@@ -43,8 +43,9 @@ impl FipsPrivateTunnelRuntime {
                     if !crate::linux_wireguard_exit_ipv6_default(wireguard_exit) {
                         route_families.ipv6 = false;
                     }
-                    if let Err(error) =
-                        self.apply_linux_wireguard_exit_upstream(wireguard_exit, source_cidr)
+                    if let Err(error) = self
+                        .apply_linux_wireguard_exit_upstream(wireguard_exit, source_cidr)
+                        .await
                     {
                         let _ = self.cleanup_linux_exit_node_forwarding_rules();
                         self.block_linux_wireguard_exit_if_strict(config.exit_node_leak_protection);
@@ -210,11 +211,22 @@ impl FipsPrivateTunnelRuntime {
         Ok(())
     }
 
-    fn apply_linux_wireguard_exit_upstream(
+    async fn apply_linux_wireguard_exit_upstream(
         &mut self,
         config: &WireGuardExitConfig,
         source_cidr: &str,
     ) -> Result<()> {
+        let network = crate::linux_host_network::current()
+            .ok_or_else(|| anyhow!("Linux carrier network is not initialized"))?;
+        let endpoint =
+            fips_core::host_network::HostNetwork::resolve(network.as_ref(), &config.endpoint)
+                .await?
+                .into_iter()
+                .find(|address| address.is_ipv4())
+                .ok_or_else(|| anyhow!("WireGuard endpoint has no IPv4 address"))?;
+        let mut protected_config = config.clone();
+        protected_config.endpoint = endpoint.to_string();
+        let config = &protected_config;
         self.cleanup_pending_linux_wireguard_exit_obligations()
             .context("retry incomplete prior WireGuard apply cleanup")?;
         let mut previous_runtime = self.exit_node_runtime.wireguard_exit.clone();
@@ -233,16 +245,6 @@ impl FipsPrivateTunnelRuntime {
                 self.exit_node_runtime.wireguard_exit = Some(runtime);
                 return Err(error);
             }
-        }
-        if let Some(runtime) = previous_runtime.as_mut()
-            && let Some(refreshed_default) = crate::select_linux_wireguard_underlay_default_route(
-                self.original_default_route.as_deref(),
-                runtime.previous_default_route.as_deref(),
-                None,
-                config.interface.trim(),
-            )
-        {
-            runtime.refresh_underlay_default_route(refreshed_default);
         }
         let original_default_route = self.original_default_route.clone();
         let mesh_iface = self.iface.clone();
@@ -389,20 +391,11 @@ impl FipsPrivateTunnelRuntime {
     }
 
     fn block_linux_wireguard_exit_if_strict(&mut self, enabled: bool) {
-        if !enabled {
-            return;
+        if enabled {
+            if let Err(error) = crate::linux_exit_intent::pending() {
+                eprintln!("fips: failed to retain pending Linux egress protection: {error:#}");
+            }
         }
-        if let Err(error) = self.capture_linux_original_default_route(None, false) {
-            eprintln!("fips: failed to capture WireGuard underlay default route: {error:#}");
-        }
-        if let Err(error) = self.persist_network_cleanup_ownership() {
-            eprintln!(
-                "fips: refusing to block the Linux default route without durable cleanup \
-                 ownership: {error:#}"
-            );
-            return;
-        }
-        self.block_linux_original_default_route(false);
     }
 
     fn cleanup_linux_wireguard_exit_upstream(&mut self) -> Result<()> {
@@ -411,17 +404,11 @@ impl FipsPrivateTunnelRuntime {
     }
 
     fn cleanup_pending_linux_wireguard_exit_obligations(&mut self) -> Result<()> {
-        let pending = std::mem::take(
-            &mut self
-                .exit_node_runtime
-                .pending_wireguard_exit_cleanup,
-        );
+        let pending = std::mem::take(&mut self.exit_node_runtime.pending_wireguard_exit_cleanup);
         let mut remaining = Vec::new();
         let mut failures = Vec::new();
         for mut obligation in pending {
-            if let Err(error) =
-                crate::cleanup_linux_wireguard_exit_obligation(&mut obligation)
-            {
+            if let Err(error) = crate::cleanup_linux_wireguard_exit_obligation(&mut obligation) {
                 failures.push(format!("{error:#}"));
                 remaining.push(obligation);
             }

@@ -184,6 +184,7 @@ impl ControlPubsubFipsRuntime {
             .context("failed to bind standard FIPS Nostr pubsub service")?,
         );
         let relay = RelayProvider::start(
+            endpoint.host_network(),
             config.mode,
             relays,
             #[cfg(feature = "updater")]

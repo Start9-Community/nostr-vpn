@@ -94,11 +94,15 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     #[cfg(not(target_os = "windows"))]
     ensure_no_other_daemon_processes_for_config(&config_path, std::process::id())?;
     clear_daemon_control_ready(&config_path);
+    #[cfg(target_os = "linux")]
+    crate::linux_exit_intent::initialize(&config_path, args.paused.then_some(false))?;
     if repair_saved_network_state(&config_path)
         .context("daemon startup refused while saved network cleanup remains incomplete")?
     {
         transition_daemon_state_after_network_repair(&config_path)?;
     }
+    #[cfg(target_os = "linux")]
+    crate::linux_host_network::initialize().await?;
     let pid_file = daemon_pid_file_path(&config_path)?;
     if let Err(error) = write_daemon_pid_record(
         &pid_file,
@@ -173,6 +177,9 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
     let fips_pending_roster_restart_state = FipsPendingRosterRestartState::default();
     let iface = args.iface.clone();
     let mut tunnel_runtime = CliTunnelRuntime::new(iface.clone());
+    let vpn_enabled = daemon_start_vpn_enabled(&app, args.paused);
+    #[cfg(target_os = "linux")]
+    crate::linux_exit_intent::update(&app, vpn_enabled)?;
     let network_snapshot = capture_network_snapshot();
     let network_changed_at = Some(unix_timestamp());
     let timeout = network_probe_timeout(&app);
@@ -184,7 +191,6 @@ pub(super) async fn initialize_daemon_vpn(args: &DaemonArgs) -> Result<DaemonVpn
         None
     };
     let mut port_mapping_runtime = PortMappingRuntime::default();
-    let vpn_enabled = daemon_start_vpn_enabled(&app, args.paused);
     let (fips_tunnel_runtime, last_fips_endpoint_peer_signature) =
         if fips_private_runtime_active(&app, vpn_enabled) {
             let mut config = match fips_tunnel_config_from_app(FipsTunnelConfigInput {

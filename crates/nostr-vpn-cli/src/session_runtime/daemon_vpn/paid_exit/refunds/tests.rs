@@ -302,7 +302,13 @@
                 .is_none()
         );
         assert_eq!(runtime.active_channel_id.as_deref(), Some(channel_id));
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Establish that the worker has finished before testing how a
+        // suppressed background tick reaps it. TLS setup need not fit 100 ms.
+        let finished = runtime.result_rx.recv_timeout(Duration::from_secs(2))
+            .expect("refund worker finished");
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        finished_tx.send(finished).unwrap();
+        runtime.result_rx = finished_rx;
         write_daemon_control_request(&config_path, DaemonControlRequest::Reload)
             .expect("queue daemon control request");
 

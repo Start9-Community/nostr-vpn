@@ -122,7 +122,7 @@ fn service_uninstall(args: ServiceUninstallArgs) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        linux_uninstall_service()
+        linux_uninstall_service(&_config_path)
     }
 
     #[cfg(target_os = "windows")]

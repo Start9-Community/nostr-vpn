@@ -9,6 +9,12 @@ mod fips_host_tunnel;
 mod fips_private_mesh;
 #[cfg(unix)]
 mod join_request_ipc;
+#[cfg(any(target_os = "linux", test))]
+mod linux_exit_guard;
+#[cfg(any(target_os = "linux", test))]
+mod linux_exit_intent;
+#[cfg(any(target_os = "linux", test))]
+mod linux_host_network;
 #[cfg(target_os = "linux")]
 mod linux_network;
 #[cfg(any(target_os = "macos", test))]

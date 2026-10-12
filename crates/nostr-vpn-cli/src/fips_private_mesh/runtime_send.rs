@@ -13,6 +13,10 @@ impl FipsPrivateMeshRuntime {
             .identity_nsec(identity_nsec)
             .local_rendezvous()
             .without_system_tun();
+        #[cfg(target_os = "linux")]
+        if let Some(network) = crate::linux_host_network::current() {
+            endpoint_builder = endpoint_builder.host_network(network);
+        }
         if let Some(scope) = scope.map(|scope| scope.trim().to_string()).filter(|s| !s.is_empty())
         {
             endpoint_builder = endpoint_builder.discovery_scope(scope);

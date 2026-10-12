@@ -8,7 +8,7 @@ use crab_nat::{
     TimeoutConfig,
 };
 use igd_next::aio::Gateway as UpnpGateway;
-use igd_next::aio::tokio::{Tokio as UpnpProvider, search_gateway};
+use igd_next::aio::tokio::search_gateway_with_provider;
 use igd_next::{PortMappingProtocol, SearchOptions};
 use nostr_vpn_core::diagnostics::{PortMappingStatus, ProbeState, ProbeStatus};
 use tokio::time::timeout as tokio_timeout;
@@ -21,6 +21,9 @@ use super::probes::{
 
 const PORT_MAPPING_LEASE_SECS: u32 = 3_600;
 const UPNP_DESCRIPTION: &str = "nostr-vpn";
+
+mod host;
+use host::UpnpProvider;
 
 #[derive(Debug, Clone)]
 enum ActivePortMappingLease {
@@ -94,12 +97,16 @@ impl PortMappingRuntime {
             timeout_config: Some(timeout_config),
         };
 
-        match CrabPortMapping::new(
+        let protector: crab_nat::SocketProtector = std::sync::Arc::new(|socket| {
+            super::probes::protect_control_socket(&socket2::SockRef::from(socket))
+        });
+        match CrabPortMapping::new_with_socket_protector(
             gateway,
             local_ip,
             InternetProtocol::Udp,
             NonZeroU16::new(listen_port).ok_or_else(|| anyhow!("listen port must be non-zero"))?,
             mapping_options,
+            protector.clone(),
         )
         .await
         {
@@ -107,10 +114,14 @@ impl PortMappingRuntime {
                 let (protocol, external_ip) = match mapping.mapping_type() {
                     PortMappingType::NatPmp => (
                         "nat_pmp".to_string(),
-                        crab_nat::natpmp::external_address(gateway, Some(timeout_config))
-                            .await
-                            .ok()
-                            .map(IpAddr::V4),
+                        crab_nat::natpmp::external_address_with_socket_protector(
+                            gateway,
+                            Some(timeout_config),
+                            protector,
+                        )
+                        .await
+                        .ok()
+                        .map(IpAddr::V4),
                     ),
                     PortMappingType::Pcp { external_ip, .. } => {
                         ("pcp".to_string(), Some(external_ip))
@@ -164,7 +175,7 @@ impl PortMappingRuntime {
             single_search_timeout: Some(timeout.min(Duration::from_millis(500))),
             ..SearchOptions::default()
         };
-        match search_gateway(search_options).await {
+        match search_gateway_with_provider(search_options, UpnpProvider::new()?).await {
             Ok(gateway) => {
                 let endpoint = match tokio_timeout(
                     timeout,

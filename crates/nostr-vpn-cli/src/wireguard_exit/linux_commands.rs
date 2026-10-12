@@ -200,21 +200,6 @@ pub(super) fn lowest_metric_default_route(output: &str) -> Option<(String, Strin
         .map(|(_, line, dev)| (line, dev))
 }
 
-pub(super) fn linux_wireguard_exit_endpoint_spec(
-    runner: &mut impl LinuxCommandRunner,
-    endpoint: std::net::SocketAddrV4,
-    iface: &str,
-    previous_default_route: Option<&str>,
-) -> Result<crate::LinuxEndpointBypassRoute> {
-    let host = *endpoint.ip();
-    let output = command_output_checked(
-        runner,
-        "ip",
-        &strings(&["-4", "route", "get", &host.to_string()]),
-    )?;
-    crate::linux_endpoint_bypass_route_from_output(host, &output, iface, previous_default_route)
-}
-
 pub(super) fn linux_wireguard_link_exists(
     runner: &mut impl LinuxCommandRunner,
     iface: &str,
@@ -338,6 +323,7 @@ pub(super) fn linux_wireguard_kernel_config(
     let mut lines = vec![
         "[Interface]".to_string(),
         format!("PrivateKey = {}", config.private_key.trim()),
+        format!("FwMark = {}", crate::linux_host_network::CARRIER_MARK),
         String::new(),
         "[Peer]".to_string(),
         format!("PublicKey = {}", config.peer_public_key.trim()),
@@ -464,91 +450,6 @@ pub(super) fn add_linux_wireguard_exit_policy_rule(
             &WIREGUARD_EXIT_TABLE.to_string(),
         ]),
     )
-}
-
-pub(super) fn apply_linux_wireguard_exit_default_route(
-    runner: &mut impl LinuxCommandRunner,
-    iface: &str,
-    address: &str,
-    previous_routes: &[String],
-    mut retain_discovered_routes: impl FnMut(&[String]) -> Result<()>,
-) -> Result<()> {
-    for route in previous_routes {
-        let route_interface = crate::linux_default_route_spec_from_line(route)
-            .map(|route| route.dev)
-            .ok_or_else(|| anyhow!("captured default route has no interface: {route}"))?;
-        if route_interface == iface {
-            continue;
-        }
-        let mut args = strings(&["-4", "route", "del"]);
-        args.extend(
-            crate::linux_route_replay_args(route)
-                .into_iter()
-                .map(ToOwned::to_owned),
-        );
-        run_checked_allow_absent(runner, "ip", &args)
-            .with_context(|| format!("failed to invalidate underlay default route '{route}'"))?;
-    }
-    let mut args = strings(&["-4", "route", "replace", "default", "dev", iface]);
-    if let Ok(source) = crate::strip_cidr(address).parse::<std::net::Ipv4Addr>() {
-        args.extend(strings(&["src", &source.to_string()]));
-    }
-    run_checked(runner, "ip", &args)?;
-
-    let mut retained_routes = previous_routes
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    let mut last_delete_error = None;
-    for _ in 0..3 {
-        let current =
-            command_output_checked(runner, "ip", &strings(&["-4", "route", "show", "default"]))?;
-        let physical_routes = crate::linux_default_route_specs_from_output(&current)
-            .filter(|route| route.dev != iface)
-            .map(|route| route.line)
-            .collect::<Vec<_>>();
-        if physical_routes.is_empty() {
-            return Ok(());
-        }
-        let discovered = physical_routes
-            .iter()
-            .filter(|route| !retained_routes.contains(*route))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !discovered.is_empty() {
-            retain_discovered_routes(&discovered)
-                .context("failed to retain reasserted physical defaults before deletion")?;
-            retained_routes.extend(discovered);
-        }
-        for route in physical_routes {
-            let mut delete_args = strings(&["-4", "route", "del"]);
-            delete_args.extend(
-                crate::linux_route_replay_args(&route)
-                    .into_iter()
-                    .map(ToOwned::to_owned),
-            );
-            if let Err(error) = run_checked_allow_absent(runner, "ip", &delete_args) {
-                last_delete_error = Some(error);
-            }
-        }
-    }
-    let current =
-        command_output_checked(runner, "ip", &strings(&["-4", "route", "show", "default"]))?;
-    let remaining = crate::linux_default_route_specs_from_output(&current)
-        .filter(|route| route.dev != iface)
-        .map(|route| route.line)
-        .collect::<Vec<_>>();
-    if remaining.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "unmanaged IPv4 defaults remain after three strict-exit reconciliation attempts: {}{}",
-            remaining.join("; "),
-            last_delete_error.map_or_else(String::new, |error| format!(
-                "; last delete error: {error:#}"
-            ))
-        ))
-    }
 }
 
 pub(super) fn restore_linux_wireguard_config(

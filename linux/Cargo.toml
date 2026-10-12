@@ -30,7 +30,7 @@ copyright = "Nostr VPN"
 extended-description = "Simple private networks over FIPS and Nostr."
 section = "net"
 priority = "optional"
-depends = "$auto, curl, xdg-utils, zbar-tools"
+depends = "$auto, curl, iproute2, nftables, xdg-utils, zbar-tools"
 assets = [
     ["target/release/nostr-vpn", "usr/bin/", "755"],
     ["../target/release/nvpn", "usr/bin/nvpn", "755"],

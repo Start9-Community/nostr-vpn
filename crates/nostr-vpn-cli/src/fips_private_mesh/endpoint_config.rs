@@ -798,7 +798,7 @@ pub(crate) struct FipsPrivateTunnelConfig {
     open_discovery_restart_max_pending: usize,
     open_discovery_max_pending: usize,
     mesh_mtu: MeshMtu,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     pub(crate) control_plane_bypass_hosts: Vec<Ipv4Addr>,
 }
 

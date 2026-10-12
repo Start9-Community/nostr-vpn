@@ -1,22 +1,9 @@
+#[cfg(target_os = "macos")]
 use super::*;
+#[cfg(target_os = "macos")]
 use nostr_vpn_core::paid_route_store::update_paid_route_store;
 
-#[cfg(target_os = "linux")]
-#[test]
-fn disabled_fips_traversal_does_not_install_stun_bypass_routes() {
-    let mut app = AppConfig::generated();
-    app.nostr.relays.clear();
-    let stun_ip = Ipv4Addr::new(198, 51, 100, 45);
-    app.nat.stun_servers = vec![format!("stun:{stun_ip}:3478")];
-    for (discovery, webrtc) in [(false, false), (true, false), (false, true), (true, true)] {
-        app.fips_nostr_discovery_enabled = discovery;
-        app.fips_webrtc_enabled = webrtc;
-        let hosts =
-            crate::platform_routing::control_plane_bypass_ipv4_hosts_from_interfaces(&app, &[]);
-        assert_eq!(hosts.contains(&stun_ip), discovery || webrtc);
-    }
-}
-
+#[cfg(target_os = "macos")]
 #[test]
 fn paid_modes_keep_wallet_mints_reachable_outside_the_route_they_fund() {
     let dir = std::env::temp_dir().join(format!("nvpn-mint-routes-{}", uuid::Uuid::new_v4()));

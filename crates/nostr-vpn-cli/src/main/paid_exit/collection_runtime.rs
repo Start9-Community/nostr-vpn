@@ -140,7 +140,7 @@ async fn collect_seller_channel(
     );
     // Cached keysets and completed close receipts must remain usable during a
     // mint outage. A blind keyset refresh would block offline wallet recovery.
-    let receiver = FileSpilmanPaymentReceiver::load(
+    let receiver = load_paid_exit_spilman_receiver(
         &directory,
         FileSpilmanPaymentReceiverConfig::new([mint_url.to_owned()]),
     )

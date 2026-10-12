@@ -216,7 +216,7 @@ pub(super) struct PaidExitApplySessionOpensResult {
 pub(super) enum PaidExitSessionOpenResult {
     None,
     Sent,
-    FellBackDirect,
+    SessionFailed,
 }
 
 pub(super) async fn send_selected_paid_exit_session_open(
@@ -242,10 +242,10 @@ pub(super) async fn send_selected_paid_exit_session_open(
         reconcile_selected_paid_exit_session(app, config_path, &seller_pubkey, now_unix)?;
     if reconciled.selected_session_timed_out {
         eprintln!(
-            "paid-exit: seller did not acknowledge selected session {}; falling back to direct internet",
+            "paid-exit: seller did not acknowledge selected session {}; retaining the selected paid exit",
             reconciled.selected_session_id
         );
-        return Ok(PaidExitSessionOpenResult::FellBackDirect);
+        return Ok(PaidExitSessionOpenResult::SessionFailed);
     }
     let store_path = paid_route_store_file_path(config_path);
     let store = load_paid_route_store(&store_path)?;
@@ -285,10 +285,6 @@ pub(super) fn reconcile_selected_paid_exit_session(
         }
         Ok(reconciled)
     })?;
-    if manual && reconciled.selected_session_timed_out {
-        app.set_internet_source(nostr_vpn_core::config::InternetSource::Direct);
-        app.save(config_path)?;
-    }
     Ok(reconciled)
 }
 

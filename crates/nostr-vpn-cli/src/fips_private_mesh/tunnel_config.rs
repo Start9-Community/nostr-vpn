@@ -558,7 +558,7 @@ impl FipsPrivateTunnelConfig {
             open_discovery_restart_max_pending,
             open_discovery_max_pending,
             mesh_mtu: private_mesh_mtu_from_app(Some(app)),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(target_os = "macos")]
             control_plane_bypass_hosts: Vec::new(),
         })
     }
@@ -729,7 +729,7 @@ impl FipsPrivateTunnelConfig {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", test))]
     fn endpoint_hint_ipv4_hosts(&self) -> Vec<Ipv4Addr> {
         let mut hosts = self
             .endpoint_peers
@@ -744,7 +744,7 @@ impl FipsPrivateTunnelConfig {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 fn route_targets_include_ipv4_host(route_targets: &[String], host: Ipv4Addr) -> bool {
     route_targets.iter().any(|route| {
         let Some((target, bits)) = route.split_once('/') else {
@@ -827,7 +827,7 @@ fn fips_host_config_changed(
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 fn endpoint_transport_ipv4_host(addr: &str) -> Option<Ipv4Addr> {
     if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
         return match socket_addr.ip() {
@@ -873,8 +873,6 @@ pub(crate) struct FipsPrivateTunnelRuntime {
     macos_endpoint_bypass_verified_at: Option<Instant>,
     #[cfg(target_os = "linux")]
     original_default_route: Option<String>,
-    #[cfg(target_os = "linux")]
-    ethernet_underlay_default_route: Option<String>,
     #[cfg(target_os = "linux")]
     original_default_ipv6_route: Option<String>,
     #[cfg(target_os = "linux")]

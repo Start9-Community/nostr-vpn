@@ -330,7 +330,7 @@ pub(crate) fn daemon_log_file_path(config_path: &Path) -> Result<PathBuf> {
     Ok(config_path.parent().unwrap_or_else(|| Path::new(".")).join("daemon.log"))
 }
 
-fn runtime_open_options_no_follow() -> OpenOptions {
+pub(crate) fn runtime_open_options_no_follow() -> OpenOptions {
     #[cfg(unix)]
     let mut options = OpenOptions::new();
     #[cfg(not(unix))]

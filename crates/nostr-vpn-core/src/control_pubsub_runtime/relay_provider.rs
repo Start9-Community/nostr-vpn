@@ -16,6 +16,7 @@ struct RelayProvider {
 
 impl RelayProvider {
     async fn start(
+        host_network: Option<Arc<dyn fips_core::host_network::HostNetwork>>,
         mode: NostrPubsubMode,
         relays: Vec<String>,
         #[cfg(feature = "updater")] update_events: &UpdateEventCache,
@@ -26,11 +27,16 @@ impl RelayProvider {
         if mode != NostrPubsubMode::Relay || relays.is_empty() {
             return Ok(None);
         }
-        let bus = Arc::new(
-            RelayEventBus::new(relays, RELAY_QUERY_TIMEOUT)
-                .await
-                .context("failed to start configured Nostr pubsub relay provider")?,
-        );
+        let bus = if let Some(network) = host_network {
+            let client = Client::builder()
+                .signer(nostr_sdk::Keys::generate())
+                .websocket_transport(fips_core::host_network::NostrHostTransport(network))
+                .build();
+            RelayEventBus::with_client(client, relays, RELAY_QUERY_TIMEOUT).await
+        } else {
+            RelayEventBus::new(relays, RELAY_QUERY_TIMEOUT).await
+        }.context("failed to start configured Nostr pubsub relay provider")?;
+        let bus = Arc::new(bus);
         let (notification_tx, notifications) = mpsc::channel(RELAY_REPLAY_LIMIT * 5);
         let ingress_tx = notification_tx.clone();
         let subscription = NostrEventSubscriber::subscribe(

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Supply the already-built test executable and production nvpn binary.
+# No build, host routes, host firewall, service or user configuration is changed.
+if [[ $# -lt 2 || $# -gt 3 || $(uname -s) != Linux ]]; then
+  echo 'usage: test-linux-egress-lifecycle <test-executable> <nvpn-binary> [exact-test-name]' >&2
+  exit 2
+fi
+test_bin=$(realpath "$1")
+nvpn_bin=$(realpath "$2")
+test_name=${3:-daemon_exit_intent_survives_restart_and_tunnel_loss}
+exec sudo -n unshare --mount --net --pid --fork --kill-child --mount-proc \
+  bash -euo pipefail -c '
+    mount --make-rprivate /
+    mount -t sysfs sysfs /sys
+    mount -t tmpfs tmpfs /run
+    mount -t tmpfs tmpfs /var/lib
+    mount -t tmpfs tmpfs /tmp
+    mount -t tmpfs tmpfs /root
+    mkdir /tmp/nvpn-tools
+    for tool in iptables ip6tables; do
+      ln -s "$(readlink -f "$(command -v "$tool")")" "/tmp/nvpn-tools/$tool"
+    done
+    export PATH="/tmp/nvpn-tools:$PATH"
+    cp /etc/protocols /tmp/fixture-protocols
+    mount -t tmpfs tmpfs /etc
+    mv /tmp/fixture-protocols /etc/protocols
+    printf "root:x:0:0:root:/root:/bin/bash\n" > /etc/passwd
+    printf "root:x:0:\n" > /etc/group
+    printf "127.0.0.1 localhost\n::1 localhost\n" > /etc/hosts
+    printf "hosts: files dns\npasswd: files\ngroup: files\n" > /etc/nsswitch.conf
+    printf "nameserver 192.0.2.2\noptions timeout:1 attempts:1\n" > /etc/resolv.conf
+    export PYTHONDONTWRITEBYTECODE=1
+    mkdir /run/openrc
+    touch /var/lib/nvpn-egress-fixture
+    export NVPN_EGRESS_ISOLATED=1 NVPN_TEST_BIN="$2"
+    exec "$1" --ignored --exact "$3" --nocapture
+  ' bash "$test_bin" "$nvpn_bin" "$test_name"

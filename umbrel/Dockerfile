@@ -48,6 +48,7 @@ RUN apt-get update \
       iptables \
       iputils-ping \
       libdbus-1-3 \
+      nftables \
       procps \
       wireguard-tools \
     && rm -rf /var/lib/apt/lists/*

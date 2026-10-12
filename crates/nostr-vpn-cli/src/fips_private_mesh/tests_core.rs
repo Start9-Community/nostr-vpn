@@ -49,13 +49,7 @@
         BorrowedTunFd, TunPipelinePacket, raw_write_packet_to_tun,
         tun_pipeline_packet_targets_fips_host,
     };
-    use super::{
-        linux_endpoint_bypass_hosts_unchanged, linux_interface_state_matches_json,
-        linux_ipv4_underlay_capture_requested, linux_ipv4_underlay_restore_due,
-        linux_missing_ipv4_underlay_route_allowed, linux_reuse_cached_underlay_route,
-        linux_strict_exit_requested,
-        linux_withhold_default_route_for_missing_peer_endpoint,
-    };
+    use super::linux_interface_state_matches_json;
     #[cfg(target_os = "linux")]
     use super::LINUX_VIRTIO_NET_HDR_LEN;
     use fips_endpoint::{
@@ -124,81 +118,6 @@
         assert!(tun_pipeline_packet_targets_fips_host(&fips));
         assert!(!tun_pipeline_packet_targets_fips_host(&other_ula));
         assert!(!tun_pipeline_packet_targets_fips_host(&mesh));
-    }
-
-    #[test]
-    fn unchanged_linux_endpoint_bypass_hosts_skip_route_reconciliation() {
-        let current = vec![
-            "198.51.100.7/32".to_string(),
-            "203.0.113.8/32".to_string(),
-        ];
-        let same_hosts = vec![
-            "203.0.113.8".parse().unwrap(),
-            "198.51.100.7".parse().unwrap(),
-            "203.0.113.8".parse().unwrap(),
-        ];
-        let changed_hosts = vec![
-            "198.51.100.7".parse().unwrap(),
-            "203.0.113.9".parse().unwrap(),
-        ];
-
-        assert!(linux_endpoint_bypass_hosts_unchanged(&current, &same_hosts));
-        assert!(!linux_endpoint_bypass_hosts_unchanged(
-            &current,
-            &changed_hosts,
-        ));
-    }
-
-    #[test]
-    fn ethernet_fips_underlay_does_not_need_an_ip_endpoint_bypass() {
-        let routes = vec!["0.0.0.0/0".to_string()];
-        let no_hosts = Vec::<Ipv4Addr>::new();
-
-        assert!(linux_withhold_default_route_for_missing_peer_endpoint(
-            &routes,
-            &no_hosts,
-            false,
-        ));
-        assert!(!linux_withhold_default_route_for_missing_peer_endpoint(
-            &routes,
-            &no_hosts,
-            true,
-        ));
-        assert!(!linux_withhold_default_route_for_missing_peer_endpoint(
-            &routes,
-            &["198.51.100.7".parse().unwrap()],
-            false,
-        ));
-    }
-
-    #[test]
-    fn ethernet_fips_underlay_allows_an_absent_ip_default_route() {
-        assert!(linux_missing_ipv4_underlay_route_allowed(true, false));
-        assert!(!linux_missing_ipv4_underlay_route_allowed(false, false));
-        assert!(!linux_missing_ipv4_underlay_route_allowed(true, true));
-    }
-
-    #[test]
-    fn ethernet_fips_underlay_reuses_its_cached_default_after_exit_activation() {
-        let cached = "default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.10";
-        let mut cleanup_route = None;
-
-        assert!(linux_reuse_cached_underlay_route(
-            &mut cleanup_route,
-            Some(cached),
-            "eth0",
-        ));
-        assert_eq!(cleanup_route.as_deref(), Some(cached));
-        assert!(!linux_reuse_cached_underlay_route(
-            &mut cleanup_route,
-            Some(cached),
-            "eth1",
-        ));
-        assert!(!linux_reuse_cached_underlay_route(
-            &mut cleanup_route,
-            None,
-            "eth0",
-        ));
     }
 
     #[test]
@@ -337,39 +256,6 @@
             1150,
             Some(4096),
         ));
-    }
-
-    #[test]
-    fn linux_leak_protection_is_strict_only_when_an_exit_is_requested() {
-        assert!(!linux_strict_exit_requested(&[], true));
-        assert!(!linux_strict_exit_requested(
-            &["10.0.0.0/8".to_string()],
-            true,
-        ));
-        assert!(linux_strict_exit_requested(
-            &["0.0.0.0/0".to_string()],
-            true,
-        ));
-        assert!(linux_strict_exit_requested(
-            &["::/0".to_string()],
-            true,
-        ));
-        assert!(!linux_strict_exit_requested(
-            &["0.0.0.0/0".to_string()],
-            false,
-        ));
-    }
-
-    #[test]
-    fn linux_wireguard_only_exit_keeps_underlay_capture_active() {
-        assert!(linux_ipv4_underlay_capture_requested(&[], true));
-        assert!(!linux_ipv4_underlay_restore_due(true, false, true, false));
-        assert!(linux_ipv4_underlay_capture_requested(
-            &["0.0.0.0/0".to_string()],
-            false,
-        ));
-        assert!(linux_ipv4_underlay_restore_due(true, false, false, false));
-        assert!(!linux_ipv4_underlay_capture_requested(&[], false));
     }
 
     #[test]

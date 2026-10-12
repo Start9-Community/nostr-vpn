@@ -1,12 +1,21 @@
 pub(crate) fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
-    write_runtime_file_atomically_with_mode(path, contents, 0o644)
+    write_runtime_file_atomically_with_mode(path, contents, 0o644, false)
+}
+
+pub(crate) fn write_runtime_file_durably(path: &Path, contents: &[u8]) -> Result<()> {
+    write_runtime_file_atomically_with_mode(path, contents, 0o644, true)
 }
 
 pub(crate) fn write_private_runtime_file_atomically(
     path: &Path,
     contents: &[u8],
 ) -> Result<()> {
-    write_runtime_file_atomically_with_mode(path, contents, 0o600)
+    write_runtime_file_atomically_with_mode(path, contents, 0o600, false)
+}
+
+/// Ownership and protection intent must survive loss of the daemon or power.
+pub(crate) fn write_private_runtime_file_durably(path: &Path, contents: &[u8]) -> Result<()> {
+    write_runtime_file_atomically_with_mode(path, contents, 0o600, true)
 }
 
 #[cfg(target_os = "macos")]
@@ -14,8 +23,9 @@ fn write_runtime_file_atomically_with_mode(
     path: &Path,
     contents: &[u8],
     unix_mode: u32,
+    durable: bool,
 ) -> Result<()> {
-    fs::write_atomic(path, contents, unix_mode, None, false).map_err(Into::into)
+    fs::write_atomic(path, contents, unix_mode, None, durable).map_err(Into::into)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -23,6 +33,7 @@ fn write_runtime_file_atomically_with_mode(
     path: &Path,
     contents: &[u8],
     unix_mode: u32,
+    durable: bool,
 ) -> Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -89,9 +100,12 @@ fn write_runtime_file_atomically_with_mode(
             )
         });
     }
-    // These files are runtime status/control files. Keeping the replace atomic
-    // matters for readers, but forcing every status update to durable storage
-    // adds visible latency on macOS and is not needed for crash recovery.
+    if durable {
+        if let Err(error) = file.sync_all() {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error).context("failed to sync private runtime intent");
+        }
+    }
     drop(file);
     fs::rename(&temp_path, path).with_context(|| {
         format!(
@@ -100,6 +114,10 @@ fn write_runtime_file_atomically_with_mode(
             temp_path.display()
         )
     })?;
+    #[cfg(unix)]
+    if durable {
+        fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 

@@ -88,6 +88,10 @@ loop {
             }
         }
         _ = intervals.tunnel_heartbeat.tick(), if background_ready => {
+            #[cfg(target_os = "linux")]
+            if let Err(error) = crate::linux_exit_intent::maintain() {
+                eprintln!("daemon: Linux egress protection repair failed: {error:#}");
+            }
             if observe_wall_time_jump(
                 &mut last_runtime_heartbeat_at,
                 unix_timestamp(),
@@ -152,13 +156,6 @@ loop {
             let wireguard_exit_interface =
                 (app.wireguard_exit.enabled && app.wireguard_exit.configured())
                     .then_some(app.wireguard_exit.interface.trim());
-            #[cfg(target_os = "linux")]
-            let default_route_hints = fips_tunnel_runtime
-                .as_ref()
-                .map_or_else(Vec::new, |runtime| {
-                    runtime.linux_underlay_default_route_hints()
-                });
-            #[cfg(not(target_os = "linux"))]
             let default_route_hints = Vec::new();
             let sampled_network = capture_network_snapshot_for_daemon(
                 &iface,
@@ -172,10 +169,12 @@ loop {
                 &sampled_network,
                 &mut last_network_sample_diagnostic,
             );
-            let wireguard_network_state_drift =
-                app.wireguard_exit.enabled
-                    && app.wireguard_exit.configured()
-                    && sampled_network.live_unmanaged_ipv4_default_present;
+            // Linux now preserves physical defaults; their presence is not
+            // evidence of a broken VPN route and must not trigger a refresh loop.
+            let wireguard_network_state_drift = !cfg!(target_os = "linux")
+                && app.wireguard_exit.enabled
+                && app.wireguard_exit.configured()
+                && sampled_network.live_unmanaged_ipv4_default_present;
             let latest_snapshot = prefer_nonself_tunnel_snapshot(
                 &tunnel_runtime,
                 wireguard_exit_interface,

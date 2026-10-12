@@ -198,7 +198,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                     )
                     .await
                     {
-                        Ok(PaidExitSessionOpenResult::FellBackDirect) => {
+                        Ok(PaidExitSessionOpenResult::SessionFailed) => {
                             if let Err(error) = refresh_fips_tunnel_config(
                                 runtime,
                                 &app,
@@ -211,13 +211,9 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                             .await
                             {
                                 vpn_status = format!(
-                                    "paid-exit direct fallback refresh failed ({error})"
+                                    "paid-exit failed-session refresh failed ({error})"
                                 );
                             }
-                            // The paid route used the secure-DNS runtime. Once that
-                            // runtime is removed, restore direct-mode split MagicDNS
-                            // so private peers such as mini.nvpn remain resolvable.
-                            refresh_or_start_split_magic_dns(&mut magic_dns_runtime, &app);
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -533,7 +529,11 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                             server_active,
                         )
                         .to_string();
-                        persist_result.map(|_| ())
+                        persist_result.and_then(|_| {
+                            #[cfg(target_os = "linux")]
+                            crate::linux_exit_intent::update(&app, vpn_enabled)?;
+                            Ok(())
+                        })
                     }
                     DaemonControlRequest::Resume => {
                         vpn_enabled = true;
@@ -553,7 +553,11 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                             )
                             .to_string();
                         }
-                        persist_result.map(|_| ())
+                        persist_result.and_then(|_| {
+                            #[cfg(target_os = "linux")]
+                            crate::linux_exit_intent::update(&app, vpn_enabled)?;
+                            Ok(())
+                        })
                     }
                     DaemonControlRequest::Reload => {
                         match update_daemon_config_from_staged_request(&config_path) {
@@ -577,6 +581,11 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                                     "failed to preserve daemon join request",
                                                 )),
                                             );
+                                            continue;
+                                        }
+                                        #[cfg(target_os = "linux")]
+                                        if let Err(error) = crate::linux_exit_intent::update(&reloaded_app, vpn_enabled) {
+                                            let _ = write_daemon_control_result(&config_path, request, Err(error));
                                             continue;
                                         }
                                         let reload = build_daemon_reload_config(

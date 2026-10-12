@@ -58,25 +58,9 @@ pub(crate) fn write_daemon_network_cleanup_state(
         .with_context(|| format!("failed to persist daemon cleanup file {}", path.display()));
     #[cfg(not(target_os = "macos"))]
     {
-        write_private_runtime_file_atomically(path, raw.as_bytes())
+        write_private_runtime_file_durably(path, raw.as_bytes())
             .with_context(|| format!("failed to write daemon cleanup file {}", path.display()))?;
         set_daemon_cleanup_file_permissions(path)?;
-        fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .and_then(|file| file.sync_all())
-            .with_context(|| format!("failed to sync daemon cleanup file {}", path.display()))?;
-        #[cfg(unix)]
-        if let Some(parent) = path.parent() {
-            fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .with_context(|| {
-                    format!(
-                        "failed to sync daemon cleanup directory {}",
-                        parent.display()
-                    )
-                })?;
-        }
         Ok(())
     }
 }
