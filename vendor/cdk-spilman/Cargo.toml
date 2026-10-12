@@ -108,7 +108,8 @@ features = [
 version = "1"
 
 [dependencies.serde_yaml]
-version = "0.9"
+version = "0.9.42"
+package = "serde_norway"
 optional = true
 
 [dependencies.thiserror]

@@ -58,6 +58,7 @@ settings and identities. iOS does not support paid exits.
   the active exit changes during a probe.
 - Stop retrying payments for unfunded sessions and retire expired free trials
   without contacting the mint.
+- Use a maintained YAML parser for mesh and payment-host configuration.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.
