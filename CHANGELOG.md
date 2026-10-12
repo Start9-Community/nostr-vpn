@@ -23,6 +23,8 @@ settings and identities. iOS does not support paid exits.
 - Correct FIPS TCP transport handling for reliable peer connections.
 - Keep joining devices pending until their signed network roster arrives,
   and preserve accepted membership after relaunch.
+- Return to the device list after approving a device on Linux while its
+  confirmation is pending.
 - Open pasted paid-exit provider links immediately on macOS.
 - Collect seller channels promptly after an accepted close request and before
   buyer refund eligibility, retaining settlement retries.

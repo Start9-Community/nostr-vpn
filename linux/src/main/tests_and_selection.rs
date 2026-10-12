@@ -125,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_manual_add_is_not_hidden_by_a_later_connect_error() {
+    fn completed_manual_add_is_shown_while_confirmation_and_connection_are_pending() {
         let npub = "npub1joined";
         let state = NativeAppState {
             error: "nvpn start failed".to_string(),
@@ -133,7 +133,8 @@ mod tests {
                 id: "home".to_string(),
                 participants: vec![NativeParticipantState {
                     npub: npub.to_string(),
-                    roster_accepted: true,
+                    roster_accepted: false,
+                    state: "pending".to_string(),
                     ..NativeParticipantState::default()
                 }],
                 ..NativeNetworkState::default()

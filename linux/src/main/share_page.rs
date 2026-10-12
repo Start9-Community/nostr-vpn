@@ -431,6 +431,6 @@ fn manual_participant_added(state: &NativeAppState, network_id: &str, npub: &str
             && network
                 .participants
                 .iter()
-                .any(|participant| participant.npub == npub && participant.roster_accepted)
+                .any(|participant| participant.npub == npub)
     })
 }
