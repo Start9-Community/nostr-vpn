@@ -430,19 +430,27 @@ async fn restore_spilman_refund_through_daemon_wallet(
     contacted_mint: &mut bool,
 ) -> Result<cashu_service::StreamingRouteRestoreCashuSpilmanRefundResult> {
     cashu_service::restore_streaming_route_cashu_spilman_refund_with_wallet(
-        &paid_exit_wallet_data_dir(config_path), channel_id, client_store_lock, contacted_mint,
+        &paid_exit_wallet_data_dir(config_path),
+        channel_id,
+        client_store_lock,
+        contacted_mint,
         |mint_url, unit, proofs_json| async move {
             let imported: cashu_service::CashuReceivedPayment = serde_json::from_value(
                 crate::cashu_wallet_daemon::request_daemon_cashu_wallet_worker(
                     config_path,
                     crate::cashu_wallet_daemon::DaemonCashuWalletCommand::ImportProofs {
-                        mint_url, unit, proofs_json,
+                        mint_url,
+                        unit,
+                        proofs_json,
                     },
-                ).await?,
-            ).context("daemon returned an invalid Cashu refund import response")?;
+                )
+                .await?,
+            )
+            .context("daemon returned an invalid Cashu refund import response")?;
             Ok(imported.amount_sat)
         },
-    ).await
+    )
+    .await
 }
 
 fn apply_paid_exit_buyer_refund_attempt(

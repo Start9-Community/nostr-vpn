@@ -223,7 +223,12 @@ impl PaidRouteStore {
             });
 
         if already_applied {
-            self.ensure_seller_lease_slot_available(&service_id, &lease_id, &channel_id, &buyer_npub)?;
+            self.ensure_seller_lease_slot_available(
+                &service_id,
+                &lease_id,
+                &channel_id,
+                &buyer_npub,
+            )?;
             // Lost ACKs and reordered cumulative payments must drain even after
             // settlement. Validate the claim, but retain the stronger persisted
             // payment and lifecycle; this never grants credit or reopens a route.
