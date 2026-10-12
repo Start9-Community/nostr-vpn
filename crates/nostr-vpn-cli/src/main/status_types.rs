@@ -70,6 +70,12 @@ struct DaemonRuntimeState {
     paid_exit_seller_ready: bool,
     #[serde(default)]
     wireguard_exit_ready: bool,
+    #[serde(default)]
+    tunnel_interface: String,
+    #[serde(default)]
+    tunnel_exit_peer: Option<String>,
+    #[serde(default)]
+    probe_route_generation: String,
     vpn_enabled: bool,
     vpn_active: bool,
     vpn_status: String,
@@ -458,6 +464,8 @@ impl Drop for ConnectMagicDnsRuntime {
 #[derive(Clone)]
 struct CliTunnelRuntime {
     iface: String,
+    tunnel_exit_peer: Option<String>,
+    probe_route_generation: String,
     active_listen_port: Option<u16>,
     paid_exit_seller_ready: bool,
     wireguard_exit_ready: bool,

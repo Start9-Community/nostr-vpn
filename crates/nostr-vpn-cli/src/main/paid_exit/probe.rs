@@ -1,4 +1,3 @@
-
 struct PaidExitRecordProbeResult {
     store_path: PathBuf,
     probe: UpdatePaidRouteSessionProbeResult,
@@ -31,25 +30,30 @@ async fn paid_exit_probe_command(args: PaidExitProbeArgs) -> Result<()> {
 async fn paid_exit_probe_once(args: PaidExitProbeArgs) -> Result<PaidExitProbeResult> {
     let config_path = args.config.clone().unwrap_or_else(default_config_path);
     let app = load_or_default_config(&config_path)?;
+    let store = load_paid_route_store(&paid_route_store_file_path(&config_path))?;
+    let binding = paid_exit_probe_binding(&config_path, &app, &store, &args.session)?;
     let now_unix = unix_timestamp();
     let (measurement, geoip_error, bandwidth_error) =
-        paid_exit_probe_measurement(&args, &app, now_unix, None).await?;
-    let record = paid_exit_record_probe_once(PaidExitRecordProbeArgs {
-        config: Some(config_path.clone()),
-        session: args.session,
-        realized_exit_ip: measurement.realized_exit_ip.clone(),
-        observed_country_code: measurement.observed_country_code.clone(),
-        observed_asn: measurement.observed_asn,
-        latency_ms: measurement.quality.latency_ms,
-        jitter_ms: measurement.quality.jitter_ms,
-        packet_loss_ppm: measurement.quality.packet_loss_ppm,
-        down_bps: measurement.quality.down_bps,
-        up_bps: measurement.quality.up_bps,
-        uptime_secs: measurement.quality.uptime_secs,
-        last_seen_unix: measurement.quality.last_seen_unix,
-        no_reload_daemon: args.no_reload_daemon,
-        json: false,
-    })?;
+        paid_exit_probe_measurement(&args, &app, now_unix, Some(&binding.interface)).await?;
+    let record = paid_exit_record_probe_once_checked(
+        PaidExitRecordProbeArgs {
+            config: Some(config_path.clone()),
+            session: args.session,
+            realized_exit_ip: measurement.realized_exit_ip.clone(),
+            observed_country_code: measurement.observed_country_code.clone(),
+            observed_asn: measurement.observed_asn,
+            latency_ms: measurement.quality.latency_ms,
+            jitter_ms: measurement.quality.jitter_ms,
+            packet_loss_ppm: measurement.quality.packet_loss_ppm,
+            down_bps: measurement.quality.down_bps,
+            up_bps: measurement.quality.up_bps,
+            uptime_secs: measurement.quality.uptime_secs,
+            last_seen_unix: measurement.quality.last_seen_unix,
+            no_reload_daemon: args.no_reload_daemon,
+            json: false,
+        },
+        Some(&binding),
+    )?;
 
     Ok(PaidExitProbeResult {
         store_path: record.store_path,
@@ -84,34 +88,36 @@ async fn paid_exit_probe_measurement(
         } else {
             Some(stun_servers[usize::from(sample_index) % stun_servers.len()].as_str())
         };
-        samples.push(paid_exit_probe_public_ip_sample(&client, ip_url, stun_server, timeout).await);
+        samples.push(
+            paid_exit_probe_public_ip_sample(&client, ip_url, stun_server, timeout, bind_interface)
+                .await,
+        );
     }
 
     let realized_ip = samples
         .iter()
         .rev()
         .find_map(|sample| sample.realized_exit_ip.as_deref());
-    let (observed_country_code, observed_asn, geoip_error) =
-        if args.no_geoip {
-            (None, None, None)
-        } else if let Some(realized_ip) = realized_ip {
-            let template = args
-                .geoip_url_template
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(DEFAULT_PAID_ROUTE_GEOIP_URL_TEMPLATE);
-            let url = paid_route_geoip_url(template, realized_ip);
-            match paid_exit_probe_fetch_text(&client, &url).await {
-                Ok(body) => {
-                    let (country, asn) = parse_paid_route_geoip_response(&body);
-                    (country, asn, None)
-                }
-                Err(error) => (None, None, Some(error.to_string())),
+    let (observed_country_code, observed_asn, geoip_error) = if args.no_geoip {
+        (None, None, None)
+    } else if let Some(realized_ip) = realized_ip {
+        let template = args
+            .geoip_url_template
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_PAID_ROUTE_GEOIP_URL_TEMPLATE);
+        let url = paid_route_geoip_url(template, realized_ip);
+        match paid_exit_probe_fetch_text(&client, &url).await {
+            Ok(body) => {
+                let (country, asn) = parse_paid_route_geoip_response(&body);
+                (country, asn, None)
             }
-        } else {
-            (None, None, None)
-        };
+            Err(error) => (None, None, Some(error.to_string())),
+        }
+    } else {
+        (None, None, None)
+    };
 
     let mut measurement =
         build_paid_route_probe_measurement(samples, observed_country_code, observed_asn, now_unix)?;
@@ -123,11 +129,9 @@ fn paid_exit_probe_http_client(
     timeout: Duration,
     bind_interface: Option<&str>,
 ) -> Result<reqwest::Client> {
-    let builder = reqwest::Client::builder().timeout(timeout);
-    // Daemon health gates bind to the paid tunnel so a route refresh cannot
-    // let an in-flight probe escape over the physical underlay and produce a
-    // false "Connected" result. The interactive CLI probe intentionally uses
-    // the ordinary routing table by passing None.
+    let builder = reqwest::Client::builder().timeout(timeout).no_proxy();
+    // Every exit measurement must follow the tunnel even while host routes
+    // change. Environment proxies would measure the proxy's egress instead.
     #[cfg(any(
         target_os = "android",
         target_os = "fuchsia",
@@ -158,6 +162,12 @@ fn paid_exit_probe_http_client(
         target_os = "watchos",
     )))]
     let _ = bind_interface;
+    #[cfg(target_os = "windows")]
+    let builder = if let Some(interface) = bind_interface {
+        builder.local_address(paid_exit_probe_windows::source_address(interface, false)?)
+    } else {
+        builder
+    };
     builder
         .build()
         .context("failed to build paid exit probe HTTP client")
@@ -186,11 +196,12 @@ async fn paid_exit_probe_public_ip_sample(
     ip_url: &str,
     stun_server: Option<&str>,
     timeout: Duration,
+    bind_interface: Option<&str>,
 ) -> PaidRouteProbeSample {
     let mut stun_error = None;
     if let Some(stun_server) = stun_server {
         let started = Instant::now();
-        match paid_exit_probe_stun_public_ip(stun_server, timeout).await {
+        match paid_exit_probe_stun_public_ip(stun_server, timeout, bind_interface).await {
             Ok(ip) => return PaidRouteProbeSample::success(ip, elapsed_ms_u32(started.elapsed())),
             Err(error) => stun_error = Some(error.to_string()),
         }
@@ -219,22 +230,49 @@ async fn paid_exit_probe_public_ip_sample(
     }
 }
 
-async fn paid_exit_probe_stun_public_ip(server: &str, timeout: Duration) -> Result<String> {
+async fn paid_exit_probe_stun_public_ip(
+    server: &str,
+    timeout: Duration,
+    bind_interface: Option<&str>,
+) -> Result<String> {
     let server = server.to_string();
-    tokio::task::spawn_blocking(move || paid_exit_probe_stun_public_ip_blocking(&server, timeout))
-        .await
-        .context("paid exit STUN probe task failed")?
+    let interface = bind_interface.map(ToOwned::to_owned);
+    tokio::task::spawn_blocking(move || {
+        paid_exit_probe_stun_public_ip_blocking(&server, timeout, interface.as_deref())
+    })
+    .await
+    .context("paid exit STUN probe task failed")?
 }
 
-fn paid_exit_probe_stun_public_ip_blocking(server: &str, timeout: Duration) -> Result<String> {
+fn paid_exit_probe_stun_public_ip_blocking(
+    server: &str,
+    timeout: Duration,
+    bind_interface: Option<&str>,
+) -> Result<String> {
     let addr = paid_exit_stun_socket_addr(server)?;
     let bind_addr = if addr.is_ipv4() {
         "0.0.0.0:0"
     } else {
         "[::]:0"
     };
+    #[cfg(target_os = "windows")]
+    let bind_addr = if let Some(interface) = bind_interface {
+        SocketAddr::new(
+            paid_exit_probe_windows::source_address(interface, addr.is_ipv6())?,
+            0,
+        )
+        .to_string()
+    } else {
+        bind_addr.to_string()
+    };
     let socket =
         UdpSocket::bind(bind_addr).context("failed to bind paid exit STUN probe socket")?;
+    if let Some(interface) = bind_interface {
+        bind_paid_exit_probe_udp(&socket, interface, addr.is_ipv6())?;
+    }
+    socket
+        .connect(addr)
+        .context("failed to connect paid exit STUN socket")?;
     socket
         .set_read_timeout(Some(timeout))
         .context("failed to set paid exit STUN read timeout")?;
@@ -245,12 +283,12 @@ fn paid_exit_probe_stun_public_ip_blocking(server: &str, timeout: Duration) -> R
     let transaction_id = paid_route_stun_transaction_id();
     let request = paid_route_stun_binding_request(transaction_id);
     socket
-        .send_to(&request, addr)
+        .send(&request)
         .with_context(|| format!("failed to send paid exit STUN probe to {server}"))?;
 
     let mut response = [0_u8; 1500];
-    let (len, _) = socket
-        .recv_from(&mut response)
+    let len = socket
+        .recv(&mut response)
         .with_context(|| format!("failed to receive paid exit STUN response from {server}"))?;
     parse_paid_route_stun_binding_response(&response[..len], transaction_id)
 }
@@ -438,10 +476,24 @@ fn paid_exit_record_probe_command(args: PaidExitRecordProbeArgs) -> Result<()> {
 }
 
 fn paid_exit_record_probe_once(args: PaidExitRecordProbeArgs) -> Result<PaidExitRecordProbeResult> {
+    paid_exit_record_probe_once_checked(args, None)
+}
+
+fn paid_exit_record_probe_once_checked(
+    args: PaidExitRecordProbeArgs,
+    expected: Option<&PaidExitProbeBinding>,
+) -> Result<PaidExitRecordProbeResult> {
     let config_path = args.config.clone().unwrap_or_else(default_config_path);
     let store_path = paid_route_store_file_path(&config_path);
     let quality = paid_exit_probe_quality_from_args(&args);
     let result = update_paid_route_store(&store_path, |store| {
+        if let Some(expected) = expected {
+            let app = load_or_default_config(&config_path)?;
+            let current = paid_exit_probe_binding(&config_path, &app, store, &args.session)?;
+            if &current != expected {
+                anyhow::bail!("paid exit changed during the probe; result was not saved");
+            }
+        }
         store.update_session_probe(UpdatePaidRouteSessionProbeRequest {
             session_id: args.session,
             realized_exit_ip: args.realized_exit_ip,
@@ -519,3 +571,17 @@ fn print_paid_exit_record_probe_result(result: &PaidExitRecordProbeResult) {
         paid_exit_quality_text(result.probe.quality.as_ref())
     );
 }
+
+#[cfg(all(test, feature = "paid-exit"))]
+#[path = "probe_tests.rs"]
+mod paid_exit_probe_tests;
+
+#[path = "probe_binding.rs"]
+mod paid_exit_probe_binding_impl;
+use paid_exit_probe_binding_impl::{
+    PaidExitProbeBinding, bind_paid_exit_probe_udp, paid_exit_probe_binding,
+};
+
+#[cfg(target_os = "windows")]
+#[path = "probe_windows.rs"]
+mod paid_exit_probe_windows;

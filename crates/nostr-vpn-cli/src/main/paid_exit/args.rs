@@ -242,7 +242,7 @@ struct PaidExitUseArgs {
 struct PaidExitProbeArgs {
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Buyer or seller paid-route session id.
+    /// Active buyer paid-route session id. The probe uses that session's tunnel.
     session: String,
     /// Public-IP endpoint. Plain IP or JSON with ip/query/origin is accepted.
     #[arg(long)]

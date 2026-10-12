@@ -10,3 +10,5 @@ include!("daemon_runtime/macos_cleanup.rs");
 include!("daemon_runtime/runtime_files.rs");
 include!("daemon_runtime/process_scan.rs");
 include!("daemon_runtime/permissions_and_ping.rs");
+
+include!("daemon_runtime/probe_route.rs");

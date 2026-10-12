@@ -341,6 +341,7 @@ pub(crate) async fn start_fips_private_tunnel_runtime(
     config_path: &Path,
     config: crate::fips_private_mesh::FipsPrivateTunnelConfig,
 ) -> Result<crate::fips_private_mesh::FipsPrivateTunnelRuntime> {
+    invalidate_daemon_probe_route(config_path)?;
     let result =
         crate::fips_private_mesh::FipsPrivateTunnelRuntime::start(config, config_path).await;
     let runtime = persist_fips_private_tunnel_start_result(config_path, result)?;
@@ -357,6 +358,9 @@ pub(crate) async fn apply_fips_private_tunnel_runtime_config(
     runtime: &mut crate::fips_private_mesh::FipsPrivateTunnelRuntime,
     config: crate::fips_private_mesh::FipsPrivateTunnelConfig,
 ) -> Result<()> {
+    if runtime.probe_route_changes(&config) {
+        invalidate_daemon_probe_route(config_path)?;
+    }
     let apply_error = runtime.apply_config(config, config_path).await.err();
     let persist_error = if apply_error.is_some() {
         persist_fips_failed_mutation_network_cleanup_state(config_path, Some(runtime)).err()
@@ -427,7 +431,8 @@ pub(crate) async fn stop_fips_private_tunnel_runtime(
     config_path: &Path,
     runtime: crate::fips_private_mesh::FipsPrivateTunnelRuntime,
 ) -> Result<()> {
-    let before_error = persist_fips_daemon_network_cleanup_state(config_path, Some(&runtime)).err();
+    let probe_error = invalidate_daemon_probe_route(config_path).err();
+    let before_error = persist_fips_daemon_network_cleanup_state(config_path, Some(&runtime)).err().or(probe_error);
     let stop_error = runtime.stop().await.err();
     let stop_failed = stop_error.is_some();
     let remaining_error = if stop_error.is_none() {
