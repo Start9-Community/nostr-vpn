@@ -59,6 +59,7 @@ settings and identities. iOS does not support paid exits.
 - Stop retrying payments for unfunded sessions and retire expired free trials
   without contacting the mint.
 - Use a maintained YAML parser for mesh and payment-host configuration.
+- Update the QUIC dependency to fix peer-triggered crashes and unbounded memory use.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.
