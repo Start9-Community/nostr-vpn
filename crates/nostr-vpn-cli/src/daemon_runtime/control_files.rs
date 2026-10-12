@@ -610,7 +610,12 @@ pub(crate) fn persist_desired_daemon_vpn_enabled(
     vpn_enabled: bool,
 ) -> Result<bool> {
     let mut app = load_or_default_config(config_path)?;
-    persist_desired_daemon_vpn_enabled_in_config(&mut app, config_path, vpn_enabled)
+    if app.autoconnect == vpn_enabled {
+        return Ok(false);
+    }
+    app.autoconnect = vpn_enabled;
+    app.save(config_path)?;
+    Ok(true)
 }
 
 pub(crate) fn persist_desired_daemon_vpn_enabled_in_config(
@@ -618,15 +623,11 @@ pub(crate) fn persist_desired_daemon_vpn_enabled_in_config(
     config_path: &Path,
     vpn_enabled: bool,
 ) -> Result<bool> {
-    if app.autoconnect == vpn_enabled {
-        return Ok(false);
-    }
-
+    // The CLI or app may have saved newer settings since the daemon loaded
+    // its runtime config. Persist only the requested switch on that version.
+    let changed = persist_desired_daemon_vpn_enabled(config_path, vpn_enabled)?;
     app.autoconnect = vpn_enabled;
-    app.ensure_defaults();
-    maybe_autoconfigure_node(app);
-    app.save(config_path)?;
-    Ok(true)
+    Ok(changed)
 }
 
 #[cfg(not(target_os = "macos"))]

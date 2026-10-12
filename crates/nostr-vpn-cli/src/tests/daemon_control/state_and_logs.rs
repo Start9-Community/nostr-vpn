@@ -235,6 +235,47 @@ fn daemon_start_honors_persisted_desired_vpn_state() {
 }
 
 #[test]
+fn daemon_pause_resume_preserves_newer_saved_settings() {
+    let dir = std::env::temp_dir().join(format!(
+        "nvpn-control-newer-config-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    let mut runtime = AppConfig::generated();
+    runtime.save(&path).unwrap();
+    for enabled in [false, true] {
+        let mut saved = AppConfig::load(&path).unwrap();
+        saved.node_name = format!("saved-before-{enabled}");
+        saved.exit_node_leak_protection = true;
+        saved.save(&path).unwrap();
+        persist_desired_daemon_vpn_enabled_in_config(&mut runtime, &path, enabled).unwrap();
+        let after = AppConfig::load(&path).unwrap();
+        assert_eq!(after.node_name, saved.node_name);
+        assert_eq!(
+            after.exit_node_leak_protection,
+            saved.exit_node_leak_protection
+        );
+        assert_eq!(after.autoconnect, enabled);
+        assert_eq!(runtime.autoconnect, enabled);
+        // Even a repeated request must correct disk state without saving a stale snapshot.
+        saved.autoconnect = !enabled;
+        saved.save(&path).unwrap();
+        persist_desired_daemon_vpn_enabled_in_config(&mut runtime, &path, enabled).unwrap();
+        assert_eq!(AppConfig::load(&path).unwrap().autoconnect, enabled);
+    }
+    fs::write(&path, "[invalid").unwrap();
+    let previous = runtime.autoconnect;
+    assert!(persist_desired_daemon_vpn_enabled_in_config(&mut runtime, &path, !previous).is_err());
+    assert_eq!(runtime.autoconnect, previous);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "[invalid");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn daemon_state_freshness_allows_pid_namespace_status() {
     let state = DaemonRuntimeState {
         updated_at: 100,

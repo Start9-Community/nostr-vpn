@@ -218,7 +218,6 @@ impl PaidRouteStore {
             && app.exit_node_public_paid_exit
             && PublicKey::parse(&app.exit_node).ok() == PublicKey::parse(seller).ok()
         {
-            app.exit_node_leak_protection = true;
             app.exit_node.clear();
             app.exit_node_public_paid_exit = false;
             if app.internet_source == crate::config::InternetSource::PaidManual {

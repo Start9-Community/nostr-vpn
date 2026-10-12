@@ -9,6 +9,77 @@ use nostr_vpn_core::paid_routes::{ExitNetworkClass, SignedPaidRouteOffer};
 use serde_json::Value;
 
 #[test]
+fn paid_exit_reselect_preserves_saved_protection_and_selected_exit() {
+    use nostr_sdk::prelude::{Keys, ToBech32};
+    use nostr_vpn_core::config::InternetSource;
+    use nostr_vpn_core::paid_route_store::{paid_route_store_file_path, update_paid_route_store};
+    use nostr_vpn_core::paid_routes::{
+        PaidExitConfig, signed_paid_exit_offer_from_config_with_receiver,
+    };
+
+    let dir = TestDir::new("nvpn-reselect-protection");
+    let path = dir.path().join("config.toml");
+    let seller = Keys::generate();
+    let alternative = Keys::generate();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mint = "https://mint.example";
+    let mut terms = PaidExitConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    terms.pricing.price_msat_per_gb = 25_000;
+    terms.channel.accepted_mints = vec![mint.to_string()];
+    terms.channel.free_probe_units = 1_048_576;
+    let offer = signed_paid_exit_offer_from_config_with_receiver(
+        "alternative",
+        &alternative,
+        &terms,
+        None,
+        None,
+        now,
+    )
+    .unwrap();
+    let store_path = paid_route_store_file_path(&path);
+    update_paid_route_store(&store_path, |store| {
+        store.upsert_wallet_mint(mint, "approved", Some(100_000), now);
+        store.upsert_signed_offer(offer, vec![], now)?;
+        Ok(())
+    })
+    .unwrap();
+    let mut app = AppConfig::generated();
+    app.internet_source = InternetSource::PaidAutomatic;
+    app.select_public_paid_exit_node(&seller.public_key().to_hex())
+        .unwrap();
+    for protected in [false, true] {
+        app.exit_node_leak_protection = protected;
+        app.save(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let output = run_nvpn([
+            "paid-exit",
+            "reselect",
+            "--config",
+            path.to_str().unwrap(),
+            "--json",
+        ]);
+        assert_success(&output);
+        assert_eq!(output_json(&output)["reselection_requested"], true);
+        assert!(
+            std::fs::read(&path).unwrap() == before,
+            "reselection must leave saved settings and current selection intact"
+        );
+        assert_eq!(
+            load_paid_route_store(&store_path)
+                .unwrap()
+                .automatic_reselect_from,
+            seller.public_key().to_bech32().unwrap(),
+        );
+    }
+}
+
+#[test]
 fn paid_exit_network_class_persists_into_signed_offers() {
     let dir = TestDir::new("nvpn-paid-exit-cli-network-class");
     let config_path = dir.path().join("config.toml");

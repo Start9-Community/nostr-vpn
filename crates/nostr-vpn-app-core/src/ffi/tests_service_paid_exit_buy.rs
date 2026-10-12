@@ -521,7 +521,8 @@
         assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
         assert_eq!(runtime.config.internet_source, InternetSource::PaidManual);
         assert_eq!(runtime.config.exit_node, "");
-        assert!(runtime.config.exit_node_leak_protection, "downvote must not expose direct traffic");
+        assert!(!runtime.config.exit_node_leak_protection, "downvote must preserve the user's protection choice");
+        assert!(!AppConfig::load(&runtime.config_path).unwrap().exit_node_leak_protection);
         assert!(runtime.vpn_enabled);
         let after = nostr_vpn_core::paid_route_store::load_paid_route_store(store_path).unwrap();
         assert!(after.exit_provider_is_avoided(seller_npub));

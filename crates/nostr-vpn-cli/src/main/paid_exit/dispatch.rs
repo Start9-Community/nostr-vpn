@@ -73,12 +73,10 @@ fn paid_exit_rate_command(args: PaidExitRateArgs) -> Result<()> {
 
 fn paid_exit_reselect_command(args: PaidExitStatusArgs) -> Result<()> {
     let path = args.config.unwrap_or_else(default_config_path);
-    let mut app = load_config_read_only(&path)?;
+    let app = load_config_read_only(&path)?;
     update_paid_route_store(&paid_route_store_file_path(&path), |store| {
         store.request_exit_reselection(&app, unix_timestamp())
     })?;
-    app.exit_node_leak_protection = true;
-    app.save(&path)?;
     maybe_reload_running_daemon(&path);
     if args.json {
         println!("{}", json!({"reselection_requested": true}));
