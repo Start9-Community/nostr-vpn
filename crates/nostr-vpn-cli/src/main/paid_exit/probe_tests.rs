@@ -38,7 +38,7 @@ async fn paid_probe_rejects_unselected_session_before_contacting_ip_service() {
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut buffer = [0; 1024];
-        stream.read(&mut buffer).await.unwrap();
+        assert!(stream.read(&mut buffer).await.unwrap() > 0);
         count.fetch_add(1, Ordering::SeqCst);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n198.51.100.77")
@@ -102,8 +102,10 @@ fn admitted_fixture() -> (AppConfig, PaidRouteStore, String, DaemonRuntimeState)
     app.select_public_paid_exit_node(&seller.public_key().to_hex())
         .unwrap();
     let now = unix_timestamp();
-    let mut offer = PaidExitConfig::default();
-    offer.enabled = true;
+    let mut offer = PaidExitConfig {
+        enabled: true,
+        ..PaidExitConfig::default()
+    };
     offer.channel.accepted_mints = vec!["https://mint.example".into()];
     offer.channel.free_probe_units = 1_048_576;
     offer.channel.grace_units = 262_144;
@@ -286,7 +288,7 @@ async fn paid_probe_command_saves_only_current_bound_measurements() {
         let mut server = tokio::spawn(async move {
             let (mut stream, peer) = listener.accept().await.unwrap();
             let mut request = [0; 1024];
-            stream.read(&mut request).await.unwrap();
+            assert!(stream.read(&mut request).await.unwrap() > 0);
             if change_exit == 1 {
                 let mut changed = app;
                 changed.set_internet_source(InternetSource::Direct);
