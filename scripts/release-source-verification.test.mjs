@@ -309,7 +309,16 @@ function committedRegistryPackageVersion(name) {
 }
 
 const fipsPackages = Object.fromEntries(
-  ['nvpn-fips-core', 'nvpn-fips-endpoint', 'nvpn-fips-identity'].map((name) => [
+  [
+    'nvpn-fips-core',
+    'nvpn-fips-endpoint',
+    'nvpn-fips-identity',
+    'nvpn-mdns-sd',
+    'nvpn-turn',
+    'nvpn-webrtc',
+    'nvpn-webrtc-ice',
+    'nvpn-webrtc-util',
+  ].map((name) => [
     name,
     committedRegistryPackageVersion(name),
   ]),
@@ -570,7 +579,7 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
     plan.verifierPath,
     join(realpathSync(root), 'scripts', 'verify-host-linux-vm-bundle.py'),
   )
-  assert.equal(plan.verifierArgs.length, 20)
+  assert.equal(plan.verifierArgs.length, 25)
   assert.deepEqual(plan.verifierArgs.slice(0, 3), [
     realpathSync(bundlePath),
     realpathSync(bundleReceiptPath),
@@ -623,6 +632,11 @@ test('Linux publication derives verifier inputs and rejects self-consistent rece
     ],
     ['linuxCargoLockSha256', '1'.repeat(64), /linuxCargoLockSha256/i],
     ['sourceDateEpoch', sourceDateEpoch + 1, /sourceDateEpoch/i],
+    [
+      'fipsPatchedLockPackages',
+      { ...fipsPackages, 'nvpn-webrtc': '0.17.2' },
+      /fipsPatchedLockPackages/i,
+    ],
     ['rustcVersion', 'rustc 1.94.0 (forged 2026-01-01)', /Rust toolchain/i],
   ]) {
     const forgedGate = structuredClone(exactGateReceipt)

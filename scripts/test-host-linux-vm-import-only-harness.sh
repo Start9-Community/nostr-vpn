@@ -165,6 +165,11 @@ targets = (
     ("nvpn-fips-core", "0.4.65", "a" * 64),
     ("nvpn-fips-endpoint", "0.4.65", "b" * 64),
     ("nvpn-fips-identity", "0.3.3", "c" * 64),
+    ("nvpn-mdns-sd", "0.19.1", "d" * 64),
+    ("nvpn-turn", "0.17.1", "e" * 64),
+    ("nvpn-webrtc", "0.17.1", "f" * 64),
+    ("nvpn-webrtc-ice", "0.17.1", "1" * 64),
+    ("nvpn-webrtc-util", "0.17.1", "2" * 64),
 )
 unrelated = ("unrelated", "1.0.0", "d" * 64)
 prefix = "version = 4\n\n"
@@ -192,6 +197,10 @@ wrong_version = committed.replace(
     'name = "nvpn-fips-identity"\nversion = "0.3.3"',
     'name = "nvpn-fips-identity"\nversion = "0.3.4"',
 )
+vendor_version = realized.replace(
+    'name = "nvpn-webrtc"\nversion = "0.17.1"',
+    'name = "nvpn-webrtc"\nversion = "0.17.2"',
+)
 for name, value in (
     ("committed.lock", committed),
     ("realized.lock", realized),
@@ -200,6 +209,7 @@ for name, value in (
     ("dependency.lock", dependency),
     ("version.lock", version),
     ("wrong-version.lock", wrong_version),
+    ("vendor-version.lock", vendor_version),
 ):
     (root / name).write_text(value, encoding="utf-8")
 PY
@@ -207,6 +217,11 @@ patch_specs=(
   nvpn-fips-core=0.4.65
   nvpn-fips-endpoint=0.4.65
   nvpn-fips-identity=0.3.3
+  nvpn-mdns-sd=0.19.1
+  nvpn-turn=0.17.1
+  nvpn-webrtc=0.17.1
+  nvpn-webrtc-ice=0.17.1
+  nvpn-webrtc-util=0.17.1
 )
 expected_patch_sha="$(
   python3 "$PATCH_LOCK_VERIFIER" \
@@ -229,7 +244,7 @@ if python3 "$PATCH_LOCK_VERIFIER" \
 then
   fail "exact FIPS patch lock materialization replaced an existing output"
 fi
-for adversary in partial.lock extra.lock dependency.lock version.lock; do
+for adversary in partial.lock extra.lock dependency.lock version.lock vendor-version.lock; do
   if python3 "$PATCH_LOCK_VERIFIER" \
     --validate "$lock_test/committed.lock" "$lock_test/$adversary" \
     "${patch_specs[@]}" >/dev/null 2>&1
@@ -431,17 +446,10 @@ repo_root = pathlib.Path(sys.argv[2])
     payload_sha,
     container_image_id,
     rust_toolchain,
-    fips_core_patch_spec,
-    fips_endpoint_patch_spec,
-    fips_identity_patch_spec,
+    *fips_patch_specs,
 ) = sys.argv[3:]
 fips_patch_packages = dict(
-    spec.split("=", 1)
-    for spec in (
-        fips_core_patch_spec,
-        fips_endpoint_patch_spec,
-        fips_identity_patch_spec,
-    )
+    spec.split("=", 1) for spec in fips_patch_specs
 )
 executables = {
     "app": "nostr-vpn",

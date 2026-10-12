@@ -276,7 +276,7 @@ ubuntu_vm_import_release_bundle() {
     python3 "$release_root/scripts/verify-cargo-path-patch-lock.py" \
       --manifest-specs "$NVPN_FIPS_REPO_PATH"
   )
-  [[ "${#fips_patch_packages[@]}" == 3 ]] || {
+  [[ "${#fips_patch_packages[@]}" == 8 ]] || {
     ubuntu_vm_import_error "exact FIPS patch package set is incomplete"
     return 1
   }
@@ -397,6 +397,7 @@ GUEST
     "$harness_sha" "$harness_tree" <<'GUEST'
 set -euo pipefail
 trap 'printf "Ubuntu VM import verification failed at remote line %s\n" "$LINENO" >&2' ERR
+[[ "$#" == 38 ]]
 remote_dir="$1"
 guest_repo="$2"
 app_sha="$3"
@@ -410,26 +411,25 @@ root_realized_lock_sha="${10}"
 linux_lock_sha="${11}"
 linux_realized_lock_sha="${12}"
 target="${13}"
-fips_core_patch_spec="${14}"
-fips_endpoint_patch_spec="${15}"
-fips_identity_patch_spec="${16}"
-app_hash="${17}"
-app_size="${18}"
-cli_hash="${19}"
-cli_size="${20}"
-fixture_hash="${21}"
-fixture_size="${22}"
-musl_hash="${23}"
-musl_size="${24}"
-archive_hash="${25}"
-archive_size="${26}"
-deb_hash="${27}"
-deb_size="${28}"
-builder_mode="${29}"
-dockerfile_sha="${30}"
-payload_sha="${31}"
-harness_sha="${32}"
-harness_tree="${33}"
+fips_patch_packages=("${@:14:8}")
+shift 21
+app_hash="$1"
+app_size="$2"
+cli_hash="$3"
+cli_size="$4"
+fixture_hash="$5"
+fixture_size="$6"
+musl_hash="$7"
+musl_size="$8"
+archive_hash="$9"
+archive_size="${10}"
+deb_hash="${11}"
+deb_size="${12}"
+builder_mode="${13}"
+dockerfile_sha="${14}"
+payload_sha="${15}"
+harness_sha="${16}"
+harness_tree="${17}"
 write_import_phase() {
   local phase="$1"
   local phase_temp
@@ -438,12 +438,6 @@ write_import_phase() {
   chmod 0400 "$phase_temp"
   mv "$phase_temp" "$remote_dir/.nvpn-deb-installed"
 }
-[[ "$fips_core_patch_spec" == nvpn-fips-core=* ]]
-[[ "$fips_endpoint_patch_spec" == nvpn-fips-endpoint=* ]]
-[[ "$fips_identity_patch_spec" == nvpn-fips-identity=* ]]
-fips_core_patch_version="${fips_core_patch_spec#*=}"
-fips_endpoint_patch_version="${fips_endpoint_patch_spec#*=}"
-fips_identity_patch_version="${fips_identity_patch_spec#*=}"
 case "$remote_dir" in
   /tmp/nvpn-linux-vm-release.*) ;;
   *) exit 2 ;;
@@ -455,6 +449,15 @@ chmod 0700 "$remote_dir"
 [[ -z "$(git -C "$guest_repo" status --porcelain --untracked-files=all)" ]]
 [[ "$(sha256sum "$guest_repo/Cargo.lock" | awk '{ print $1 }')" == "$root_lock_sha" ]]
 [[ "$(sha256sum "$guest_repo/linux/Cargo.lock" | awk '{ print $1 }')" == "$linux_lock_sha" ]]
+[[ "$(python3 "$guest_repo/scripts/verify-cargo-path-patch-lock.py" \
+  --expected-sha256 "$guest_repo/Cargo.lock" "${fips_patch_packages[@]}")" \
+  == "$root_realized_lock_sha" ]]
+[[ "$(python3 "$guest_repo/scripts/verify-cargo-path-patch-lock.py" \
+  --expected-sha256 "$guest_repo/linux/Cargo.lock" "${fips_patch_packages[@]}")" \
+  == "$linux_realized_lock_sha" ]]
+fips_patch_packages_json="$(jq -cn --args \
+  '$ARGS.positional | map(split("=") | {key: .[0], value: .[1]}) | from_entries' \
+  "${fips_patch_packages[@]}")"
 for artifact in \
   desktop_manual_join_e2e_fixture \
   nvpn-x86_64-unknown-linux-musl
@@ -487,9 +490,7 @@ jq -e \
   --arg root_realized_lock_sha "$root_realized_lock_sha" \
   --arg linux_lock_sha "$linux_lock_sha" \
   --arg linux_realized_lock_sha "$linux_realized_lock_sha" \
-  --arg fips_core_patch_version "$fips_core_patch_version" \
-  --arg fips_endpoint_patch_version "$fips_endpoint_patch_version" \
-  --arg fips_identity_patch_version "$fips_identity_patch_version" \
+  --argjson fips_patch_packages "$fips_patch_packages_json" \
   --arg target "$target" \
   --arg builder_mode "$builder_mode" \
   --arg dockerfile_sha "$dockerfile_sha" \
@@ -537,11 +538,7 @@ jq -e \
     and .rootRealizedCargoLockSha256 == $root_realized_lock_sha
     and .linuxCargoLockSha256 == $linux_lock_sha
     and .linuxRealizedCargoLockSha256 == $linux_realized_lock_sha
-    and .fipsPatchedLockPackages == {
-      "nvpn-fips-core": $fips_core_patch_version,
-      "nvpn-fips-endpoint": $fips_endpoint_patch_version,
-      "nvpn-fips-identity": $fips_identity_patch_version
-    }
+    and .fipsPatchedLockPackages == $fips_patch_packages
     and .target == $target
     and .dockerPlatform == "linux/amd64"
     and .containerBase == "ubuntu:24.04"
@@ -770,8 +767,8 @@ GUEST
     printf 'rootRealizedCargoLockSha256=%s\n' "$root_realized_lock_sha"
     printf 'linuxCargoLockSha256=%s\n' "$linux_lock_sha"
     printf 'linuxRealizedCargoLockSha256=%s\n' "$linux_realized_lock_sha"
-    printf 'fipsPatchedLockPackages=%s,%s,%s\n' \
-      "${fips_patch_packages[@]}"
+    printf 'fipsPatchedLockPackages=%s\n' \
+      "$(IFS=,; printf '%s' "${fips_patch_packages[*]}")"
     printf 'target=%s\n' "$target"
     printf 'artifactProductSourceVerified=true\n'
     printf 'remoteHarnessSourceVerified=true\n'

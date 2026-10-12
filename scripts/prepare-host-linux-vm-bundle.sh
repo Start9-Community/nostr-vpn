@@ -182,8 +182,8 @@ done < <(
   python3 "$PATCH_LOCK_VERIFIER" \
     --manifest-specs "$NVPN_FIPS_REPO_PATH"
 )
-[[ "${#FIPS_PATCH_PACKAGES[@]}" == 3 ]] || {
-  echo "Host Linux VM bundle lacks the three exact FIPS patch packages" >&2
+[[ "${#FIPS_PATCH_PACKAGES[@]}" == 8 ]] || {
+  echo "Host Linux VM bundle lacks the eight exact FIPS source packages" >&2
   exit 2
 }
 ROOT_REALIZED_CARGO_LOCK_SHA256="$(
@@ -670,9 +670,7 @@ import sys
     rust_toolchain,
     dockerfile_sha256,
     container_payload_sha256,
-    fips_core_patch_spec,
-    fips_endpoint_patch_spec,
-    fips_identity_patch_spec,
+    *fips_patch_specs,
     source_epoch,
     cli_short_arg,
     cli_verbose_arg,
@@ -733,17 +731,17 @@ if not rustc_version.startswith(f"rustc {rust_toolchain} "):
 if not cargo_version.startswith(f"cargo {rust_toolchain} "):
     raise SystemExit("Linux release builder used the wrong cargo toolchain")
 fips_patch_packages = dict(
-    spec.split("=", 1)
-    for spec in (
-        fips_core_patch_spec,
-        fips_endpoint_patch_spec,
-        fips_identity_patch_spec,
-    )
+    spec.split("=", 1) for spec in fips_patch_specs
 )
 if set(fips_patch_packages) != {
     "nvpn-fips-core",
     "nvpn-fips-endpoint",
     "nvpn-fips-identity",
+    "nvpn-mdns-sd",
+    "nvpn-turn",
+    "nvpn-webrtc",
+    "nvpn-webrtc-ice",
+    "nvpn-webrtc-util",
 }:
     raise SystemExit("unexpected exact FIPS patched lock package set")
 names = {
