@@ -50,6 +50,8 @@ settings and identities. iOS does not support paid exits.
   available while private-network membership is pending.
 - Preserve the saved connection-protection choice when reselecting or rating
   an Internet provider, and keep newer settings when pausing or resuming the VPN.
+- Prevent old payment retries from blocking newer Internet purchases, and
+  acknowledge payments already covered by the seller's saved balance.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.
