@@ -1,6 +1,58 @@
 use super::*;
 
 #[test]
+fn expired_unfunded_trials_retire_without_changing_funded_or_terminal_channels() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let config = sample_config();
+    let mut funded = seller_store_with_open_channel(&seller, &buyer, &config);
+    let original = funded.clone();
+    assert!(!funded.expire_unfunded_seller_sessions(1000));
+    assert_eq!(
+        funded, original,
+        "funded state belongs to collection and refund recovery"
+    );
+    let mut trial = original;
+    for channel in trial.channels.values_mut() {
+        channel.payment.cashu_spilman_payment = None;
+        channel.payment.paid_msat = 0;
+        channel.status = PaidRouteLifecycleStatus::Probing;
+    }
+    for session in trial.sessions.values_mut() {
+        session.session.payment.cashu_spilman_payment = None;
+        session.session.payment.paid_msat = 0;
+    }
+    for lease in trial.leases.values_mut() {
+        lease.status = PaidRouteLifecycleStatus::Probing;
+    }
+    let cutoff = trial.channels["channel-1"].routing_expires_at_unix(500);
+    assert!(!trial.expire_unfunded_seller_sessions(cutoff - 1));
+    let original = trial.clone();
+    assert!(trial.expire_unfunded_seller_sessions(cutoff));
+    assert_eq!(
+        trial.channels["channel-1"].status,
+        PaidRouteLifecycleStatus::Expired
+    );
+    assert_eq!(
+        trial.leases["lease-1"].status,
+        PaidRouteLifecycleStatus::Expired
+    );
+    assert!(!trial.expire_unfunded_seller_sessions(cutoff + 1));
+    for status in [
+        PaidRouteLifecycleStatus::Closing,
+        PaidRouteLifecycleStatus::Closed,
+        PaidRouteLifecycleStatus::Failed,
+    ] {
+        let mut terminal = original.clone();
+        terminal.channels.get_mut("channel-1").unwrap().status = status;
+        terminal.leases.get_mut("lease-1").unwrap().status = status;
+        assert!(!terminal.expire_unfunded_seller_sessions(cutoff));
+        assert_eq!(terminal.channels["channel-1"].status, status);
+        assert_eq!(terminal.leases["lease-1"].status, status);
+    }
+}
+
+#[test]
 fn authenticated_free_probe_open_creates_seller_admission_and_upgrades_to_payment() {
     let seller = Keys::generate();
     let buyer = Keys::generate();

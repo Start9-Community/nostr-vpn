@@ -79,8 +79,12 @@ impl PaidExitSellerCollector {
             return Ok(changed);
         }
         self.next_scan = Instant::now() + SCAN_INTERVAL;
-        let store = load_paid_route_store(&paid_route_store_file_path(config_path))?;
-        let due = store.seller_collection_states(&app.paid_exit, unix_timestamp());
+        let now_unix = unix_timestamp();
+        let store = update_paid_route_store(&paid_route_store_file_path(config_path), |store| {
+            changed |= store.expire_unfunded_seller_sessions(now_unix);
+            Ok(store.clone())
+        })?;
+        let due = store.seller_collection_states(&app.paid_exit, now_unix);
         self.retry_after
             .retain(|id, _| due.iter().any(|state| state.channel_id == *id));
         let Some(state) = due.iter().find(|state| {

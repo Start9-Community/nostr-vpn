@@ -1,6 +1,45 @@
 use super::{persistence::*, *};
 
 impl PaidRouteStore {
+    /// Retire elapsed free trials without involving a mint or discarding history.
+    pub fn expire_unfunded_seller_sessions(&mut self, now_unix: u64) -> bool {
+        let expired = self
+            .sessions
+            .values()
+            .filter_map(|record| {
+                let session = &record.session;
+                let channel = self.channels.get(&session.payment.channel_id)?;
+                let lease = self.leases.get(&session.lease_id)?;
+                (channel.role == PaidRouteChannelRole::Seller
+                    && !paid_route_session_has_payment_material(session, channel)
+                    && session.payment.paid_msat.max(channel.payment.paid_msat) == 0
+                    && channel.routing_expires_at_unix(lease.lease.expires_at_unix) <= now_unix)
+                    .then(|| (channel.channel_id.clone(), session.lease_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for (channel_id, lease_id) in expired {
+            if let Some(channel) = self.channels.get_mut(&channel_id)
+                && paid_route_lifecycle_allows_routing(channel.status)
+            {
+                channel.status = PaidRouteLifecycleStatus::Expired;
+                channel.updated_at_unix = channel.updated_at_unix.max(now_unix);
+                if channel.error.is_empty() {
+                    channel.error = "Unfunded trial expired".into();
+                }
+                changed = true;
+            }
+            if let Some(lease) = self.leases.get_mut(&lease_id)
+                && paid_route_lifecycle_allows_routing(lease.status)
+            {
+                lease.status = PaidRouteLifecycleStatus::Expired;
+                lease.updated_at_unix = lease.updated_at_unix.max(now_unix);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn live_offer_for_selector(&self, selector: &str, now_unix: u64) -> Result<PaidRouteOffer> {
         let (_, record) = self.resolve_offer(selector)?;
         if !record.signed_offer.is_live_at(now_unix) {

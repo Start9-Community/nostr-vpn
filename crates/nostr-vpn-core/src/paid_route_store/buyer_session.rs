@@ -391,6 +391,7 @@ impl PaidRouteStore {
             };
             if channel.role != PaidRouteChannelRole::Buyer
                 || record.session.payment.mode != PaidRoutePaymentMode::CashuSpilman
+                || !paid_route_session_has_payment_material(&record.session, channel)
             {
                 continue;
             }

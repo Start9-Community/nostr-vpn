@@ -5,6 +5,53 @@ use nostr_vpn_core::paid_routes::{PaidRouteLease, PaidRoutePaymentState, PaidRou
 
 const MINT: &str = "http://127.0.0.1:1";
 
+#[test]
+fn paid_exit_seller_collector_expires_unfunded_trials_without_mint_requests() {
+    let fixture = Fixture::new();
+    let now = unix_timestamp();
+    fixture.add(
+        "expired-trial",
+        now - 1,
+        PaidRouteChannelRole::Seller,
+        false,
+    );
+    fixture.add("live-trial", now + 600, PaidRouteChannelRole::Seller, false);
+    let path = paid_route_store_file_path(&fixture.config);
+    update_paid_route_store(&path, |store| {
+        for id in ["expired-trial", "live-trial"] {
+            let channel = store.channels.get_mut(id).unwrap();
+            channel.payment.cashu_spilman_payment = None;
+            channel.payment.paid_msat = 0;
+            channel.status = PaidRouteLifecycleStatus::Probing;
+            store.sessions.get_mut(id).unwrap().session.payment = channel.payment.clone();
+            store.leases.get_mut(id).unwrap().status = PaidRouteLifecycleStatus::Probing;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let mut collector = PaidExitSellerCollector::new();
+    assert!(collector.poll(&fixture.app, &fixture.config, true).unwrap());
+    let store = load_paid_route_store(&path).unwrap();
+    assert_eq!(
+        store.channels["expired-trial"].status,
+        PaidRouteLifecycleStatus::Expired
+    );
+    assert_eq!(
+        store.leases["expired-trial"].status,
+        PaidRouteLifecycleStatus::Expired
+    );
+    assert_eq!(
+        store.channels["live-trial"].status,
+        PaidRouteLifecycleStatus::Probing
+    );
+    assert_eq!(
+        store.leases["live-trial"].status,
+        PaidRouteLifecycleStatus::Probing
+    );
+    assert!(store.channels["expired-trial"].error.contains("expired"));
+    assert!(!collector.poll(&fixture.app, &fixture.config, true).unwrap());
+}
+
 struct Fixture {
     directory: PathBuf,
     config: PathBuf,
