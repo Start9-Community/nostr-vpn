@@ -174,7 +174,7 @@ fn paid_probe_binding_requires_live_selected_admitted_exit() {
     unselected.selected_buyer_session_id.clear();
     assert!(resolve(&app, &unselected, &session, true, Some(123), &state, now).is_err());
     let mut direct = app.clone();
-    direct.internet_source = InternetSource::Direct;
+    direct.set_internet_source(InternetSource::Direct);
     assert!(resolve(&direct, &store, &session, true, Some(123), &state, now).is_err());
 }
 
@@ -289,8 +289,13 @@ async fn paid_probe_command_saves_only_current_bound_measurements() {
             stream.read(&mut request).await.unwrap();
             if change_exit == 1 {
                 let mut changed = app;
-                changed.internet_source = InternetSource::Direct;
+                changed.set_internet_source(InternetSource::Direct);
                 changed.save(&config).unwrap();
+                assert_eq!(
+                    load_or_default_config(&config).unwrap().internet_source,
+                    InternetSource::Direct,
+                    "the fixture must apply the same source transition as the command"
+                );
             } else if change_exit == 2 {
                 let path = daemon_state_file_path(&config).unwrap();
                 let previous = read_daemon_state(&path).unwrap().unwrap();
@@ -334,7 +339,7 @@ async fn paid_probe_command_saves_only_current_bound_measurements() {
         let saved = load_paid_route_store(&store_path).unwrap();
         let observed = &saved.sessions[&session].session.realized_exit_ip;
         if change_exit != 0 {
-            assert!(result.is_err());
+            assert!(result.is_err(), "route change scenario {change_exit}");
             assert!(
                 observed.is_none(),
                 "a result for a changed route must not be saved"
