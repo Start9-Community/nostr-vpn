@@ -137,7 +137,7 @@
             PaidRouteLifecycleStatus::Closed,
         ));
         store.upsert_channel(channel(
-            "active",
+            "expired-active",
             PaidRouteChannelRole::Buyer,
             PaidRouteLifecycleStatus::Active,
         ));
@@ -147,9 +147,18 @@
             PaidRouteLifecycleStatus::Closing,
         ));
 
+        store.upsert_channel(channel("failed", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Failed));
+        store.upsert_channel(channel("expired", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Expired));
+        let mut active = channel("active", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Active);
+        active.expires_at_unix = unix_timestamp() + 3600;
+        store.upsert_channel(active);
+        let mut unfunded = channel("unfunded", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Failed);
+        unfunded.payment.cashu_spilman_payment = None;
+        store.upsert_channel(unfunded);
+
         assert_eq!(
             paid_exit_buyer_refund_channel_ids(&store),
-            vec!["legacy-closed".to_string(), "pending".to_string()]
+            vec!["expired", "expired-active", "failed", "legacy-closed", "pending"]
         );
     }
 
@@ -568,10 +577,10 @@
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
             });
-            let error = RefundMintConnection::new(&url)
-                .post_json::<_, serde_json::Value>("/v1/restore", &serde_json::json!({"outputs": []}))
-                .await
-                .unwrap_err();
+            let error = cashu_service::send_mint_request(
+                reqwest::Client::new().post(format!("{url}/v1/restore"))
+                    .json(&serde_json::json!({"outputs": []})),
+            ).await.and_then(cashu_service::check_mint_response).unwrap_err();
             let delay = error
                 .downcast_ref::<cashu_service::MintRetryAfter>()
                 .map(|delay| delay.0);

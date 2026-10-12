@@ -366,3 +366,6 @@ async fn direct_mint_requests_are_paced_across_concurrent_clients() {
 }
 
 mod wallet_refunds;
+
+#[cfg(feature = "spilman-wallet-http")]
+mod expiry_refunds;

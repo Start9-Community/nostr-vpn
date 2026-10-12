@@ -124,6 +124,8 @@ struct SpilmanClientStoreFile {
     refund_proofs_validated: BTreeSet<String>,
     #[serde(default)]
     refund_proofs_repaired: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    expiry_refunds: BTreeMap<String, ExpiryRefund>,
     /// Durable idempotency keys for wallet-backed channel opens.
     ///
     /// A route session can be cancelled after the channel has been persisted
@@ -144,9 +146,25 @@ impl SpilmanClientStoreFile {
             refund_witnesses_persisted: BTreeSet::new(),
             refund_proofs_validated: BTreeSet::new(),
             refund_proofs_repaired: BTreeSet::new(),
+            expiry_refunds: BTreeMap::new(),
             open_requests: BTreeMap::new(),
         }
     }
+}
+
+/// Private write-ahead record: retain the original outputs across response loss,
+/// process restarts and mint keyset rotation until wallet import is complete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ExpiryRefund {
+    pub keyset: cdk_spilman::KeysetInfo,
+    pub outputs: Vec<ExpiryRefundOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ExpiryRefundOutput {
+    pub amount: u64,
+    pub secret: String,
+    pub blinding_factor: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -284,6 +302,23 @@ impl FileSpilmanClientStorage {
 
     pub fn refund_proofs_repaired(&self, channel_id: &str) -> bool {
         self.state.refund_proofs_repaired.contains(channel_id)
+    }
+
+    #[cfg(all(feature = "wallet", feature = "spilman-wallet-http"))]
+    pub(crate) fn expiry_refund(&self, channel_id: &str) -> Option<&ExpiryRefund> {
+        self.state.expiry_refunds.get(channel_id)
+    }
+
+    #[cfg(all(feature = "wallet", feature = "spilman-wallet-http"))]
+    pub(crate) fn save_expiry_refund(
+        &mut self,
+        channel_id: &str,
+        refund: ExpiryRefund,
+    ) -> Result<(), String> {
+        self.state
+            .expiry_refunds
+            .insert(channel_id.to_owned(), refund);
+        self.write_snapshot()
     }
 
     pub fn mark_refund_proofs_repaired(&mut self, channel_id: &str) {
