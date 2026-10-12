@@ -54,6 +54,8 @@ settings and identities. iOS does not support paid exits.
   acknowledge payments already covered by the seller's saved balance.
 - Recover unspent funds from expired payment channels and resume refunds safely
   after interrupted mint responses or wallet imports.
+- Bind paid-exit measurements to the selected tunnel and reject results when
+  the active exit changes during a probe.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.
