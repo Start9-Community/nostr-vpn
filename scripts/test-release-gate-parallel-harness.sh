@@ -117,7 +117,9 @@ verbose_lane() {
 RELEASE_GATE_PARALLEL_SUCCESS_LOG_LINES=10
 release_gate_parallel_start "bounded output" verbose_lane
 bounded="$RELEASE_GATE_PARALLEL_LAST_INDEX"
-bounded_output="$(release_gate_parallel_wait "$bounded")"
+# Wait in the shell that owns the child before capturing its output.
+release_gate_parallel_wait "$bounded" >"$tmp/bounded-output"
+bounded_output="$(cat "$tmp/bounded-output")"
 [[ "$bounded_output" == *"showing final 10 of 100 lines"* \
   && "$bounded_output" == *"verbose lane line 100"* ]] \
   || fail "successful lane output was not bounded while preserving its log"
