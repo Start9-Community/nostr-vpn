@@ -194,5 +194,5 @@ async fn numeric_and_loopback_addresses_do_not_use_application_dns() {
         network.resolve("[::1]:1234").await.unwrap(),
         vec!["[::1]:1234".parse::<SocketAddr>().unwrap()]
     );
-    assert!(!format!("{network:?}").contains("private-capability"));
+    assert!(!format!("{network:?}").contains(network.http_proxy_url().password().unwrap()));
 }

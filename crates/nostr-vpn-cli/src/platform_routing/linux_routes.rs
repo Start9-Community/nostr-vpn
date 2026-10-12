@@ -6,7 +6,7 @@ pub(crate) struct LinuxRouteGetSpec {
     pub(crate) src: Option<String>,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LinuxEndpointBypassRoute {
     pub(crate) target: String,
@@ -15,7 +15,7 @@ pub(crate) struct LinuxEndpointBypassRoute {
     pub(crate) src: Option<String>,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LinuxManagedEndpointBypassRoute {
     pub(crate) route: LinuxEndpointBypassRoute,
@@ -70,7 +70,7 @@ pub(crate) fn linux_route_get_spec_from_output(output: &str) -> Option<LinuxRout
     })
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn linux_default_route_from_output_for_interface(
     output: &str,
     interface: Option<&str>,
@@ -334,7 +334,7 @@ fn restore_linux_default_route_for_family(family_flag: &str, route: &str) -> Res
     run_checked(&mut command)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(crate) fn linux_route_replay_args(route: &str) -> Vec<&str> {
     route
         .split_whitespace()
@@ -396,7 +396,7 @@ pub(crate) fn linux_endpoint_bypass_route_snapshot(target: &str) -> Result<Vec<S
         .collect())
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(crate) fn linux_endpoint_bypass_route_matches_line(
     route: &LinuxEndpointBypassRoute,
     line: &str,

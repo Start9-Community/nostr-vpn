@@ -2,6 +2,7 @@ pub(crate) fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Res
     write_runtime_file_atomically_with_mode(path, contents, 0o644, false)
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn write_runtime_file_durably(path: &Path, contents: &[u8]) -> Result<()> {
     write_runtime_file_atomically_with_mode(path, contents, 0o644, true)
 }
@@ -14,6 +15,7 @@ pub(crate) fn write_private_runtime_file_atomically(
 }
 
 /// Ownership and protection intent must survive loss of the daemon or power.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub(crate) fn write_private_runtime_file_durably(path: &Path, contents: &[u8]) -> Result<()> {
     write_runtime_file_atomically_with_mode(path, contents, 0o600, true)
 }

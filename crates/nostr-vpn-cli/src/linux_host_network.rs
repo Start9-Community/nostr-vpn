@@ -5,7 +5,9 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use fips_core::host_network::HostNetwork;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -15,12 +17,15 @@ mod dns;
 mod proxy;
 
 pub(crate) const CARRIER_MARK: u32 = 0x4e56;
+#[cfg(target_os = "linux")]
 static NETWORK: OnceLock<Arc<LinuxHostNetwork>> = OnceLock::new();
 
+#[cfg(target_os = "linux")]
 pub(crate) fn current() -> Option<Arc<LinuxHostNetwork>> {
     NETWORK.get().cloned()
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn initialize() -> io::Result<Arc<LinuxHostNetwork>> {
     if let Some(network) = current() {
         return Ok(network);
@@ -55,6 +60,7 @@ impl Drop for LinuxHostNetwork {
 }
 
 impl LinuxHostNetwork {
+    #[cfg(target_os = "linux")]
     async fn start() -> io::Result<Arc<Self>> {
         // Probe privilege before installing a guard or starting any carrier.
         let probe = TcpSocket::new_v4()?;
@@ -84,6 +90,7 @@ impl LinuxHostNetwork {
         Ok(network)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn http_client_builder(&self) -> io::Result<reqwest::ClientBuilder> {
         carrier_client_builder(&self.proxy_url)
     }
@@ -94,6 +101,7 @@ impl LinuxHostNetwork {
         &self.proxy_url
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn capture_native_dns(&self, contents: &[u8]) -> io::Result<()> {
         self.resolver.capture_direct_config(contents)
     }

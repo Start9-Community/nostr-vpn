@@ -7,9 +7,11 @@ use nostr_vpn_core::config::{AppConfig, InternetSource};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 static POLICY: OnceLock<Mutex<Policy>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +193,7 @@ fn read_saved(path: &Path) -> Result<Option<SavedIntent>> {
 
 /// The daemon instance lock (or service installation ordering) serializes this
 /// before legacy route/DNS cleanup. No keyring or network awaits are involved.
+#[cfg(target_os = "linux")]
 pub(crate) fn initialize(config_path: &Path, enabled_override: Option<bool>) -> Result<()> {
     if POLICY.get().is_some() {
         return Err(anyhow!("Linux egress intent initialized twice"));
@@ -211,6 +214,7 @@ pub(crate) fn initialize(config_path: &Path, enabled_override: Option<bool>) -> 
 
 /// Boot uses only root-owned intent, before networking or user-home availability.
 /// No stop hook: stopping/restarting this service must never clear protection.
+#[cfg(target_os = "linux")]
 pub(crate) fn restore_at_boot(config_path: &Path) -> Result<()> {
     let mut policy = Policy::open(config_path)?;
     if policy.path.exists() {
@@ -220,6 +224,7 @@ pub(crate) fn restore_at_boot(config_path: &Path) -> Result<()> {
 }
 
 /// Explicit service removal restores normal access after its daemon is stopped.
+#[cfg(target_os = "linux")]
 pub(crate) fn release_for_uninstall(config_path: &Path) -> Result<()> {
     Policy::open(config_path)?.set_desired(None)
 }
@@ -239,16 +244,19 @@ fn read_desired(
     Ok(desired(&app, enabled_override.unwrap_or(app.autoconnect)))
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn update(app: &AppConfig, enabled: bool) -> Result<()> {
     with_policy(|policy| policy.set_desired(desired(app, enabled)))
 }
 
 /// Read back installed policy periodically; repair only when kernel state
 /// changed. The daemon and foreground connect share the same enforcement.
+#[cfg(target_os = "linux")]
 pub(crate) fn maintain() -> Result<()> {
     with_policy(|policy| policy.reconcile(false))
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn routes(mut routes: Vec<GuardRoute>, forwarded: Option<ForwardedExit>) -> Result<()> {
     routes.sort_by(|a, b| a.target.cmp(&b.target));
     with_policy(|policy| {
@@ -260,6 +268,7 @@ pub(crate) fn routes(mut routes: Vec<GuardRoute>, forwarded: Option<ForwardedExi
 
 /// Remove permissions before tearing down an interface, retaining desired
 /// protection. A new interface with the same name must not inherit admission.
+#[cfg(target_os = "linux")]
 pub(crate) fn pending() -> Result<()> {
     with_policy(|policy| {
         policy.routes.clear();
@@ -267,6 +276,7 @@ pub(crate) fn pending() -> Result<()> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn with_policy(action: impl FnOnce(&mut Policy) -> Result<()>) -> Result<()> {
     let policy = POLICY
         .get()
@@ -473,10 +483,12 @@ mod tests {
             std::env::temp_dir().join(format!("nvpn-egress-intent-{}", rand::random::<u64>()));
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("config.toml");
-        let mut app = AppConfig::default();
-        app.internet_source = InternetSource::PaidAutomatic;
-        app.exit_node_leak_protection = true;
-        app.exit_node.clear();
+        let mut app = AppConfig {
+            internet_source: InternetSource::PaidAutomatic,
+            exit_node_leak_protection: true,
+            exit_node: String::new(),
+            ..AppConfig::default()
+        };
         std::fs::write(&path, app.plaintext_toml().unwrap()).unwrap();
         assert_eq!(read_desired(&path, None, None).unwrap(), Some(true));
         app.autoconnect = false;

@@ -1,3 +1,4 @@
+#[cfg(any(target_os = "linux", test))]
 const LINUX_EGRESS_GUARD_UNIT: &str = "nvpn-egress-guard.service";
 
 #[cfg(target_os = "linux")]
