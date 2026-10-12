@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## 4.1.18 - 2026-10-12
+## 4.1.18 - 2026-10-13
 
 ### Release notes
 
@@ -62,6 +62,10 @@ settings and identities. iOS does not support paid exits.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.
+- Keep Linux connection protection active during tunnel loss, service restarts,
+  and pause transitions, including traffic from Internet-sharing clients.
+- Keep mesh transport and discovery connections working when VPN routes and
+  connection protection are active.
 
 ## 4.1.17 - 2026-09-27
 
