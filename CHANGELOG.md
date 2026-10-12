@@ -46,6 +46,10 @@ settings and identities. iOS does not support paid exits.
   preserving paid-exit feedback and signed contact/mute recovery.
 - Bound mint polling and share request cooldowns across wallet and channel work.
 - Preserve malformed legacy refunds without counting them as spendable funds.
+- Keep independently selected paid Internet, secure DNS, and connection protection
+  available while private-network membership is pending.
+- Preserve the saved connection-protection choice when reselecting or rating
+  an Internet provider, and keep newer settings when pausing or resuming the VPN.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.
