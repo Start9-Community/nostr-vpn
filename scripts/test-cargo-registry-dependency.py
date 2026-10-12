@@ -2,10 +2,13 @@
 import importlib.util
 import io
 import pathlib
+import sys
 import tarfile
 import tempfile
 import unittest
 
+# Release checks must leave the exact source checkout clean.
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('dependency', pathlib.Path(__file__).with_name('verify-cargo-registry-dependency.py'))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
