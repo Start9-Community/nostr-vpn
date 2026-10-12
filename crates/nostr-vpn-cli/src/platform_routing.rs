@@ -11,7 +11,7 @@ use std::net::ToSocketAddrs;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command as ProcessCommand;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use anyhow::Context;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use anyhow::Result;
