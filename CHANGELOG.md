@@ -36,8 +36,10 @@ settings and identities. iOS does not support paid exits.
   to reduce background disk and CPU activity.
 - Reduce repeated discovery scans and idle packet-processing allocations.
 - Avoid timer wakeups while discovery is waiting for new events.
-- Reduce iOS tunnel wakeups with lightweight link reports and one async I/O
+- Reduce iOS tunnel wakeups with lightweight link and session reports and one async I/O
   worker, retaining the separate cryptographic worker pool.
+- Wake for new join approvals on Apple devices instead of repeatedly scanning
+  an unchanged directory.
 - Schedule TCP work at its actual deadlines and finish selected receive batches
   before handling another command or timer.
 - Request machine ratings only from the local reputation authority while

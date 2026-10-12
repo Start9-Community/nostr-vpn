@@ -35,9 +35,8 @@ async fn watch_mobile_queued_join_rosters(
     state_control: FipsControlTcpSender,
     config_path: Option<PathBuf>,
     initial: Vec<QueuedJoinRoster>,
+    mut changes: Option<join_roster_watch::JoinRosterWatch>,
 ) {
-    const OUTBOX_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
     let mut started = HashSet::new();
     let mut discovered = initial;
     loop {
@@ -79,10 +78,13 @@ async fn watch_mobile_queued_join_rosters(
                 .await;
             });
         }
-        if config_path.is_none() {
+        let Some(changes) = changes.as_mut() else {
+            return;
+        };
+        if let Err(error) = changes.changed().await {
+            tracing::error!(?error, "mobile: failed to watch queued join approvals");
             return;
         }
-        tokio::time::sleep(OUTBOX_POLL_INTERVAL).await;
     }
 }
 

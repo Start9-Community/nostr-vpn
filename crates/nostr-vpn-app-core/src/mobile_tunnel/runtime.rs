@@ -107,6 +107,11 @@ impl MobileTunnel {
         let initial_peers = config.peers.clone();
         let config_path = non_empty_path(&config.config_path);
         let private_state_config_path = private_state_config_path.or_else(|| config_path.clone());
+        let join_roster_watch = private_state_config_path
+            .as_deref()
+            .map(join_roster_watch::JoinRosterWatch::new)
+            .transpose()
+            .context("failed to watch mobile join approvals")?;
         let runtime_state_path = private_state_config_path
             .as_deref()
             .and_then(mobile_runtime_state_path);
@@ -376,6 +381,7 @@ impl MobileTunnel {
                 state_control_sender.clone(),
                 private_state_config_path.clone(),
                 queued_join_rosters,
+                join_roster_watch,
             )));
         }
 

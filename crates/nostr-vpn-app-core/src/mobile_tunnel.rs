@@ -64,6 +64,8 @@ use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinHandle;
 
+mod join_roster_watch;
+
 #[cfg(target_os = "android")]
 include!("mobile_tunnel/native_tun.rs");
 #[cfg(any(test, target_os = "ios"))]

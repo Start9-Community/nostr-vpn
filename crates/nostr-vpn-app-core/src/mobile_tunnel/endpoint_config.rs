@@ -196,8 +196,10 @@ fn fips_endpoint_config_for_platform(
 ) -> FipsConfig {
     let mut config = FipsConfig::new();
     if platform == RuntimePlatform::Ios {
-        // Receiver reports retain link health with less idle reporting work.
+        // Receiver reports retain link and session health with less idle
+        // reporting work on a phone.
         config.node.mmp.mode = fips_core::mmp::MmpMode::Lightweight;
+        config.node.session_mmp.mode = fips_core::mmp::MmpMode::Lightweight;
     }
     // A first-adjacency seed may authenticate before its tree/bloom adverts
     // have converged. Reply-learned discovery can ask that live adjacency for
@@ -690,6 +692,8 @@ mod endpoint_config_tests {
         let config =
             fips_endpoint_config_for_platform("nostr-vpn:test", &mobile, RuntimePlatform::Ios);
 
+        assert_eq!(config.node.mmp.mode, fips_core::mmp::MmpMode::Lightweight);
+        assert_eq!(config.node.session_mmp.mode, fips_core::mmp::MmpMode::Lightweight);
         assert!(config.node.discovery.nostr.enabled);
         assert!(
             config.node.discovery.nostr.share_local_candidates,

@@ -48,7 +48,7 @@ toml.workspace = true
 tracing.workspace = true
 uniffi.workspace = true
 
-[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+[target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
 libc.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
