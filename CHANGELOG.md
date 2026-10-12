@@ -56,6 +56,8 @@ settings and identities. iOS does not support paid exits.
   after interrupted mint responses or wallet imports.
 - Bind paid-exit measurements to the selected tunnel and reject results when
   the active exit changes during a probe.
+- Stop retrying payments for unfunded sessions and retire expired free trials
+  without contacting the mint.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.
