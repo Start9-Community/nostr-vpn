@@ -62,8 +62,6 @@ impl LinuxWireGuardExitRuntime {
             }
         }
     }
-
-
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

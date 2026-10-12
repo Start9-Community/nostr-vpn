@@ -149,8 +149,6 @@ mod tests {
         )
         .expect("fresh physical default");
         assert_eq!(selected, fresh);
-
-
     }
 
     #[test]

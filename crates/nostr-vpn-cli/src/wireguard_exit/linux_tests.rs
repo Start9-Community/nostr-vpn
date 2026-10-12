@@ -746,7 +746,13 @@ fn failure_after_each_apply_mutation_restores_exact_existing_state() {
     let apply_mutations = successful.mutation_count;
     assert_eq!(successful.state.address.as_deref(), Some("10.77.0.2/32"));
     assert!(successful.state.wireguard_config.contains("FwMark = 20054"));
-    assert!(successful.state.table_routes.iter().any(|route| route == "default dev nvwg0"));
+    assert!(
+        successful
+            .state
+            .table_routes
+            .iter()
+            .any(|route| route == "default dev nvwg0")
+    );
     assert_eq!(successful.state.main_routes, initial.main_routes);
     assert_eq!(successful.state.endpoint_routes, initial.endpoint_routes);
     assert!(apply_mutations > 0);
@@ -820,11 +826,21 @@ fn alternate_underlay_refresh_preserves_physical_routes_and_carrier_mark() {
     let primary = initial.main_routes[0].clone();
     let secondary = initial.main_routes[1].clone();
     let runtime = apply_linux_wireguard_exit_upstream_with(
-        &mut runner, &config(), "10.44.0.0/16", None, Some(&primary),
-    ).expect("initial primary apply");
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        None,
+        Some(&primary),
+    )
+    .expect("initial primary apply");
     let runtime = apply_linux_wireguard_exit_upstream_with(
-        &mut runner, &config(), "10.44.0.0/16", Some(&runtime), Some(&secondary),
-    ).expect("alternate underlay refresh");
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        Some(&runtime),
+        Some(&secondary),
+    )
+    .expect("alternate underlay refresh");
     assert_eq!(runner.state.main_routes, initial.main_routes);
     assert_eq!(runner.state.endpoint_routes, initial.endpoint_routes);
     assert!(runner.state.wireguard_config.contains("FwMark = 20054"));
@@ -832,8 +848,6 @@ fn alternate_underlay_refresh_preserves_physical_routes_and_carrier_mark() {
     cleanup_linux_wireguard_exit_upstream_with(&mut runner, &runtime).expect("cleanup");
     assert_eq!(runner.state, initial);
 }
-
-
 
 #[test]
 fn linkdown_route_annotations_are_never_replayed_to_iproute2() {
@@ -870,18 +884,24 @@ fn legacy_journal_still_restores_pre_policy_main_defaults() {
     let mut runner = FakeRunner::existing();
     let initial = runner.state.clone();
     let runtime = apply_linux_wireguard_exit_upstream_with(
-        &mut runner, &config(), "10.44.0.0/16", None, None,
-    ).expect("fixture apply");
+        &mut runner,
+        &config(),
+        "10.44.0.0/16",
+        None,
+        None,
+    )
+    .expect("fixture apply");
     let mut legacy = serde_json::to_value(&runtime).unwrap();
-    legacy.as_object_mut().unwrap().remove("main_defaults_owned");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("main_defaults_owned");
     let legacy: LinuxWireGuardExitRuntime = serde_json::from_value(legacy).unwrap();
     assert!(legacy.main_defaults_owned);
     runner.state.main_routes = vec!["default dev nvwg0 src 10.77.0.2".into()];
     cleanup_linux_wireguard_exit_upstream_with(&mut runner, &legacy).expect("legacy cleanup");
     assert_eq!(runner.state, initial);
 }
-
-
 
 include!("linux_tests/reconciliation.rs");
 include!("linux_tests/readiness.rs");

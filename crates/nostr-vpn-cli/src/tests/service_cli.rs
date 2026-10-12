@@ -592,7 +592,8 @@ fn linux_egress_guard_precedes_networking_and_has_no_release_on_stop() {
     let unit = crate::service_management::linux_guard_service_unit_content(
         Path::new("/usr/local/bin/nvpn"),
         Path::new("/home/example/Nostr VPN/config.toml"),
-    ).unwrap();
+    )
+    .unwrap();
     assert!(unit.contains("DefaultDependencies=no"));
     assert!(unit.contains("After=local-fs.target"));
     assert!(unit.contains("Before=network-pre.target nvpn.service"));
@@ -605,23 +606,38 @@ fn linux_egress_guard_precedes_networking_and_has_no_release_on_stop() {
 #[cfg(target_os = "linux")]
 #[test]
 fn systemd_verifies_daemon_and_early_guard_unit_dependencies() {
-    let directory = std::env::temp_dir().join(format!("nvpn-egress-units-{}", rand::random::<u64>()));
+    let directory =
+        std::env::temp_dir().join(format!("nvpn-egress-units-{}", rand::random::<u64>()));
     std::fs::create_dir(&directory).unwrap();
     let guard = crate::service_management::linux_guard_service_unit_content(
-        Path::new("/bin/true"), Path::new("/home/example/config.toml"),
-    ).unwrap();
+        Path::new("/bin/true"),
+        Path::new("/home/example/config.toml"),
+    )
+    .unwrap();
     let daemon = crate::linux_service_unit_content(
-        Path::new("/bin/true"), Path::new("/home/example/config.toml"), "nvpn", 60, Path::new("/tmp/nvpn.log"),
-    ).unwrap();
+        Path::new("/bin/true"),
+        Path::new("/home/example/config.toml"),
+        "nvpn",
+        60,
+        Path::new("/tmp/nvpn.log"),
+    )
+    .unwrap();
     let guard_path = directory.join("nvpn-egress-guard.service");
     let daemon_path = directory.join("nvpn.service");
     std::fs::write(&guard_path, guard).unwrap();
     std::fs::write(&daemon_path, daemon).unwrap();
     let output = std::process::Command::new("systemd-analyze")
-        .args(["verify", "--man=no"]).arg(&guard_path).arg(&daemon_path).output();
+        .args(["verify", "--man=no"])
+        .arg(&guard_path)
+        .arg(&daemon_path)
+        .output();
     std::fs::remove_dir_all(directory).unwrap();
     match output {
-        Ok(output) => assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr)),
+        Ok(output) => assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("systemd unit verification requires a systemd development host");
         }
@@ -632,7 +648,8 @@ fn systemd_verifies_daemon_and_early_guard_unit_dependencies() {
 #[cfg(unix)]
 #[test]
 fn linux_service_ownership_accepts_relative_and_symlink_config_identity() {
-    let directory = std::env::temp_dir().join(format!("nvpn-service-config-{}", rand::random::<u64>()));
+    let directory =
+        std::env::temp_dir().join(format!("nvpn-service-config-{}", rand::random::<u64>()));
     std::fs::create_dir(&directory).unwrap();
     let path = directory.join("config.toml");
     std::fs::write(&path, "").unwrap();
@@ -640,14 +657,27 @@ fn linux_service_ownership_accepts_relative_and_symlink_config_identity() {
     let link = directory.join("link.toml");
     std::os::unix::fs::symlink(&path, &link).unwrap();
     let unit = crate::linux_service_unit_content(
-        Path::new("/usr/local/bin/nvpn"), &canonical, "nvpn", 20, &directory.join("daemon.log"),
-    ).unwrap();
+        Path::new("/usr/local/bin/nvpn"),
+        &canonical,
+        "nvpn",
+        20,
+        &directory.join("daemon.log"),
+    )
+    .unwrap();
     let mut relative = PathBuf::new();
-    for _ in std::env::current_dir().unwrap().ancestors().skip(1) { relative.push(".."); }
+    for _ in std::env::current_dir().unwrap().ancestors().skip(1) {
+        relative.push("..");
+    }
     relative.push(canonical.strip_prefix("/").unwrap());
     for alias in [&path, &link, &relative] {
-        assert!(linux_service_unit_matches_config(&unit, alias), "equivalent configuration");
+        assert!(
+            linux_service_unit_matches_config(&unit, alias),
+            "equivalent configuration"
+        );
     }
-    assert!(!linux_service_unit_matches_config(&unit, &directory.join("other.toml")));
+    assert!(!linux_service_unit_matches_config(
+        &unit,
+        &directory.join("other.toml")
+    ));
     std::fs::remove_dir_all(directory).unwrap();
 }

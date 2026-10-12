@@ -127,10 +127,14 @@ fn manual_failures_preserve_explicit_exit_selection() {
 
     let saved_selection = std::fs::read(&config_path).unwrap();
     let mut manual = PaidExitManualBuyer::default();
-    assert!(fail_manual_paid_exit(
-        &mut manual, &config_path, "Seller transport failed", 131,
-    ).expect("record manual health failure"));
-    assert_eq!(app.internet_source, nostr_vpn_core::config::InternetSource::PaidManual);
+    assert!(
+        fail_manual_paid_exit(&mut manual, &config_path, "Seller transport failed", 131,)
+            .expect("record manual health failure")
+    );
+    assert_eq!(
+        app.internet_source,
+        nostr_vpn_core::config::InternetSource::PaidManual
+    );
     assert_eq!(std::fs::read(&config_path).unwrap(), saved_selection);
 
     let _ = std::fs::remove_dir_all(directory);
