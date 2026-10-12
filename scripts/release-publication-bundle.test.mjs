@@ -24,11 +24,14 @@ import {
   buildReleaseGateAttestation,
   startosExactPackageValidator,
 } from './release-artifact-provenance-lib.mjs'
+import { readStartosSourceVersion } from './startos-release.mjs'
 
 const tag = readWorkspaceVersionTag(
   readFileSync(join(process.cwd(), 'Cargo.toml'), 'utf8'),
 )
-const marketingVersion = tag.slice(1)
+const startosVersion = readStartosSourceVersion(
+  readFileSync(join(process.cwd(), 'startos', 'versions', 'current.ts'), 'utf8'),
+)
 const commit = 'a'.repeat(40)
 const tree = 'b'.repeat(40)
 const releaseGateSummary = 'f'.repeat(64)
@@ -64,7 +67,7 @@ function startosManifestSha256(arch) {
       id: 'nostr-vpn',
       images: [{ id: 'app', arch: [arch] }],
       virtualNetworking: true,
-      version: `${marketingVersion}:0`,
+      version: startosVersion,
     }))
     .digest('hex')
 }
@@ -100,7 +103,7 @@ case "$3" in
   *-startos-x86_64.s9pk) arch=x86_64 ;;
   *) exit 2 ;;
 esac
-printf '{"id":"nostr-vpn","version":"${marketingVersion}:0","virtualNetworking":true,"images":[{"id":"app","arch":["%s"]}]}\\n' "$arch"
+printf '{"id":"nostr-vpn","version":"${startosVersion}","virtualNetworking":true,"images":[{"id":"app","arch":["%s"]}]}\\n' "$arch"
 `,
   )
   chmodSync(fakeStartCli, 0o755)
