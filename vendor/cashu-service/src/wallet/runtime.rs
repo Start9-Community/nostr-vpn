@@ -21,6 +21,8 @@ use super::{
 pub struct CashuWalletService {
     data_dir: PathBuf,
     repository: WalletRepository,
+    #[cfg(feature = "spilman-wallet-http")]
+    pub(crate) http_client: reqwest::Client,
     localstore: Arc<WalletSqliteDatabase>,
     operation_lock: Mutex<()>,
     _writer_lock: File,
@@ -56,7 +58,18 @@ impl CashuWalletService {
         data_dir: impl AsRef<Path>,
         seed_store: Arc<dyn CashuWalletSeedStore>,
     ) -> Result<Self> {
-        Self::open(data_dir.as_ref(), seed_store.as_ref(), true).await
+        Self::open(data_dir.as_ref(), seed_store.as_ref(), true, None).await
+    }
+
+    /// Open a wallet whose mint requests use an explicit control-network proxy.
+    /// The proxy is runtime-only and is never saved with wallet data.
+    #[cfg(feature = "wallet-proxy")]
+    pub async fn open_with_seed_store_and_proxy(
+        data_dir: impl AsRef<Path>,
+        seed_store: Arc<dyn CashuWalletSeedStore>,
+        proxy: url::Url,
+    ) -> Result<Self> {
+        Self::open(data_dir.as_ref(), seed_store.as_ref(), true, Some(proxy)).await
     }
 
     /// Open the legacy file-backed deployment profile.
@@ -66,13 +79,14 @@ impl CashuWalletService {
     pub async fn open_file_backed(data_dir: impl AsRef<Path>) -> Result<Self> {
         let data_dir = data_dir.as_ref();
         let seed_store = FileCashuWalletSeedStore::for_data_dir(data_dir);
-        Self::open(data_dir, &seed_store, false).await
+        Self::open(data_dir, &seed_store, false, None).await
     }
 
     async fn open(
         data_dir: &Path,
         seed_store: &dyn CashuWalletSeedStore,
         migrate_legacy_seed: bool,
+        proxy: Option<url::Url>,
     ) -> Result<Self> {
         fs::create_dir_all(cashu_wallet_dir(data_dir))
             .context("failed to create the Cashu wallet directory")?;
@@ -83,13 +97,26 @@ impl CashuWalletService {
                 .await
                 .context("failed to open Cashu wallet database")?,
         );
-        let repository = WalletRepositoryBuilder::new()
+        #[cfg(feature = "spilman-wallet-http")]
+        let http_client = match proxy.as_ref() {
+            Some(proxy) => reqwest::Client::builder()
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(proxy.as_str())?)
+                .build()
+                .context("failed to initialize mint control networking")?,
+            None => reqwest::Client::new(),
+        };
+        let mut builder = WalletRepositoryBuilder::new()
             .localstore(localstore.clone())
             .seed(resolved.seed)
             // Leave headroom for direct channel settlement/refund requests.
             .with_rate_limiting_config(
                 cdk::wallet::RateLimitConfig::try_new(5, 15).expect("nonzero mint budget"),
-            )
+            );
+        if let Some(proxy) = proxy {
+            builder = builder.proxy_url(proxy);
+        }
+        let repository = builder
             .build()
             .await
             .context("failed to build Cashu wallet repository")?;
@@ -99,6 +126,8 @@ impl CashuWalletService {
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
             repository,
+            #[cfg(feature = "spilman-wallet-http")]
+            http_client,
             localstore,
             operation_lock: Mutex::new(()),
             _writer_lock: writer_lock,

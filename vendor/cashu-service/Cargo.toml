@@ -67,6 +67,7 @@ spilman-configurable-host = [
 spilman-configurable-host-reqwest = [
     "spilman-configurable-host",
     "cdk-spilman/configurable-host-reqwest",
+    "dep:reqwest",
 ]
 spilman-wallet = [
     "spilman",
@@ -89,6 +90,7 @@ wallet = [
     "dep:hex",
     "dep:uuid",
 ]
+wallet-proxy = ["wallet", "dep:cdk-http-client"]
 
 [lib]
 name = "cashu_service"
@@ -137,6 +139,13 @@ features = ["wallet"]
 optional = true
 default-features = false
 package = "cdk"
+
+# Opt into CDK's SOCKS-capable backend for explicit wallet control connections.
+[dependencies.cdk-http-client]
+version = "=0.18.0"
+features = ["reqwest"]
+optional = true
+default-features = false
 
 [dependencies.cdk-axum]
 version = "=0.18.0"
@@ -189,6 +198,7 @@ version = "0.12"
 features = [
     "rustls-tls",
     "json",
+    "socks",
 ]
 optional = true
 default-features = false

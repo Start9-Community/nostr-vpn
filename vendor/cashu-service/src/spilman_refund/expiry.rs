@@ -54,6 +54,7 @@ pub(super) async fn recover_expired_funding<M: MintConnection>(
     channel: &EstablishedChannel,
     sender_secret: &SecretKey,
     mint: &M,
+    client: &reqwest::Client,
     state: State,
 ) -> anyhow::Result<Option<Vec<Proof>>> {
     let now = std::time::SystemTime::now()
@@ -66,7 +67,8 @@ pub(super) async fn recover_expired_funding<M: MintConnection>(
         Some(refund) => refund,
         None if state == State::Spent => return Ok(None), // Seller settled first.
         None => {
-            let keyset_json = fetch_spilman_keyset_info_json(
+            let keyset_json = fetch_spilman_keyset_info_json_with_client(
+                client,
                 &channel.params.mint,
                 &channel.params.unit.to_string(),
                 None,

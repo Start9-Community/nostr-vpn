@@ -481,13 +481,22 @@ impl ConfigurableHost {
     /// the method returns `Ok(())` if at least one mint succeeded, or `Err`
     /// with all failures if every mint failed.
     pub async fn initialize_keysets(&self) -> Result<(), String> {
-        use super::configurable_networking::fetch_and_cache_keysets;
+        self.initialize_keysets_with_client(&reqwest::Client::new())
+            .await
+    }
+
+    /// Initialize all mint keysets over the caller's explicit network path.
+    pub async fn initialize_keysets_with_client(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<(), String> {
+        use super::configurable_networking::fetch_and_cache_keysets_with_client;
 
         let mint_urls: Vec<String> = self.mints().keys().cloned().collect();
         let mut errors = Vec::new();
 
         for mint_url in &mint_urls {
-            match fetch_and_cache_keysets(self, mint_url).await {
+            match fetch_and_cache_keysets_with_client(self, mint_url, client).await {
                 Ok(()) => {
                     tracing::info!("Cached keysets from {mint_url}");
                 }

@@ -109,6 +109,8 @@ pub struct FileSpilmanPaymentReceiver {
     host: Arc<cdk_spilman::configurable_host::ConfigurableHost>,
     bridge: cdk_spilman::SpilmanBridge<SharedConfigurableHost, String>,
     receiver_pubkey_hex: String,
+    #[cfg(feature = "spilman-configurable-host-reqwest")]
+    http_client: reqwest::Client,
 }
 
 #[cfg(feature = "spilman-configurable-host")]
@@ -321,7 +323,24 @@ impl FileSpilmanPaymentReceiver {
             bridge: cdk_spilman::SpilmanBridge::new(SharedConfigurableHost(Arc::clone(&host))),
             host,
             receiver_pubkey_hex,
+            #[cfg(feature = "spilman-configurable-host-reqwest")]
+            http_client: reqwest::Client::new(),
         })
+    }
+
+    #[cfg(feature = "spilman-configurable-host-reqwest")]
+    /// Use this connection for both mint keyset refreshes and channel settlement.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = client;
+        self
+    }
+
+    #[cfg(feature = "spilman-configurable-host-reqwest")]
+    /// Refresh accepted mint keys using this receiver's network connection.
+    pub async fn refresh_keysets(&self) -> Result<(), String> {
+        self.host
+            .initialize_keysets_with_client(&self.http_client)
+            .await
     }
 
     #[cfg(feature = "spilman-configurable-host-reqwest")]
@@ -329,13 +348,9 @@ impl FileSpilmanPaymentReceiver {
         data_dir: &Path,
         config: FileSpilmanPaymentReceiverConfig,
     ) -> Result<Self, String> {
-        let (host, receiver_pubkey_hex) = file_spilman_receiver_host(data_dir, config)?;
-        host.initialize_keysets().await?;
-        Ok(Self {
-            bridge: cdk_spilman::SpilmanBridge::new(SharedConfigurableHost(Arc::clone(&host))),
-            host,
-            receiver_pubkey_hex,
-        })
+        let receiver = Self::load(data_dir, config)?;
+        receiver.refresh_keysets().await?;
+        Ok(receiver)
     }
 
     pub fn receiver_pubkey_hex(&self) -> &str {
@@ -358,8 +373,10 @@ impl FileSpilmanPaymentReceiver {
             ));
         }
 
-        let networking =
-            cdk_spilman::configurable_networking::ReqwestNetworking::new(Arc::clone(&self.host));
+        let networking = cdk_spilman::configurable_networking::ReqwestNetworking::with_client(
+            Arc::clone(&self.host),
+            self.http_client.clone(),
+        );
         let closed = self
             .bridge
             .execute_unilateral_close_async(channel_id, &networking)

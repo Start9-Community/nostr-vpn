@@ -24,6 +24,7 @@ struct State {
     corrupt_signature: bool,
     incomplete_restore: bool,
     signatures: Vec<(BlindedMessage, BlindSignature)>,
+    requests: Vec<String>,
 }
 
 struct Mint {
@@ -75,6 +76,7 @@ impl Mint {
                 let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
                 let (status, response, drop_response) = {
                     let mut state = shared.lock().unwrap();
+                    state.requests.push(path.to_owned());
                     let mut status = 200;
                     let mut drop_response = false;
                     let response = match path {
@@ -187,13 +189,22 @@ impl Mint {
     }
 
     fn fund(&self, directory: &std::path::Path, expiry: u64) -> (String, u64) {
+        self.fund_for_receiver(directory, expiry, SecretKey::generate().public_key())
+    }
+
+    fn fund_for_receiver(
+        &self,
+        directory: &std::path::Path,
+        expiry: u64,
+        receiver: cdk::nuts::PublicKey,
+    ) -> (String, u64) {
         let sender = load_or_create_cashu_spilman_sender_key(directory).unwrap();
         let key = SecretKey::from_hex(&sender.secret_hex).unwrap();
         let total =
             ChannelParameters::get_minimum_funding_token_amount(8, &self.keyset, 0).unwrap();
         let params = ChannelParameters::new_with_secret_key(
             key.public_key(),
-            SecretKey::generate().public_key(),
+            receiver,
             self.url.clone(),
             CurrencyUnit::Sat,
             8,
@@ -212,13 +223,27 @@ impl Mint {
                 let output = params
                     .create_deterministic_output_with_blinding("funding", amount, index)
                     .unwrap();
-                let y = cdk::dhke::hash_to_curve(output.secret.as_bytes()).unwrap();
-                proofs.push(Proof::new(
-                    cdk::Amount::from(amount),
-                    self.keyset.keyset_id,
-                    output.secret,
-                    cdk::dhke::sign_message(&self.secret, &y).unwrap(),
-                ));
+                let message = output
+                    .to_blinded_message(cdk::Amount::from(amount), self.keyset.keyset_id)
+                    .unwrap();
+                let mut signature = BlindSignature {
+                    amount: message.amount,
+                    keyset_id: message.keyset_id,
+                    c: cdk::dhke::sign_message(&self.secret, &message.blinded_secret).unwrap(),
+                    dleq: None,
+                };
+                signature
+                    .add_dleq_proof(&message.blinded_secret, &self.secret)
+                    .unwrap();
+                proofs.extend(
+                    cdk::dhke::construct_proofs(
+                        vec![signature],
+                        vec![output.blinding_factor],
+                        vec![output.secret],
+                        &self.keyset.active_keys,
+                    )
+                    .unwrap(),
+                );
             }
         }
         let recovered = total - (proofs.len() as u64 * 150).div_ceil(1000);
@@ -516,4 +541,145 @@ async fn expiry_refund_requires_complete_unspent_funding_state() {
         .unwrap();
     assert_eq!(result.imported_amount_sat, expected);
     assert_wallet_refund(&mint, directory.path(), expected).await;
+}
+
+#[tokio::test]
+async fn explicit_mint_client_covers_expiry_swap_and_interrupted_import_restore() {
+    let mut mint = Mint::new().await;
+    let address: std::net::SocketAddr = mint.url.strip_prefix("http://").unwrap().parse().unwrap();
+    mint.url = "http://refund-mint.invalid".to_owned();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .resolve("refund-mint.invalid", address)
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let (id, expected) = mint.fund_expired(directory.path()).await;
+    let lock = || {
+        cashu_service::SharedSpilmanClientStoreLock::acquire(spilman_client_store_path(
+            directory.path(),
+        ))
+        .unwrap()
+    };
+    let failed =
+        cashu_service::restore_streaming_route_cashu_spilman_refund_with_wallet_and_client(
+            directory.path(),
+            &id,
+            lock(),
+            &mut false,
+            &client,
+            |_, _, _| async { anyhow::bail!("wallet import interrupted") },
+        )
+        .await;
+    assert!(failed
+        .unwrap_err()
+        .to_string()
+        .contains("wallet import interrupted"));
+    let public_key = mint.secret.public_key();
+    let result =
+        cashu_service::restore_streaming_route_cashu_spilman_refund_with_wallet_and_client(
+            directory.path(),
+            &id,
+            lock(),
+            &mut false,
+            &client,
+            move |url, unit, json| async move {
+                assert_eq!(url, "http://refund-mint.invalid");
+                assert_eq!(unit, "sat");
+                let proofs: Vec<Proof> = serde_json::from_str(&json)?;
+                for proof in &proofs {
+                    proof.verify_dleq(public_key)?;
+                }
+                let amount: u64 = proofs.iter().map(|proof| u64::from(proof.amount)).sum();
+                assert_eq!(amount, expected);
+                Ok(amount)
+            },
+        )
+        .await
+        .unwrap();
+    assert!(result.complete);
+    assert_eq!(result.imported_amount_sat, expected);
+    let state = mint.state.lock().unwrap();
+    assert_eq!(state.swaps, 1);
+    for path in ["/v1/checkstate", "/v1/keysets", "/v1/swap", "/v1/restore"] {
+        assert!(
+            state.requests.iter().any(|request| request == path),
+            "missing {path}"
+        );
+    }
+    assert!(state
+        .requests
+        .iter()
+        .any(|path| path.starts_with("/v1/keys/")));
+}
+
+#[cfg(feature = "spilman-configurable-host-reqwest")]
+#[tokio::test]
+async fn receiver_uses_explicit_mint_client_for_keysets_and_settlement() {
+    use cashu_service::{
+        CashuSpilmanPaymentReceiver, CashuSpilmanPaymentSigner, FileSpilmanPaymentReceiver,
+        FileSpilmanPaymentReceiverConfig, FileSpilmanPaymentSigner,
+    };
+
+    let mut mint = Mint::new().await;
+    let address = mint.url.strip_prefix("http://").unwrap().parse().unwrap();
+    mint.url = "http://seller-mint.invalid".to_owned();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .resolve("seller-mint.invalid", address)
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let seller = tempfile::tempdir().unwrap();
+    let sender = tempfile::tempdir().unwrap();
+    let mut config = FileSpilmanPaymentReceiverConfig::new([mint.url.clone()]);
+    config.min_capacity = 1;
+    let receiver = FileSpilmanPaymentReceiver::load(seller.path(), config)
+        .unwrap()
+        .with_http_client(client);
+    receiver.refresh_keysets().await.unwrap();
+    let expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    let (channel, _) = mint.fund_for_receiver(
+        sender.path(),
+        expiry,
+        cdk::nuts::PublicKey::from_hex(receiver.receiver_pubkey_hex()).unwrap(),
+    );
+    let signer = FileSpilmanPaymentSigner::load(sender.path()).unwrap();
+    let payment = signer
+        .sign_cashu_spilman_payment(&channel, 2, true)
+        .unwrap();
+    receiver
+        .process_cashu_spilman_payment(&payment, &"{}".to_owned())
+        .unwrap();
+    let closed = receiver
+        .close_cashu_spilman_channel(&channel)
+        .await
+        .unwrap();
+    assert_eq!(closed.closed_amount, 2);
+    // Nominal proofs include one sat to cover their later redemption fee.
+    assert_eq!(closed.receiver_sum, 3);
+    let proofs: Vec<Proof> = serde_json::from_str(&closed.receiver_proofs_json).unwrap();
+    assert_eq!(proofs.iter().map(|p| u64::from(p.amount)).sum::<u64>(), 3);
+    for proof in proofs {
+        proof.verify_dleq(mint.secret.public_key()).unwrap();
+    }
+    assert!(
+        receiver
+            .close_cashu_spilman_channel(&channel)
+            .await
+            .unwrap()
+            .already_closed
+    );
+    let state = mint.state.lock().unwrap();
+    assert_eq!(state.swaps, 1);
+    assert!(state.requests.iter().any(|path| path == "/v1/keysets"));
+    assert!(state
+        .requests
+        .iter()
+        .any(|path| path.starts_with("/v1/keys/")));
 }

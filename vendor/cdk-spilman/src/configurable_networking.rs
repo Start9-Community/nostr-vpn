@@ -95,8 +95,14 @@ fn parse_listed_keysets(response: &serde_json::Value) -> Result<Vec<ListedMintKe
 pub async fn fetch_all_keysets_from_mint(
     mint_url: &str,
 ) -> Result<Vec<MintKeysetWithKeys>, String> {
-    let client = reqwest::Client::new();
+    fetch_all_keysets_from_mint_with_client(mint_url, &reqwest::Client::new()).await
+}
 
+/// Fetch keysets over an explicitly supplied mint connection.
+pub async fn fetch_all_keysets_from_mint_with_client(
+    mint_url: &str,
+    client: &reqwest::Client,
+) -> Result<Vec<MintKeysetWithKeys>, String> {
     let keysets_url = format!("{mint_url}/v1/keysets");
     let keysets_resp: serde_json::Value =
         crate::mint_http::send_mint_request(client.get(&keysets_url))
@@ -210,7 +216,16 @@ pub async fn fetch_and_cache_keysets(
     host: &ConfigurableHost,
     mint_url: &str,
 ) -> Result<(), String> {
-    let keysets = fetch_all_keysets_from_mint(mint_url).await?;
+    fetch_and_cache_keysets_with_client(host, mint_url, &reqwest::Client::new()).await
+}
+
+/// Refresh the keyset cache over an explicitly supplied mint connection.
+pub async fn fetch_and_cache_keysets_with_client(
+    host: &ConfigurableHost,
+    mint_url: &str,
+    client: &reqwest::Client,
+) -> Result<(), String> {
+    let keysets = fetch_all_keysets_from_mint_with_client(mint_url, client).await?;
     for ks in keysets {
         let info_json = build_keyset_info_json(&ks.id, &ks.unit, &ks.keys, ks.input_fee_ppk);
         host.set_keyset(
@@ -242,12 +257,18 @@ pub async fn fetch_and_cache_keysets(
 #[derive(Debug)]
 pub struct ReqwestNetworking {
     host: Arc<ConfigurableHost>,
+    client: reqwest::Client,
 }
 
 impl ReqwestNetworking {
     /// Create a new `ReqwestNetworking` wrapping the given host.
     pub fn new(host: Arc<ConfigurableHost>) -> Self {
-        Self { host }
+        Self::with_client(host, reqwest::Client::new())
+    }
+
+    /// Keep one caller-supplied connection for swaps and keyset refreshes.
+    pub fn with_client(host: Arc<ConfigurableHost>, client: reqwest::Client) -> Self {
+        Self { host, client }
     }
 }
 
@@ -258,11 +279,10 @@ impl SpilmanAsyncNetworking for ReqwestNetworking {
         mint_url: &str,
         swap_request_json: &str,
     ) -> Result<String, String> {
-        let client = reqwest::Client::new();
         let url = format!("{mint_url}/v1/swap");
 
         let resp = crate::mint_http::send_mint_request(
-            client
+            self.client
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .body(swap_request_json.to_string()),
@@ -302,7 +322,7 @@ impl SpilmanAsyncNetworking for ReqwestNetworking {
 
     async fn refresh_all_keysets(&self, mint: &str) -> Result<(), String> {
         tracing::info!("Refreshing keysets from {mint}...");
-        fetch_and_cache_keysets(&self.host, mint).await?;
+        fetch_and_cache_keysets_with_client(&self.host, mint, &self.client).await?;
         tracing::info!("Keyset refresh complete for {mint}");
         Ok(())
     }
