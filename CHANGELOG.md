@@ -52,6 +52,8 @@ settings and identities. iOS does not support paid exits.
   an Internet provider, and keep newer settings when pausing or resuming the VPN.
 - Prevent old payment retries from blocking newer Internet purchases, and
   acknowledge payments already covered by the seller's saved balance.
+- Recover unspent funds from expired payment channels and resume refunds safely
+  after interrupted mint responses or wallet imports.
 - Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
 - Protect macOS background-service PID and runtime-state files against unsafe
   paths and permissions.
