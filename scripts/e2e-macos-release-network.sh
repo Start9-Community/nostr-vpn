@@ -290,8 +290,33 @@ secure_dns_owned() {
 }
 
 resolver_files_absent() {
-  [[ ! -e "$SECURE_RESOLVER" && ! -e "$MAGIC_RESOLVER" ]] \
+  [[ ! -e "$SECURE_RESOLVER" && ! -e "$MAGIC_RESOLVER" \
+    && ! -e "${MAGIC_RESOLVER%/*}/fips" ]] \
     && secure_dns_store_absent
+}
+
+direct_split_dns_owned() {
+  [[ ! -e "$SECURE_RESOLVER" ]] && secure_dns_store_absent || return 1
+  # Direct keeps the running mesh's two scoped name resolvers. Neither may
+  # retain the exit's catch-all DNS policy; stopping the daemon removes both.
+  python3 - "$MAGIC_RESOLVER" "${MAGIC_RESOLVER%/*}/fips" <<'PY'
+import pathlib
+import re
+import sys
+
+paths = [pathlib.Path(value) for value in sys.argv[1:]]
+if any(path.is_symlink() or not path.is_file() for path in paths):
+    raise SystemExit(1)
+contents = [path.read_bytes() for path in paths]
+match = re.fullmatch(
+    rb"# Managed by nvpn MagicDNS\nnameserver 127\.0\.0\.1\n"
+    rb"port ([0-9]+)\noptions timeout:1 attempts:1\n",
+    contents[0],
+)
+raise SystemExit(not (
+    match and 0 < int(match[1]) <= 65535 and contents[0] == contents[1]
+))
+PY
 }
 
 system_service_loaded() {
@@ -1707,7 +1732,7 @@ run_crash_restart_gate() {
   echo "MACOS_RELEASE_NETWORK_CRASH_RESTART_OK"
 }
 
-direct_state_matches() {
+direct_route_state_matches() {
   local expected_iface expected_gateway expected_source_ip
   expected_iface="$(cat "$STATE_DIR/direct-interface")"
   expected_gateway="$(cat "$STATE_DIR/direct-gateway")"
@@ -1716,8 +1741,15 @@ direct_state_matches() {
     && "$(route_value default gateway)" == "$expected_gateway" \
     && "$(interface_ipv4 "$expected_iface")" == "$expected_source_ip" \
     && "$(endpoint_route_interface)" == "$expected_iface" ]] \
-    && wireguard_split_defaults_absent \
-    && resolver_files_absent \
+    && wireguard_split_defaults_absent
+}
+
+direct_state_matches() {
+  direct_route_state_matches && resolver_files_absent && direct_dns_query_works
+}
+
+running_direct_state_matches() {
+  direct_route_state_matches && direct_split_dns_owned \
     && direct_dns_query_works
 }
 
@@ -1803,7 +1835,7 @@ select_direct_and_stop() {
   echo "phase=select-direct"
   nvpn set --config "$CONFIG" --exit-node ""
   wait_until "the exact Direct route and DNS state" \
-    direct_state_matches
+    running_direct_state_matches
   wait_until "WireGuard disabled in the running daemon status" \
     runtime_wireguard_state_is false true
   privileged_nvpn stop --config "$CONFIG" --timeout-secs 8 --force
