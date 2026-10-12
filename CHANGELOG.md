@@ -21,6 +21,8 @@ settings and identities. iOS does not support paid exits.
 ### Fixed
 
 - Correct FIPS TCP transport handling for reliable peer connections.
+- Skip exhausted-hop events during peer replay so valid cached announcements
+  remain available without triggering malformed-frame cooldowns.
 - Keep joining devices pending until their signed network roster arrives,
   and preserve accepted membership after relaunch.
 - Return to the device list after approving a device on Linux while its
