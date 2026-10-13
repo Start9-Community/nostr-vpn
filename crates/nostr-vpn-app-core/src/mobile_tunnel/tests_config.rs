@@ -709,7 +709,9 @@
         }];
         app.ensure_defaults();
         let mut config = MobileTunnelConfig::from_app(&app).expect("mobile config");
-        config.listen_port = available_udp_port();
+        // An available IPv4 port can already be occupied on IPv6. Let each
+        // carrier reserve its own port instead of probing and releasing one.
+        config.listen_port = 0;
         config.nostr_discovery_enabled = false;
         config.webrtc_enabled = false;
         let config_json = serde_json::to_string(&config).expect("mobile config JSON");
