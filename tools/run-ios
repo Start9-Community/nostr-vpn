@@ -160,12 +160,19 @@ resolved_sim_device_id() {
     fi
   done < <(
     {
-      printf '%s\n' "${NVPN_IOS_SIMULATOR_ID:-}"
-      sim_device_id
-      xcrun simctl list devices available \
-        | sed -n 's/.*iPhone[^()]*(\([0-9A-F-]\{36\}\)).*/\1/p'
+      if [[ -n "${NVPN_IOS_SIMULATOR_ID:-}" ]]; then
+        printf '%s\n' "$NVPN_IOS_SIMULATOR_ID"
+      else
+        sim_device_id
+        xcrun simctl list devices available \
+          | sed -n 's/.*iPhone[^()]*(\([0-9A-F-]\{36\}\)).*/\1/p'
+      fi
     } | awk 'NF && !seen[$0]++'
   )
+  if [[ -n "${NVPN_IOS_SIMULATOR_ID:-}" ]]; then
+    echo "Requested iOS simulator could not boot" >&2
+    return 1
+  fi
 }
 
 ios_destination() {

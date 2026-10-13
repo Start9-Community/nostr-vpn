@@ -229,6 +229,10 @@ run_simulator() {
 }
 
 ios_sim_device_id() {
+  if [[ -n "${NVPN_IOS_SIMULATOR_ID:-}" ]]; then
+    printf '%s\n' "$NVPN_IOS_SIMULATOR_ID"
+    return
+  fi
   local booted
   booted="$(xcrun simctl list devices available \
     | sed -n 's/.*iPhone[^()]*(\([0-9A-F-]\{36\}\)) (Booted).*/\1/p' \
