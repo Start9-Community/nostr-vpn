@@ -204,6 +204,12 @@ run_builder_container \
 set -euo pipefail
 
 TARGET=$1
+if [[ "$TARGET" == aarch64-unknown-linux-musl ]]; then
+  # Rust's self-contained musl runtime does not supply GCC's outlined atomic
+  # helpers. Keep native dependencies' atomics inline and ARMv8.0-compatible.
+  export CFLAGS_aarch64_unknown_linux_musl="${CFLAGS_aarch64_unknown_linux_musl:-} -mno-outline-atomics"
+  export CXXFLAGS_aarch64_unknown_linux_musl="${CXXFLAGS_aarch64_unknown_linux_musl:-} -mno-outline-atomics"
+fi
 cd /home/rust/src
 # Rust dependency metadata must remain on the container's native filesystem.
 # Docker Desktop bind mounts can expose a just-renamed rmeta file before its
