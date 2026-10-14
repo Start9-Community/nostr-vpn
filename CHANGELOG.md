@@ -22,6 +22,8 @@ settings and identities. iOS does not support paid exits.
 
 - Update Rustls to 0.23.46 to include the latest TLS security fixes.
 - Correct FIPS TCP transport handling for reliable peer connections.
+- Recover through an authenticated fallback when the initial UDP handshake reply
+  is lost, then return to UDP when it becomes available.
 - Skip exhausted-hop events during peer replay so valid cached announcements
   remain available without triggering malformed-frame cooldowns.
 - Keep joining devices pending until their signed network roster arrives,
@@ -39,6 +41,8 @@ settings and identities. iOS does not support paid exits.
 - Reduce repeated discovery scans and idle packet-processing allocations.
 - Avoid repeated processing when incoming packets are waiting for an outgoing
   send, and preserve received packets whether that send succeeds or fails.
+- Preserve already-received packets when older queued traffic fills a processing
+  turn, preventing packet loss during reconnects.
 - Avoid timer wakeups while discovery is waiting for new events.
 - Reduce iOS tunnel wakeups with lightweight link and session reports and one async I/O
   worker, retaining the separate cryptographic worker pool.
