@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## 4.1.18 - 2026-10-13
+## 4.1.18 - 2026-10-14
 
 ### Release notes
 
@@ -35,6 +35,8 @@ settings and identities. iOS does not support paid exits.
 - Batch received discovery-cache writes and reuse unchanged event encodings
   to reduce background disk and CPU activity.
 - Reduce repeated discovery scans and idle packet-processing allocations.
+- Avoid repeated processing when incoming packets are waiting for an outgoing
+  send, and preserve received packets whether that send succeeds or fails.
 - Avoid timer wakeups while discovery is waiting for new events.
 - Reduce iOS tunnel wakeups with lightweight link and session reports and one async I/O
   worker, retaining the separate cryptographic worker pool.
