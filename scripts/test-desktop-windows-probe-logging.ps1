@@ -29,21 +29,21 @@ try {
         Start-Sleep -Milliseconds 25
       }
       if (!(Test-Path $log)) { throw "$action produced no payload receipts: $([IO.File]::ReadAllText($stderr))" }
-      # Get-Content uses a shared read handle. Keep the same sharing conditions
-      # alive across several production probe writes to make the race deterministic.
+      # Keep a shared reader alive across several production probe writes.
+      # Match the observer's Select-String reads: ReadAllLines denies writes.
       $reader = [IO.File]::Open($log, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-      $before = [IO.File]::ReadAllLines($log).Count
+      $before = @(Select-String -LiteralPath $log -Pattern '^').Count
       $timer.Restart()
       $after = $before
       while ($after -lt ($before + 5) -and !$process.HasExited -and $timer.ElapsedMilliseconds -lt 3000) {
         Start-Sleep -Milliseconds 25
-        $after = [IO.File]::ReadAllLines($log).Count
+        $after = @(Select-String -LiteralPath $log -Pattern '^').Count
       }
       if ($process.HasExited -or $after -lt ($before + 5)) {
         $errorText = [IO.File]::ReadAllText($stderr)
         throw "$action stopped recording while its log was read: $errorText"
       }
-      if (@([IO.File]::ReadAllLines($log) | Where-Object { $_ -notmatch '^OK [0-9]+$' }).Count) {
+      if (@(Select-String -LiteralPath $log -Pattern '^OK [0-9]+$' -NotMatch).Count) {
         throw "$action did not produce complete successful loopback receipts"
       }
     } finally {
