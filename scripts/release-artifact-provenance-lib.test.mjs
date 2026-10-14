@@ -2619,6 +2619,7 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
       wireguard_endpoint_route_removed: true,
       wireguard_policy_rule_removed: true,
       wireguard_policy_table_empty: true,
+      egress_policy_removed: true,
       verified_https: true,
     }))
     write(join(root, 'crash-repair-receipt.json'), JSON.stringify({
@@ -2627,6 +2628,8 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
       through_exit_dns_before_crash: true,
       verified_https_before_crash: true,
       cleanup_journal_survived_sigkill: true,
+      durable_egress_protection_survived_sigkill: true,
+      egress_policy_removed: true,
       startup_repair_without_explicit_command: true,
       cleanup_journal_removed: true,
       physical_default_restored: true,
@@ -2685,7 +2688,7 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
       }))
     }
     const output = join(root, 'receipt.json')
-    const result = spawnSync(
+    const runBuilder = () => spawnSync(
       'python3',
       [
         join(process.cwd(), 'scripts/release-network-evidence.py'),
@@ -2705,11 +2708,27 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
       ],
       { encoding: 'utf8' },
     )
+    const result = runBuilder()
     assert.equal(result.status, 0, result.stderr)
     const receipt = JSON.parse(readFileSync(output, 'utf8'))
     assert.equal(receipt.summary.dnsPolicyCount, 5)
     assert.equal(receipt.summary.directRestored, true)
     assert.equal(receipt.summary.singletonAfterCrashRecovery, true)
+    for (const [filename, field, error] of [
+      ['direct-receipt.json', 'egress_policy_removed', /Linux Direct restoration receipt is incomplete/],
+      ['crash-repair-receipt.json', 'durable_egress_protection_survived_sigkill', /Linux SIGKILL\/restart repair receipt is incomplete/],
+      ['crash-repair-receipt.json', 'egress_policy_removed', /Linux SIGKILL\/restart repair receipt is incomplete/],
+    ]) {
+      const path = join(root, filename)
+      const original = readFileSync(path, 'utf8')
+      for (const value of [false, undefined]) {
+        write(path, JSON.stringify({ ...JSON.parse(original), [field]: value }))
+        const rejected = runBuilder()
+        assert.notEqual(rejected.status, 0, `${filename} accepted ${field}=${value}`)
+        assert.match(rejected.stderr, error)
+      }
+      write(path, original)
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
