@@ -66,7 +66,6 @@ PRIMARY_IFACE=""
 PRIMARY_SOURCE=""
 PRIMARY_ADDRESS=""
 HYPERVISOR_UPLINK=""
-SECONDARY_PROXY=""
 LINUX_RUN_UNIT=""
 GUEST_BINARY_COPY_TMP=""
 NETWORK_CREATED=0
@@ -433,10 +432,6 @@ virsh attach-interface \
 SH
   NETWORK_CREATED=1
   NIC_ATTACHED=1
-  SECONDARY_PROXY="ssh -o BatchMode=yes -o ConnectionAttempts=1 \
--o ConnectTimeout=10 -o ControlMaster=no -o ControlPersist=no -o ControlPath=none \
--o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
-$HYPERVISOR_SSH -W $SECONDARY_ADDRESS:22"
 }
 
 wait_for_secondary_adapter() {
@@ -471,7 +466,7 @@ parse_key_value() {
 
 guest_initialize() {
   local output json
-  output="$(run_guest_primary initialize \
+  output="$(run_guest_action initialize \
     "NVPN_UNDERLAY_SECONDARY_ADDRESS=$SECONDARY_ADDRESS" \
     "NVPN_UNDERLAY_SECONDARY_PREFIX=$SECONDARY_PREFIX" \
     "NVPN_UNDERLAY_SECONDARY_GATEWAY=$SECONDARY_GATEWAY")"
@@ -501,15 +496,10 @@ guest_initialize() {
     "$ARTIFACT_DIR/platform-network-monitor-probe.log" \
     || fail "production Linux netlink monitor probe receipt is missing"
 
-  for _ in $(seq 1 40); do
-    if secondary_ssh_command \
-      && "${LINUX_SECONDARY_SSH[@]}" hostname >/dev/null 2>&1
-    then
-      return 0
-    fi
-    sleep 0.25
-  done
-  fail "Linux second NIC is configured but SSH cannot reach it out of band"
+  # Strict egress deliberately rejects ordinary SSH replies. Prove the
+  # management channel before enabling protection; real NIC traffic is tested
+  # separately through carrier source, handshake and payload evidence.
+  run_guest_control 8 /bin/true
 }
 
 initialize_and_start_peer() {
@@ -537,7 +527,7 @@ initialize_and_start_peer() {
 
 start_linux_runner() {
   LINUX_RUN_UNIT="nvpn-underlay-$RUN_TOKEN.service"
-  start_guest_secondary_unit run \
+  start_guest_unit run \
     "NVPN_UNDERLAY_PEER_NPUB=$PEER_NPUB" \
     "NVPN_UNDERLAY_PEER_ENDPOINT=$PEER_ENDPOINT" \
     "NVPN_UNDERLAY_PEER_TUNNEL_IP=$PEER_TUNNEL_IP" \
@@ -553,9 +543,9 @@ start_linux_runner() {
   jq -e '
     .carrier == true
     and .active_profile == true
-    and .default_route == false
-    and .durable_default_route == true
-    and .strict_exit_physical_defaults_absent == true
+    and .physical_default_route == true
+    and .egress_policy_protected == true
+    and .application_endpoint_bypass == false
   ' "$ARTIFACT_DIR/secondary-underlay-ready.json" >/dev/null
   peer_command wait-ready >"$ARTIFACT_DIR/peer-ready.json"
   jq -e . "$ARTIFACT_DIR/peer-ready.json" >/dev/null
@@ -579,7 +569,7 @@ assert_peer_recovered_from_source() {
 }
 
 guest_receipt() {
-  run_secondary sudo -n cat "$GUEST_STATE_DIR/$1"
+  run_guest_control 8 cat "$GUEST_STATE_DIR/$1"
 }
 
 run_underlay_switches() {
@@ -728,13 +718,14 @@ run_dns_matrix_and_direct_restore() {
     and .wireguard_endpoint_route_removed == true
     and .wireguard_policy_rule_removed == true
     and .wireguard_policy_table_empty == true
+    and .egress_policy_removed == true
     and .verified_https == true
   ' "$ARTIFACT_DIR/direct-receipt.json" >/dev/null
   stop_guest_runner_unit
 }
 
 run_sigkill_restart_recovery() {
-  run_guest_primary crash-repair \
+  run_guest_action crash-repair \
     "NVPN_UNDERLAY_PEER_NPUB=$PEER_NPUB" \
     "NVPN_UNDERLAY_PEER_ENDPOINT=$PEER_ENDPOINT" \
     "NVPN_UNDERLAY_PEER_TUNNEL_IP=$PEER_TUNNEL_IP" \
@@ -756,6 +747,7 @@ run_sigkill_restart_recovery() {
       and .through_exit_dns_before_crash == true
       and .verified_https_before_crash == true
       and .cleanup_journal_survived_sigkill == true
+      and .durable_egress_protection_survived_sigkill == true
       and .wireguard_interface_survived_sigkill == true
       and .wireguard_endpoint_route_survived_sigkill == true
       and .wireguard_policy_rule_survived_sigkill == true
@@ -767,6 +759,7 @@ run_sigkill_restart_recovery() {
       and .wireguard_endpoint_route_removed == true
       and .wireguard_policy_rule_removed == true
       and .wireguard_policy_table_empty == true
+      and .egress_policy_removed == true
       and .secure_dns_cleanup_ownership_removed == true
       and .physical_default_restored == true
       and .public_dns_restored == true
@@ -790,7 +783,7 @@ run_sigkill_restart_recovery() {
 
 run_cleanup_fault_regression() {
   local command_status=0
-  if run_guest_primary cleanup-fault \
+  if run_guest_action cleanup-fault \
     "NVPN_UNDERLAY_PEER_NPUB=$PEER_NPUB" \
     "NVPN_UNDERLAY_PEER_ENDPOINT=$PEER_ENDPOINT" \
     "NVPN_UNDERLAY_PEER_TUNNEL_IP=$PEER_TUNNEL_IP" \
@@ -846,8 +839,8 @@ capture_cleanup_fault_diagnostics() {
   : >"$ARTIFACT_DIR/cleanup-fault-diagnostics.txt"
   for name in "${diagnostics[@]}"; do
     destination="$diagnostics_dir/$name"
-    if run_primary sudo -n test -f "$GUEST_STATE_DIR/$name"; then
-      run_primary sudo -n cat "$GUEST_STATE_DIR/$name" >"$destination"
+    if run_guest_control 8 test -f "$GUEST_STATE_DIR/$name"; then
+      run_guest_control 8 cat "$GUEST_STATE_DIR/$name" >"$destination"
       printf '%s=present\n' "$name" \
         >>"$ARTIFACT_DIR/cleanup-fault-diagnostics.txt"
     else
@@ -874,8 +867,7 @@ crash-connect.stderr.log crash-restart-daemon.stderr.log \
 cleanup-fault.receipt.json xtables-stop.log \
 fault-daemon.stdout.log fault-daemon.stderr.log \
 xtables-lock-held xtables-lock-release"
-  primary_ssh_command
-  "${LINUX_PRIMARY_SSH[@]}" "$remote_command" \
+  run_guest_control 30 /bin/sh -c "$remote_command" \
     | tar -C "$ARTIFACT_DIR/guest-state" -xf -
 }
 
@@ -895,10 +887,9 @@ capture_remote_state() {
   local peer_capture_succeeded=0
   local capture_failed=0
   mkdir -p "$ARTIFACT_DIR/guest-state" "$ARTIFACT_DIR/peer-state"
-  # Cleanup restores the primary link before collecting evidence. The guest
-  # has already deleted its secondary profile; probing it here times out and
-  # can orphan the SSH forwarding child after the deadline kills its parent.
-  if run_primary sudo -n test -d "$GUEST_STATE_DIR" >/dev/null 2>&1
+  # Evidence collection must work even when strict egress still blocks SSH
+  # replies. The management channel is independent of both test interfaces.
+  if run_guest_control 8 test -d "$GUEST_STATE_DIR" >/dev/null 2>&1
   then
     capture_guest_state && guest_capture_succeeded=1
   fi
@@ -938,7 +929,7 @@ capture_remote_state() {
 }
 
 audit_guest_cleanup() {
-  run_primary sudo -n bash -s -- \
+  run_guest_control 30 --stdin /bin/bash -s -- \
     "$GUEST_BINARY" "$GUEST_STATE_DIR" "$TARGET_TUN_IFACE" \
     "$PRIMARY_MAC" "$SECONDARY_MAC" "$PROBE_URL" <<'SH'
 set -euo pipefail
@@ -1008,6 +999,13 @@ curl -4 --fail --silent --show-error --max-time 8 --output /dev/null "$url" \
   || { echo "Linux guest cleanup audit failed: native HTTPS was not restored" >&2; exit 1; }
 [[ ! -e "$state/emergency-repair-invoked" ]] \
   || { echo "Linux guest cleanup audit failed: emergency repair was invoked" >&2; exit 1; }
+! nft list table inet nvpn_egress >/dev/null 2>&1 \
+  || { echo "Linux guest cleanup audit failed: egress protection remains" >&2; exit 1; }
+intent="/var/lib/nvpn/egress/$(printf %s "$state/config.toml" | sha256sum | cut -d ' ' -f 1).json"
+if [[ -e "$intent" ]]; then
+  jq -e '.version == 1 and .protection == null' "$intent" >/dev/null
+  rm -f "$intent"
+fi
 rm -rf "$state"
 [[ ! -e "$state" ]]
 trap - EXIT
@@ -1102,20 +1100,17 @@ cleanup() {
       "virsh domif-setlink '$VM_NAME' '$PRIMARY_IFACE' up" >/dev/null 2>&1 \
       || cleanup_failed=1
   fi
-  if [[ "$NIC_ATTACHED" == "1" ]]; then
-    wait_for_primary_guest || cleanup_failed=1
-  fi
   if [[ -n "$GUEST_BINARY_COPY_TMP" ]]; then
     run_primary "rm -f '$GUEST_BINARY_COPY_TMP'" >/dev/null 2>&1 || cleanup_failed=1
   fi
   capture_remote_state || cleanup_failed=1
   if [[ -n "$LINUX_RUN_UNIT" ]]; then
-    run_primary sudo -n systemctl status --no-pager "$LINUX_RUN_UNIT" \
+    run_guest_control 8 systemctl status --no-pager "$LINUX_RUN_UNIT" \
       >"$ARTIFACT_DIR/linux-run-unit-cleanup-state.txt" 2>&1 || true
     stop_guest_runner_unit >/dev/null 2>&1 || cleanup_failed=1
   fi
   if [[ "$NIC_ATTACHED" == "1" ]]; then
-    run_guest_primary cleanup >/dev/null 2>&1 || cleanup_failed=1
+    run_guest_action cleanup >/dev/null 2>&1 || cleanup_failed=1
   fi
   if [[ "$PEER_INITIALIZED" == "1" ]]; then
     peer_command cleanup >/dev/null 2>&1 || cleanup_failed=1

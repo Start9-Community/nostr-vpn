@@ -1517,7 +1517,8 @@ def build_desktop(args: argparse.Namespace) -> None:
             require(
                 common_direct
                 and direct.get("wireguard_policy_rule_removed") is True
-                and direct.get("wireguard_policy_table_empty") is True,
+                and direct.get("wireguard_policy_table_empty") is True
+                and direct.get("egress_policy_removed") is True,
                 "Linux Direct restoration receipt is incomplete",
             )
             crash_path = root / "crash-repair-receipt.json"
@@ -1528,6 +1529,8 @@ def build_desktop(args: argparse.Namespace) -> None:
                 and crash.get("through_exit_dns_before_crash") is True
                 and crash.get("verified_https_before_crash") is True
                 and crash.get("cleanup_journal_survived_sigkill") is True
+                and crash.get("durable_egress_protection_survived_sigkill") is True
+                and crash.get("egress_policy_removed") is True
                 and crash.get("startup_repair_without_explicit_command") is True
                 and crash.get("cleanup_journal_removed") is True
                 and crash.get("physical_default_restored") is True
