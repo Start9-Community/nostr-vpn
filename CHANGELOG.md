@@ -20,6 +20,7 @@ settings and identities. iOS does not support paid exits.
 
 ### Fixed
 
+- Update Rustls to 0.23.46 to include the latest TLS security fixes.
 - Correct FIPS TCP transport handling for reliable peer connections.
 - Skip exhausted-hop events during peer replay so valid cached announcements
   remain available without triggering malformed-frame cooldowns.
