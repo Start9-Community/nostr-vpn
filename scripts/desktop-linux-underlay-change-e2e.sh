@@ -878,7 +878,7 @@ restore_network() {
   local failed=0 cleanup_pid=""
   stop_recovery_network_probe
   if [[ -x "$BINARY" && -e "$CONFIG" ]]; then
-    "$BINARY" pause --config "$CONFIG" >/dev/null 2>&1 || failed=1
+    "$BINARY" pause --config "$CONFIG" >"$STATE_DIR/cleanup-control.log" 2>&1 || failed=1
     if ! daemon_pid >/dev/null 2>&1 && ! egress_policy_removed; then
       "$BINARY" daemon --paused --config "$CONFIG" --iface "$TUN_IFACE" \
         >"$STATE_DIR/cleanup-daemon.stdout.log" 2>"$STATE_DIR/cleanup-daemon.stderr.log" &
@@ -886,11 +886,14 @@ restore_network() {
     fi
     local deadline="$((SECONDS + 15))"
     while ((SECONDS < deadline)); do
-      egress_policy_removed && break
+      if egress_policy_removed; then
+        [[ -z "$cleanup_pid" || "$(daemon_pid 2>/dev/null || true)" == "$cleanup_pid" ]] && break
+      fi
       sleep 0.1
     done
+    ((SECONDS < deadline)) || failed=1
     egress_policy_removed || failed=1
-    "$BINARY" stop --config "$CONFIG" --timeout-secs 5 --force >/dev/null 2>&1 \
+    "$BINARY" stop --config "$CONFIG" --timeout-secs 5 --force >>"$STATE_DIR/cleanup-control.log" 2>&1 \
       || failed=1
   fi
   if [[ -n "$cleanup_pid" ]]; then
@@ -1228,6 +1231,7 @@ run_gate() {
       && test_https \
       && ! ip link show dev "$WG_IFACE" >/dev/null 2>&1 \
       && egress_policy_removed \
+      && ! ip -4 rule show | grep -Eq '^10888:.*from .* lookup 51888$' \
       && [[ -z "$(ip -4 route show exact "$(endpoint_host)/32")" ]]
     then
       break
@@ -1238,7 +1242,7 @@ run_gate() {
   if resolvectl dns "$TUN_IFACE" 2>/dev/null | grep -Fq 127.0.0.1; then
     fail "secure exit DNS remained installed after selecting Direct"
   fi
-  if ip -4 route show table 20054 >"$STATE_DIR/direct-policy-table.txt" 2>&1 \
+  if ip -4 route show table 51888 >"$STATE_DIR/direct-policy-table.txt" 2>&1 \
     && grep -q . "$STATE_DIR/direct-policy-table.txt"
   then
     fail "WireGuard policy table retained routes after selecting Direct"
@@ -1361,7 +1365,7 @@ crash_repair_gate() {
       and .exit_node_runtime.wireguard_exit.table == 51888
       and .exit_node_runtime.wireguard_exit.priority == 10888
       and .exit_node_runtime.wireguard_exit.main_defaults_owned == false
-      and .exit_node_runtime.wireguard_exit.policy_rule_owned == false
+      and .exit_node_runtime.wireguard_exit.policy_rule_owned == true
       and (.exit_node_runtime.wireguard_exit.endpoint_routes | length) == 0
       and .secure_dns.Resolved.interface == $iface
     ' "$CLEANUP_JOURNAL" >/dev/null \
@@ -1390,7 +1394,7 @@ crash_repair_gate() {
       and .exit_node_runtime.wireguard_exit.table == 51888
       and .exit_node_runtime.wireguard_exit.priority == 10888
       and .exit_node_runtime.wireguard_exit.main_defaults_owned == false
-      and .exit_node_runtime.wireguard_exit.policy_rule_owned == false
+      and .exit_node_runtime.wireguard_exit.policy_rule_owned == true
       and (.exit_node_runtime.wireguard_exit.endpoint_routes | length) == 0
       and .secure_dns.Resolved.interface == $iface
     ' "$CLEANUP_JOURNAL" >/dev/null \
@@ -1422,6 +1426,10 @@ crash_repair_gate() {
     || fail "SIGKILL removed the owned WireGuard interface"
   egress_policy_installed \
     || fail "SIGKILL removed the durable egress protection"
+  ip -4 rule show | grep -Eq '^10888:.*from .* lookup 51888$' \
+    || fail "SIGKILL removed the owned WireGuard policy rule"
+  ip -4 route show table 51888 | grep -q . \
+    || fail "SIGKILL removed the owned WireGuard policy table"
 
   # Starting the same exact candidate paused must run startup repair before it
   # publishes daemon readiness. No explicit recovery command is used.
@@ -1451,11 +1459,12 @@ crash_repair_gate() {
       } >&2
       fail "paused daemon startup repair exceeded ${RECOVERY_DEADLINE_MS}ms"
     fi
-    policy_table="$(ip -4 route show table 20054 2>&1 || true)"
+    policy_table="$(ip -4 route show table 51888 2>&1 || true)"
     if [[ ! -e "$CLEANUP_JOURNAL" ]] \
       && [[ "$(route_dev 1.1.1.1 2>/dev/null || true)" == "$primary_iface" ]] \
       && ! ip link show dev "$WG_IFACE" >/dev/null 2>&1 \
       && egress_policy_removed \
+      && ! ip -4 rule show | grep -Eq '^10888:.*from .* lookup 51888$' \
       && [[ -z "$(ip -4 route show exact "$(endpoint_host)/32")" ]] \
       && { [[ -z "$policy_table" ]] || grep -Fq 'FIB table does not exist' <<<"$policy_table"; } \
       && ! resolvectl dns "$TUN_IFACE" 2>/dev/null | grep -Fq 127.0.0.1 \

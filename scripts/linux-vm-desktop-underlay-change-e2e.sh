@@ -860,6 +860,7 @@ capture_guest_state() {
 identity.json daemon.state.json daemon.stderr.log daemon.stdout.log \
 payload.log platform-network-monitor-probe.log signed-rosters.json \
 runner.stdout.log runner.stderr.log \
+cleanup-control.log cleanup-daemon.stdout.log cleanup-daemon.stderr.log \
 secondary-underlay-ready.json secondary.nm-uuid \
 secondary.receipt.json primary.receipt.json direct.receipt.json \
 crash-repair.receipt.json crash-journal-ownership.json \
