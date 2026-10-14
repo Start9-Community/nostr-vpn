@@ -35,6 +35,7 @@ settings and identities. iOS does not support paid exits.
   self-update code.
 - Batch received discovery-cache writes and reuse unchanged event encodings
   to reduce background disk and CPU activity.
+- Reuse verified relay events to avoid repeated cryptographic work.
 - Reduce repeated discovery scans and idle packet-processing allocations.
 - Avoid repeated processing when incoming packets are waiting for an outgoing
   send, and preserve received packets whether that send succeeds or fails.

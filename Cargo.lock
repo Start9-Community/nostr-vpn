@@ -3918,9 +3918,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-relay"
-version = "0.1.11"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8641200920d163b2d82c34e6f15605cff93a0546e3e0087fce8f3bddaa2329ca"
+checksum = "a17911ea54825590df08881d07702074b0d4804f3874fd008c8991788200ee52"
 dependencies = [
  "async-trait",
  "nostr-pubsub",
