@@ -493,6 +493,8 @@ impl FipsPrivateTunnelConfig {
             route_targets,
             secure_dns_requested: !app.internet_source.is_direct()
                 && (!local_identity_confirmation_pending || independent_internet),
+            #[cfg(feature = "paid-exit")]
+            public_paid_exit_selected: app.public_paid_exit_node_pubkey_hex().is_some(),
             public_paid_exit_waiting_for_admission: false,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             magic_dns_suffix: app.magic_dns_suffix.clone(),
@@ -578,6 +580,10 @@ impl FipsPrivateTunnelConfig {
             peer.allowed_ips.clear();
         }
         self.secure_dns_requested = false;
+        #[cfg(feature = "paid-exit")]
+        {
+            self.public_paid_exit_selected = false;
+        }
         self.public_paid_exit_waiting_for_admission = false;
         self.wireguard_exit.enabled = false;
         self.exit_node_leak_protection = false;
@@ -678,7 +684,9 @@ impl FipsPrivateTunnelConfig {
     fn public_paid_exit_selected(&self) -> bool {
         #[cfg(feature = "paid-exit")]
         {
-            !self.paid_route_accounting_peers.is_empty()
+            // Accounting can be absent before funding or present solely for
+            // local sales. DNS follows the selected Internet provider.
+            self.public_paid_exit_selected
         }
         #[cfg(not(feature = "paid-exit"))]
         {

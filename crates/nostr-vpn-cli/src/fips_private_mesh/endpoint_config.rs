@@ -764,6 +764,8 @@ pub(crate) struct FipsPrivateTunnelConfig {
     /// The selected internet source owns system DNS even while its default
     /// route is pending. This keeps roster MagicDNS alive during exit setup.
     secure_dns_requested: bool,
+    #[cfg(feature = "paid-exit")]
+    public_paid_exit_selected: bool,
     public_paid_exit_waiting_for_admission: bool,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) magic_dns_suffix: String,
