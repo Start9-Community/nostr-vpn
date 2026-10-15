@@ -30,6 +30,11 @@ settings and identities. iOS does not support paid exits.
   and preserve accepted membership after relaunch.
 - Return to the device list after approving a device on Linux while its
   confirmation is pending.
+- Keep the Linux window responsive while the backend starts or handles slow commands.
+- Remember Linux update downloads across restarts, select packages for the host
+  distribution and architecture, and open download folders only on request.
+- Show accepted payment mints on Linux with explicit trust actions, and allow
+  free offers without a trusted mint.
 - Open pasted paid-exit provider links immediately on macOS.
 - Collect seller channels promptly after an accepted close request and before
   buyer refund eligibility, retaining settlement retries.
