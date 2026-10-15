@@ -1,6 +1,7 @@
 package org.nostrvpn.app
 
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -661,7 +662,7 @@ private fun PaidRouteOfferRow(
     dispatch: (JSONObject) -> Unit,
 ) {
     val active = state.internetSource == "paid_manual" && state.exitNode == offer.sellerNpub
-    val compatibleMint = offer.acceptedMints.any { accepted ->
+    val compatibleMint = offer.priceMsatPerGb == 0L || offer.acceptedMints.any { accepted ->
         state.paidRouteMarket.wallet.mints.any { it.url == accepted }
     }
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -705,10 +706,21 @@ private fun PaidRouteOfferRow(
         }
         if (!compatibleMint) {
             Text(
-                "Add one of this seller's accepted mints to buy",
+                if (offer.acceptedMints.isEmpty()) "This seller has not listed a payment mint"
+                else "Trust an accepted mint to buy",
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
+            offer.acceptedMints.forEach { mint ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SelectionContainer(Modifier.weight(1f)) {
+                        Text(mint, style = MaterialTheme.typography.bodySmall)
+                    }
+                    TextButton(onClick = { dispatch(NativeActions.addPaidRouteWalletMint(mint, null)) }) {
+                        Text("Trust mint")
+                    }
+                }
+            }
         }
     }
 }
