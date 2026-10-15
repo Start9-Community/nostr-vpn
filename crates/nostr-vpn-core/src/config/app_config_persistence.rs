@@ -57,6 +57,11 @@ impl AppConfig {
         }
     }
 
+    pub fn paid_exit_offer_id(&self) -> &str {
+        let id = self.paid_exit_offer_id.trim();
+        if id.is_empty() { "internet-exit" } else { id }
+    }
+
     pub fn set_paid_exit_seller_enabled(&mut self, enabled: bool) {
         self.paid_exit.enabled = enabled;
         if enabled {

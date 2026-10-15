@@ -62,6 +62,7 @@ pub(crate) enum PaidExitOfferPublication {
 #[derive(Debug, Default)]
 pub(crate) struct PaidExitOfferPublisher {
     advertised: bool,
+    offer_id: String,
     last_created_at: u64,
 }
 
@@ -85,6 +86,14 @@ impl PaidExitOfferPublisher {
             advertised: own_offers
                 .iter()
                 .any(|record| record.signed_offer.is_live_at(now_unix)),
+            offer_id: if own_offers.iter().any(|record| {
+                record.offer.offer_id != app.paid_exit_offer_id()
+                    && record.signed_offer.is_live_at(now_unix)
+            }) {
+                String::new()
+            } else {
+                app.paid_exit_offer_id().to_string()
+            },
             last_created_at: own_offers
                 .iter()
                 .map(|record| record.signed_offer.event.created_at.as_secs())
@@ -105,23 +114,27 @@ impl PaidExitOfferPublisher {
         if should_advertise && let Err(error) = validate_paid_exit_offer_for_daemon(app, now_unix) {
             if self.advertised {
                 let signed_at = now_unix.max(self.last_created_at.saturating_add(1));
-                let count = withdraw_paid_exit_offers_for_daemon(app, config_path, signed_at)?;
+                let count =
+                    withdraw_paid_exit_offers_for_daemon(app, config_path, signed_at, None)?;
                 self.advertised = false;
                 self.last_created_at = signed_at;
                 return Ok(PaidExitOfferPublication::Withdrawn(count));
             }
             return Err(error);
         }
-        if should_advertise && (!self.advertised || refresh) {
+        if should_advertise
+            && (!self.advertised || refresh || self.offer_id != app.paid_exit_offer_id())
+        {
             let signed_at = now_unix.max(self.last_created_at.saturating_add(1));
             refresh_paid_exit_offer_for_daemon(app, config_path, signed_at)?;
             self.advertised = true;
+            self.offer_id = app.paid_exit_offer_id().to_string();
             self.last_created_at = signed_at;
             return Ok(PaidExitOfferPublication::Published);
         }
         if !should_advertise && self.advertised {
             let signed_at = now_unix.max(self.last_created_at.saturating_add(1));
-            let count = withdraw_paid_exit_offers_for_daemon(app, config_path, signed_at)?;
+            let count = withdraw_paid_exit_offers_for_daemon(app, config_path, signed_at, None)?;
             self.advertised = false;
             self.last_created_at = signed_at;
             return Ok(PaidExitOfferPublication::Withdrawn(count));
@@ -133,7 +146,7 @@ impl PaidExitOfferPublisher {
 fn validate_paid_exit_offer_for_daemon(app: &AppConfig, signed_at: u64) -> Result<()> {
     let config = paid_exit_offer_config(app)?;
     signed_paid_exit_offer_from_config_with_receiver(
-        default_paid_exit_offer_id(),
+        app.paid_exit_offer_id(),
         &app.nostr_keys()?,
         &config,
         None,
@@ -164,8 +177,13 @@ pub(crate) fn refresh_paid_exit_offer_for_daemon(
     if !app.paid_exit.enabled {
         return Ok(false);
     }
-    let local =
-        build_local_paid_exit_offer(app, config_path, &default_paid_exit_offer_id(), now_unix)?;
+    withdraw_paid_exit_offers_for_daemon(
+        app,
+        config_path,
+        now_unix,
+        Some(app.paid_exit_offer_id()),
+    )?;
+    let local = build_local_paid_exit_offer(app, config_path, app.paid_exit_offer_id(), now_unix)?;
     Ok(
         publish_paid_exit_offer_pubsub(app, config_path, &local.signed)?["nostr_pubsub_queued"]
             .as_bool()
@@ -177,6 +195,7 @@ fn withdraw_paid_exit_offers_for_daemon(
     app: &AppConfig,
     config_path: &Path,
     signed_at: u64,
+    keep_offer_id: Option<&str>,
 ) -> Result<usize> {
     let keys = app.nostr_keys()?;
     let own_npub = keys
@@ -189,10 +208,21 @@ fn withdraw_paid_exit_offers_for_daemon(
             .offers
             .values()
             .filter(|record| record.offer.seller_npub == own_npub)
-            .map(|record| record.offer.clone())
+            .filter(|record| {
+                keep_offer_id.is_none_or(|id| {
+                    record.offer.offer_id != id && record.signed_offer.is_live_at(signed_at)
+                })
+            })
+            .map(|record| {
+                (
+                    record.offer.clone(),
+                    record.signed_offer.event.created_at.as_secs(),
+                )
+            })
             .collect::<Vec<_>>();
         let mut count = 0;
-        for offer in offers {
+        for (offer, previous_created_at) in offers {
+            let signed_at = signed_at.max(previous_created_at.saturating_add(1));
             let signed =
                 SignedPaidRouteOffer::sign_expiring_at(offer, &keys, signed_at, signed_at)?;
             store.upsert_signed_offer(signed.clone(), Vec::new(), signed_at)?;

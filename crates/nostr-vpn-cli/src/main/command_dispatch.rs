@@ -378,7 +378,7 @@ async fn run_command(command: Command) -> Result<()> {
                 if let Some(daemon_peers) = daemon_peers.as_ref() {
                     let reachable_count = daemon_peers.iter().filter(|p| p.reachable).count();
                     println!(
-                        "peers: {} total, {reachable_count} reachable",
+                        "peers: {} total, {reachable_count} reachable (private network)",
                         daemon_peers.len()
                     );
                     let now = unix_timestamp();

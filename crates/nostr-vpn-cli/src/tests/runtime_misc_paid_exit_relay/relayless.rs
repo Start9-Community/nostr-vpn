@@ -1,5 +1,72 @@
 #[cfg(feature = "paid-exit")]
 #[test]
+fn paid_exit_offer_refresh_retires_old_ids_and_preserves_the_configured_id() {
+    use crate::session_runtime::daemon_vpn_paid_exit::{
+        PaidExitOfferPublication, PaidExitOfferPublisher,
+    };
+    use nostr_vpn_core::config::NostrPubsubMode;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("nvpn-offer-identity-{nonce}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("config.toml");
+    let mut app = AppConfig::generated();
+    app.nostr.relays.clear();
+    app.nostr.pubsub.mode = NostrPubsubMode::Client;
+    app.paid_exit.enabled = true;
+    app.paid_exit.pricing.price_msat_per_gb = 100;
+    app.paid_exit.channel.accepted_mints = vec!["https://mint.example".into()];
+    let now = 10_000;
+    build_local_paid_exit_offer(&app, &path, app.paid_exit_offer_id(), now).unwrap();
+    app.paid_exit_offer_id = "custom-exit".into();
+    // Simulate a run command followed by a daemon restart while both cached
+    // listings are still live. Reconciliation must retire the previous ID.
+    build_local_paid_exit_offer(&app, &path, app.paid_exit_offer_id(), now).unwrap();
+    let mut publisher = PaidExitOfferPublisher::load(&app, &path, now);
+    assert_eq!(
+        publisher
+            .reconcile(&app, &path, now + 1, true, false)
+            .unwrap(),
+        PaidExitOfferPublication::Published
+    );
+    app.paid_exit.pricing.price_msat_per_gb = 250;
+    assert_eq!(
+        publisher
+            .reconcile(&app, &path, now + 2, true, true)
+            .unwrap(),
+        PaidExitOfferPublication::Published
+    );
+    let store = load_paid_route_store(&paid_route_store_file_path(&path)).unwrap();
+    assert_eq!(store.offers.len(), 2, "historical offer is retained");
+    let live = store
+        .offers
+        .values()
+        .filter(|r| r.signed_offer.is_live_at(now + 2))
+        .collect::<Vec<_>>();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].offer.offer_id, "custom-exit");
+    assert_eq!(live[0].offer.pricing.price_msat_per_gb, 250);
+    let mut withdrew_old = false;
+    for entry in
+        std::fs::read_dir(crate::control_pubsub_runtime::control_pubsub_outbox_directory(&path))
+            .unwrap()
+    {
+        let event = serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        let signed = SignedPaidRouteOffer::from_event(event).unwrap();
+        if signed.offer().unwrap().offer_id == "internet-exit" {
+            assert!(!signed.is_live_at(now + 2));
+            withdrew_old = true;
+        }
+    }
+    assert!(withdrew_old, "withdrawal must be queued for publication");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(feature = "paid-exit")]
+#[test]
 fn paid_exit_offer_follows_listener_and_upstream_readiness_without_relays() {
     use nostr_vpn_core::config::NostrPubsubMode;
     use nostr_vpn_core::paid_routes::{PAID_ROUTE_OFFER_KIND, PAID_ROUTE_OFFER_TTL_SECS};

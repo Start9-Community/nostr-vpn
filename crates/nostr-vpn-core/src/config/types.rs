@@ -305,6 +305,9 @@ pub struct AppConfig {
     pub wireguard_exit: WireGuardExitConfig,
     #[serde(default, skip_serializing_if = "PaidExitConfig::is_default")]
     pub paid_exit: PaidExitConfig,
+    /// Local publication identity; not part of accepted payment terms.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub paid_exit_offer_id: String,
     #[serde(default, skip_serializing_if = "ManualPaidExitProvider::is_default")]
     pub manual_paid_exit_provider: ManualPaidExitProvider,
     #[serde(
@@ -602,6 +605,7 @@ impl Default for AppConfig {
             exit_dns: ExitDnsConfig::default(),
             wireguard_exit: WireGuardExitConfig::default(),
             paid_exit: PaidExitConfig::default(),
+            paid_exit_offer_id: String::new(),
             manual_paid_exit_provider: ManualPaidExitProvider::default(),
             wallet_fiat_enabled: default_wallet_fiat_enabled(),
             wallet_fiat_currency: FiatCurrency::default(),

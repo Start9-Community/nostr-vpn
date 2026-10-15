@@ -7,6 +7,10 @@ fn daemon_vpn_idle_status_distinguishes_waiting_paused_and_server() {
         crate::WAITING_FOR_PARTICIPANTS_STATUS
     );
     assert_eq!(
+        daemon_vpn_idle_status(true, 0, true),
+        "FIPS server active; no private participants"
+    );
+    assert_eq!(
         daemon_vpn_idle_status(false, 0, true),
         "VPN paused; FIPS server active"
     );

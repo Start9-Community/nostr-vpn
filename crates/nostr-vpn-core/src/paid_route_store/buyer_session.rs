@@ -5,13 +5,7 @@ impl PaidRouteStore {
         &mut self,
         request: OpenPaidRouteBuyerSessionRequest,
     ) -> Result<OpenPaidRouteBuyerSessionResult> {
-        let (offer_key, record) = self.resolve_offer(&request.offer_selector)?;
-        if !record.signed_offer.is_live_at(request.now_unix) {
-            return Err(anyhow!(
-                "paid route offer '{}' expired; discover sellers again",
-                request.offer_selector.trim()
-            ));
-        }
+        let (offer_key, record) = self.resolve_offer(&request.offer_selector, request.now_unix)?;
         let offer = record.offer.clone();
         if self.exit_provider_is_avoided(&offer.seller_npub) {
             return Err(anyhow!("clear your downvote before using this provider"));

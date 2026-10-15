@@ -388,12 +388,15 @@ impl ManualPaidExitProvider {
     }
 
     pub fn seller_link(npub: &str, config: &PaidExitConfig) -> Result<String> {
-        Self::new(
-            npub,
-            Some(config.pricing.price_msat_per_gb),
-            config.channel.accepted_mints.first().map(String::as_str),
-        )?
-        .link()
+        let mut config = config.clone();
+        config.normalize();
+        // Multiple accepted mints are alternatives, not a preference. Leave
+        // the buyer free to use an accepted mint already trusted in its wallet.
+        let mint = match config.channel.accepted_mints.as_slice() {
+            [mint] => Some(mint.as_str()),
+            _ => None,
+        };
+        Self::new(npub, Some(config.pricing.price_msat_per_gb), mint)?.link()
     }
 
     pub fn accepts(&self, offer: &PaidRouteOffer) -> Result<()> {

@@ -47,8 +47,12 @@ async fn paid_exit_run_once(args: PaidExitRunArgs) -> Result<PaidExitRunResult> 
         maybe_reload_running_daemon(&config_path);
     }
 
-    let offer_id = args.offer_id.unwrap_or_else(default_paid_exit_offer_id);
-    let local = build_local_paid_exit_offer(&app, &config_path, &offer_id, unix_timestamp())?;
+    let local = build_local_paid_exit_offer(
+        &app,
+        &config_path,
+        app.paid_exit_offer_id(),
+        unix_timestamp(),
+    )?;
 
     let publish = if args.publish {
         Some(publish_paid_exit_offer_pubsub(
@@ -77,6 +81,13 @@ async fn paid_exit_run_once(args: PaidExitRunArgs) -> Result<PaidExitRunResult> 
 }
 
 fn apply_paid_exit_run_settings(app: &mut AppConfig, args: &PaidExitRunArgs) -> Result<()> {
+    if let Some(offer_id) = args.offer_id.as_deref() {
+        let offer_id = offer_id.trim();
+        if offer_id.is_empty() {
+            return Err(anyhow!("paid exit offer id must not be empty"));
+        }
+        app.paid_exit_offer_id = offer_id.to_string();
+    }
     app.set_paid_exit_seller_enabled(true);
     if let Some(value) = args.upstream.as_deref() {
         set_paid_exit_upstream(app, value)?;

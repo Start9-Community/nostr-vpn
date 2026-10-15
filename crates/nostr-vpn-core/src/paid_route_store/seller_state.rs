@@ -41,10 +41,7 @@ impl PaidRouteStore {
     }
 
     pub fn live_offer_for_selector(&self, selector: &str, now_unix: u64) -> Result<PaidRouteOffer> {
-        let (_, record) = self.resolve_offer(selector)?;
-        if !record.signed_offer.is_live_at(now_unix) {
-            return Err(anyhow!("paid route offer '{}' expired", selector.trim()));
-        }
+        let (_, record) = self.resolve_offer(selector, now_unix)?;
         record.signed_offer.verify()?;
         Ok(record.offer.clone())
     }
@@ -304,12 +301,21 @@ impl PaidRouteStore {
         .filter(|state| state.collectable)
     }
 
-    pub(super) fn resolve_offer(&self, selector: &str) -> Result<(String, &PaidRouteOfferRecord)> {
+    pub(super) fn resolve_offer(
+        &self,
+        selector: &str,
+        now_unix: u64,
+    ) -> Result<(String, &PaidRouteOfferRecord)> {
         let selector = selector.trim();
         if selector.is_empty() {
             return Err(anyhow!("paid route offer selector is empty"));
         }
         if let Some(record) = self.offers.get(selector) {
+            if !record.signed_offer.is_live_at(now_unix) {
+                return Err(anyhow!(
+                    "paid route offer '{selector}' expired or is not yet live; discover sellers again"
+                ));
+            }
             return Ok((selector.to_string(), record));
         }
 
@@ -319,8 +325,17 @@ impl PaidRouteStore {
             .filter(|(_, record)| {
                 record.offer.offer_id == selector || record.offer.seller_npub == selector
             })
+            .filter(|(_, record)| record.signed_offer.is_live_at(now_unix))
             .collect::<Vec<_>>();
         match matches.as_slice() {
+            [] if self.offers.values().any(|record| {
+                record.offer.offer_id == selector || record.offer.seller_npub == selector
+            }) =>
+            {
+                Err(anyhow!(
+                    "paid route offer '{selector}' expired or is not yet live; discover sellers again"
+                ))
+            }
             [] => Err(anyhow!("paid route offer '{selector}' was not found")),
             [(key, record)] => Ok(((*key).clone(), *record)),
             _ => Err(anyhow!(

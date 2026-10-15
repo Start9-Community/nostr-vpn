@@ -94,7 +94,11 @@ fn daemon_vpn_idle_status(
     server_active: bool,
 ) -> &'static str {
     if vpn_enabled && expected_peers == 0 {
-        WAITING_FOR_PARTICIPANTS_STATUS
+        if server_active {
+            "FIPS server active; no private participants"
+        } else {
+            WAITING_FOR_PARTICIPANTS_STATUS
+        }
     } else if server_active {
         "VPN paused; FIPS server active"
     } else {

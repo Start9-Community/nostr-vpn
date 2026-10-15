@@ -9,6 +9,79 @@ use nostr_vpn_core::paid_routes::{ExitNetworkClass, SignedPaidRouteOffer};
 use serde_json::Value;
 
 #[test]
+fn paid_exit_run_persists_custom_offer_identity_across_processes() {
+    let dir = TestDir::new("nvpn-custom-offer-id");
+    let path = dir.path().join("config.toml");
+    let config = path.to_str().unwrap();
+    let output = run_nvpn([
+        "paid-exit",
+        "run",
+        "--config",
+        config,
+        "--offer-id",
+        "custom-exit",
+        "--accepted-mint",
+        "https://a-mint.example",
+        "--accepted-mint",
+        "https://z-mint.example",
+        "--price-msat-per-gb",
+        "25000",
+        "--no-reload-daemon",
+        "--json",
+    ]);
+    assert_success(&output);
+    assert_eq!(output_json(&output)["offer"]["offer_id"], "custom-exit");
+    let provider = nostr_vpn_core::paid_routes::ManualPaidExitProvider::parse(
+        output_json(&output)["provider_link"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(provider.mint.is_empty(), "multiple mints must remain alternatives");
+    assert_eq!(
+        AppConfig::load(&path).unwrap().paid_exit_offer_id(),
+        "custom-exit"
+    );
+    for command in ["offer", "run"] {
+        let mut args = vec!["paid-exit", command, "--config", config, "--json"];
+        if command == "run" {
+            args.push("--no-reload-daemon");
+        }
+        let output = run_nvpn(args);
+        assert_success(&output);
+        assert_eq!(output_json(&output)["offer"]["offer_id"], "custom-exit");
+    }
+    let before = std::fs::read(&path).unwrap();
+    let store_before = std::fs::read(dir.path().join("paid-routes.json")).unwrap();
+    let output = run_nvpn([
+        "paid-exit",
+        "offer",
+        "--config",
+        config,
+        "--offer-id",
+        "another-exit",
+        "--publish",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("run --offer-id"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        std::fs::read(dir.path().join("paid-routes.json")).unwrap(),
+        store_before
+    );
+    let output = run_nvpn([
+        "paid-exit",
+        "run",
+        "--config",
+        config,
+        "--offer-id",
+        " ",
+        "--no-reload-daemon",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("offer id must not be empty"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
 fn paid_exit_reselect_preserves_saved_protection_and_selected_exit() {
     use nostr_sdk::prelude::{Keys, ToBech32};
     use nostr_vpn_core::config::InternetSource;
