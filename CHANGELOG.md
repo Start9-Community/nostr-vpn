@@ -36,6 +36,12 @@ settings and identities. iOS does not support paid exits.
 - Show accepted payment mints on Linux with explicit trust actions, and allow
   free offers without a trusted mint.
 - Open pasted paid-exit provider links immediately on macOS.
+- Persist custom seller offer IDs and withdraw superseded listings.
+- Choose providers from live signed offers so stale listings do not create false
+  ambiguity.
+- Let provider links for sellers accepting several mints use the buyer's trusted mint.
+- Mark whether command-line seller offers are live and distinguish public server
+  connections from private peers.
 - Collect seller channels promptly after an accepted close request and before
   buyer refund eligibility, retaining settlement retries.
 - Keep shared peer discovery available on iOS without including desktop
