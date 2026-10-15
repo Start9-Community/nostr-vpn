@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## 4.1.18 - 2026-10-14
+## 4.1.18 - 2026-10-15
 
 ### Release notes
 
@@ -56,6 +56,7 @@ settings and identities. iOS does not support paid exits.
 - Preserve malformed legacy refunds without counting them as spendable funds.
 - Keep independently selected paid Internet, secure DNS, and connection protection
   available while private-network membership is pending.
+- Preserve private DNS settings while sharing Internet access through a private exit.
 - Preserve the saved connection-protection choice when reselecting or rating
   an Internet provider, and keep newer settings when pausing or resuming the VPN.
 - Prevent old payment retries from blocking newer Internet purchases, and
