@@ -76,7 +76,6 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     } = loop_state;
     let mut last_network_sample_diagnostic = String::new();
     let mut network_refresh_attempt: Option<PlatformNetworkRefreshAttempt> = None;
-    let mut network_refresh_terminal_error = None;
     #[cfg(feature = "paid-exit")]
     let (mut paid_exit_spilman_receiver, mut paid_exit_spilman_receiver_error) =
         try_load_paid_exit_spilman_receiver(&config_path, &app.paid_exit).await;
@@ -866,7 +865,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     include!("daemon_vpn/run_loop.rs");
     #[cfg(feature = "paid-exit")]
     daemon_cashu_wallet_worker.stop();
-    let shutdown_result = shutdown_daemon_vpn(DaemonVpnShutdown {
+    shutdown_daemon_vpn(DaemonVpnShutdown {
         port_mapping_runtime: &mut port_mapping_runtime,
         fips_tunnel_runtime,
         tunnel_runtime: &mut tunnel_runtime,
@@ -878,6 +877,5 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
         network_changed_at,
         captive_portal,
     })
-    .await;
-    finish_daemon_vpn_shutdown(network_refresh_terminal_error, shutdown_result)
+    .await
 }

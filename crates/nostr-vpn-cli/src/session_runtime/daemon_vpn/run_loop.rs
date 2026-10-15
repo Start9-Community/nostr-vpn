@@ -284,17 +284,13 @@ loop {
                 )
                 .await;
                 if let Err(error) = rebind_result {
-                    if !stage_platform_network_refresh_failure(
+                    stage_platform_network_refresh_failure(
                         &mut vpn_status,
-                        &mut network_refresh_terminal_error,
                         &mut network_refresh_attempt,
                         &mut intervals.network_deadline,
                         error,
                         "FIPS underlay carrier rebind failed",
-                        "FIPS carrier rebind retry budget exhausted",
-                    ) {
-                        break;
-                    }
+                    );
                     continue;
                 }
                 network_refresh_attempt
@@ -334,17 +330,13 @@ loop {
                 Ok(())
             };
             if let Err(error) = fips_result {
-                if !stage_platform_network_refresh_failure(
+                stage_platform_network_refresh_failure(
                     &mut vpn_status,
-                    &mut network_refresh_terminal_error,
                     &mut network_refresh_attempt,
                     &mut intervals.network_deadline,
                     error,
                     "network route refresh failed",
-                    "FIPS route refresh retry budget exhausted",
-                ) {
-                    break;
-                }
+                );
                 continue;
             }
             network_refresh_attempt = None;

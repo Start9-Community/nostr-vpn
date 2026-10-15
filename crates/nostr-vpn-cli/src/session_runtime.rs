@@ -10,7 +10,7 @@ pub(crate) const DAEMON_NETWORK_EVENT_DEBOUNCE_MILLIS: u64 = 250;
 pub(crate) const DAEMON_NETWORK_SETTLE_RECHECK_MILLIS: u64 = 200;
 pub(crate) const DAEMON_NETWORK_SETTLE_RECHECK_ATTEMPTS: u8 = 60;
 pub(crate) const DAEMON_NETWORK_REFRESH_RETRY_MILLIS: u64 = 100;
-pub(crate) const DAEMON_NETWORK_REFRESH_RETRY_ATTEMPTS: u8 = 1;
+pub(crate) const DAEMON_NETWORK_REFRESH_RETRY_MAX_MILLIS: u64 = 2_000;
 pub(crate) const FIPS_LINK_EVENT_CONFIG_BUILD_TIMEOUT_MILLIS: u64 = 500;
 
 pub(crate) fn daemon_wall_clock_unix_milliseconds() -> u128 {
@@ -83,13 +83,7 @@ pub(crate) struct PlatformNetworkRefreshAttempt {
     refresh: FipsLinkEventRefresh,
     reason: &'static str,
     carrier_rebound: bool,
-    completion_retries_remaining: u8,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlatformNetworkRefreshRetry {
-    Scheduled,
-    Exhausted,
+    retry_delay_millis: u64,
 }
 
 impl PlatformNetworkRefreshAttempt {
@@ -103,7 +97,7 @@ impl PlatformNetworkRefreshAttempt {
             refresh,
             reason,
             carrier_rebound: false,
-            completion_retries_remaining: DAEMON_NETWORK_REFRESH_RETRY_ATTEMPTS,
+            retry_delay_millis: DAEMON_NETWORK_REFRESH_RETRY_MILLIS,
         }
     }
 
@@ -161,16 +155,20 @@ impl PlatformNetworkRefreshAttempt {
     pub(crate) fn schedule_completion_retry(
         &mut self,
         event_deadline: &mut PlatformNetworkSampleDeadline,
-    ) -> PlatformNetworkRefreshRetry {
-        if self.completion_retries_remaining == 0 {
-            return PlatformNetworkRefreshRetry::Exhausted;
-        }
-        self.completion_retries_remaining -= 1;
+    ) -> Duration {
+        let delay = Duration::from_millis(self.retry_delay_millis);
+        // Keep the first fast retry exclusive. Longer outages must leave
+        // status, wallet and control maintenance responsive while preserving
+        // the current endpoint and any successful carrier rebind.
         event_deadline.reset_after(
-            Duration::from_millis(DAEMON_NETWORK_REFRESH_RETRY_MILLIS),
-            true,
+            delay,
+            self.retry_delay_millis == DAEMON_NETWORK_REFRESH_RETRY_MILLIS,
         );
-        PlatformNetworkRefreshRetry::Scheduled
+        self.retry_delay_millis = self
+            .retry_delay_millis
+            .saturating_mul(2)
+            .min(DAEMON_NETWORK_REFRESH_RETRY_MAX_MILLIS);
+        delay
     }
 }
 
@@ -183,42 +181,22 @@ pub(crate) fn platform_network_refresh_waits_for_underlay(
             || (sampled_network.primary_ipv4.is_none() && sampled_network.primary_ipv6.is_none()))
 }
 
-pub(crate) fn stage_platform_network_refresh_retry(
-    terminal_error: &mut Option<anyhow::Error>,
-    attempt: &mut PlatformNetworkRefreshAttempt,
-    event_deadline: &mut PlatformNetworkSampleDeadline,
-    error: anyhow::Error,
-    exhausted_context: &'static str,
-) -> bool {
-    match attempt.schedule_completion_retry(event_deadline) {
-        PlatformNetworkRefreshRetry::Scheduled => true,
-        PlatformNetworkRefreshRetry::Exhausted => {
-            *terminal_error = Some(error.context(exhausted_context));
-            false
-        }
-    }
-}
-
 pub(crate) fn stage_platform_network_refresh_failure(
     vpn_status: &mut String,
-    terminal_error: &mut Option<anyhow::Error>,
     attempt: &mut Option<PlatformNetworkRefreshAttempt>,
     event_deadline: &mut PlatformNetworkSampleDeadline,
     error: anyhow::Error,
     failure_label: &'static str,
-    exhausted_context: &'static str,
-) -> bool {
-    eprintln!("daemon: {failure_label}: {error:#}");
-    *vpn_status = format!("{failure_label} ({error})");
-    stage_platform_network_refresh_retry(
-        terminal_error,
-        attempt
-            .as_mut()
-            .expect("failed network refresh remains staged"),
-        event_deadline,
-        error,
-        exhausted_context,
-    )
+) {
+    let delay = attempt
+        .as_mut()
+        .expect("failed network refresh remains staged")
+        .schedule_completion_retry(event_deadline);
+    eprintln!(
+        "daemon: {failure_label}: {error:#}; retrying in {} ms",
+        delay.as_millis()
+    );
+    *vpn_status = format!("{failure_label} ({error}); retrying");
 }
 
 pub(crate) const fn daemon_network_trigger_is_event_driven(
