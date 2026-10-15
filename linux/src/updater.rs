@@ -1,7 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::thread;
 
@@ -10,15 +9,19 @@ use nostr_vpn_core::updater::{
     ProductUpdateMode, ProductUpdateSource,
 };
 
+mod preferences;
+pub use preferences::{load_preferences, save_preferences, DownloadedUpdate};
+
 #[derive(Clone, Debug, Default)]
 pub struct UpdateState {
     pub checking: bool,
     pub downloading: bool,
     pub available: bool,
-    pub auto_install: bool,
+    pub auto_download: bool,
     pub version: String,
     pub status: String,
     pub asset: Option<ReleaseAsset>,
+    pub downloaded: Option<DownloadedUpdate>,
 }
 
 #[derive(Clone, Debug)]
@@ -35,7 +38,7 @@ pub enum UpdateEvent {
         manual: bool,
         result: Result<UpdateCheck, String>,
     },
-    Downloaded(Result<PathBuf, String>),
+    Downloaded(Result<DownloadedUpdate, String>),
 }
 
 #[derive(Debug)]
@@ -74,7 +77,7 @@ pub fn check_blocking(current_version: &str, config_path: &str) -> Result<Update
         ProductUpdateSource::Auto,
         Some(Path::new(config_path)),
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| format!("{error:#}"))?;
     let source = result.source.clone();
     let verified = result.verified;
     let asset = (!result.asset.trim().is_empty() && verified).then(|| ReleaseAsset {
@@ -92,7 +95,10 @@ pub fn check_blocking(current_version: &str, config_path: &str) -> Result<Update
     })
 }
 
-pub fn download_blocking(asset: &ReleaseAsset, config_path: &str) -> Result<PathBuf, String> {
+pub fn download_blocking(
+    asset: &ReleaseAsset,
+    config_path: &str,
+) -> Result<DownloadedUpdate, String> {
     if !asset.verified {
         return Err(format!(
             "Refusing to install unverified update from {}",
@@ -107,7 +113,7 @@ pub fn download_blocking(asset: &ReleaseAsset, config_path: &str) -> Result<Path
         Some(&download_dir),
         Some(Path::new(config_path)),
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| format!("{error:#}"))?;
     if !result.verified {
         return Err(format!(
             "Refusing to install unverified update from {}",
@@ -124,11 +130,15 @@ pub fn download_blocking(asset: &ReleaseAsset, config_path: &str) -> Result<Path
         .path
         .map(PathBuf::from)
         .ok_or_else(|| "Updater did not return a downloaded file".to_string())?;
-    maybe_make_executable_and_open(&destination, &asset.name)?;
-    Ok(destination)
+    prepare_download(&destination, &asset.name)?;
+    Ok(DownloadedUpdate {
+        asset_name: asset.name.clone(),
+        source: asset.source.clone(),
+        path: destination,
+    })
 }
 
-fn maybe_make_executable_and_open(destination: &Path, asset_name: &str) -> Result<(), String> {
+fn prepare_download(destination: &Path, asset_name: &str) -> Result<(), String> {
     if asset_name.ends_with(".AppImage") {
         let mut permissions = fs::metadata(destination)
             .map_err(|error| format!("Downloaded update unavailable: {error}"))?
@@ -138,9 +148,6 @@ fn maybe_make_executable_and_open(destination: &Path, asset_name: &str) -> Resul
             .map_err(|error| format!("Could not make AppImage executable: {error}"))?;
     }
 
-    if std::env::var("NVPN_UPDATE_SKIP_OPEN").ok().as_deref() != Some("1") {
-        let _ = Command::new("xdg-open").arg(destination).spawn();
-    }
     Ok(())
 }
 
@@ -151,3 +158,6 @@ fn update_download_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("NostrVpnDownloads"))
 }
+
+#[cfg(test)]
+mod tests;

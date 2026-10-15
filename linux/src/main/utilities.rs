@@ -17,23 +17,10 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn load_auto_install_updates() -> bool {
-    std::fs::read_to_string(update_preferences_path())
-        .map(|value| value.lines().any(|line| line.trim() == "auto_install=true"))
-        .unwrap_or(false)
-}
-
-fn save_auto_install_updates(enabled: bool) {
-    let path = update_preferences_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+fn save_update_preferences(update: &mut updater::UpdateState) {
+    if let Err(error) = updater::save_preferences(&update_preferences_path(), update) {
+        update.status = format!("Could not save update preferences: {error}");
     }
-    let value = if enabled {
-        "auto_install=true\n"
-    } else {
-        "auto_install=false\n"
-    };
-    let _ = std::fs::write(path, value);
 }
 
 fn update_poll_interval_secs() -> u32 {

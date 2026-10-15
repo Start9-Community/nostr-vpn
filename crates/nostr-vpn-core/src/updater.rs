@@ -16,7 +16,7 @@ use fips_core::{Config as FipsConfig, FipsEndpoint};
 use hashtree_updater::{
     ProductAssetPolicy, SecurePubsubBlossomConfig, SecurePubsubBlossomSelection, UpdateAsset,
     UpdateManifest, build_secure_pubsub_blossom_updater, current_archive_target, dedupe_nonempty,
-    download_product_selection, env_csv, platform_app_asset_suffixes,
+    download_product_selection, env_csv,
     preferred_app_asset_for_suffixes, preferred_cli_asset_for_target, select_product_update,
     selected_download_path as shared_selected_download_path, update_ref_from_override,
 };
@@ -28,6 +28,8 @@ use nostr_pubsub_fips::{FipsPubsubClient, FipsPubsubClientOptions};
 use serde::{Deserialize, Serialize};
 
 mod cache;
+#[cfg(any(target_os = "linux", test))]
+mod linux_assets;
 
 pub const GITHUB_LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/mmalmi/nostr-vpn/releases/latest";
@@ -551,8 +553,25 @@ fn blossom_read_servers() -> Vec<String> {
 
 fn asset_policy() -> ProductAssetPolicy {
     ProductAssetPolicy::new("nvpn", "nvpn CLI", "Nostr VPN app")
-        .with_app_asset_suffixes(platform_app_asset_suffixes().iter().copied())
+        .with_app_asset_suffixes(app_asset_suffixes())
         .with_download_file_name_fallback("nvpn-update-archive")
+}
+
+fn app_asset_suffixes() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let release = fs::read_to_string("/etc/os-release")
+            .or_else(|_| fs::read_to_string("/usr/lib/os-release"))
+            .unwrap_or_default();
+        linux_assets::app_asset_suffixes(&release, std::env::consts::ARCH)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        hashtree_updater::platform_app_asset_suffixes()
+            .iter()
+            .map(|suffix| (*suffix).to_string())
+            .collect()
+    }
 }
 
 fn current_target() -> &'static str {
@@ -597,7 +616,7 @@ fn preferred_cli_asset(manifest: &ReleaseManifest) -> Option<ReleaseAsset> {
 
 fn preferred_legacy_app_asset(manifest: &ReleaseManifest) -> Option<ReleaseAsset> {
     let update_manifest = legacy_update_manifest(manifest);
-    preferred_app_asset_for_suffixes(&update_manifest, platform_app_asset_suffixes())
+    preferred_app_asset_for_suffixes(&update_manifest, &app_asset_suffixes())
         .map(release_asset_from_update_asset)
 }
 

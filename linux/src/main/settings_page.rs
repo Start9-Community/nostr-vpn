@@ -550,13 +550,14 @@ fn build_settings_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
         check_update_button.connect_clicked(move |_| check_updates(&app, true));
     }
     cli_row.append(&check_update_button);
-    let download_update_button = icon_text_button("Download Update", "folder-download-symbolic");
+    let download_update_button =
+        icon_text_button(update.download_action_label(), "folder-download-symbolic");
     download_update_button.set_sensitive(
         update.available && update.asset.is_some() && !update.checking && !update.downloading,
     );
     {
         let app = app.clone();
-        download_update_button.connect_clicked(move |_| download_update(&app));
+        download_update_button.connect_clicked(move |_| show_or_download_update(&app));
     }
     cli_row.append(&download_update_button);
     let uninstall_cli = icon_text_button("Uninstall CLI", "edit-delete-symbolic");

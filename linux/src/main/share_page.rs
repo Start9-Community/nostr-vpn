@@ -196,22 +196,24 @@ fn append_join_network_card(
                 set_notice(&app, "Enter a valid admin Device ID and Network ID".to_string());
                 return;
             }
-            let state = dispatch(
+            dispatch_with_completion(
                 &app,
                 NativeAppAction::ManualAddNetwork {
                     admin_npub,
                     mesh_network_id,
                 },
+                |app, state| {
+                    if state.error.trim().is_empty() {
+                        {
+                            let mut model = app.borrow_mut();
+                            model.drafts.manual_admin_npub.clear();
+                            model.drafts.manual_mesh_id.clear();
+                            model.manual_join_expanded = false;
+                        }
+                        set_page(app, Page::Devices);
+                    }
+                },
             );
-            if state.error.trim().is_empty() {
-                {
-                    let mut model = app.borrow_mut();
-                    model.drafts.manual_admin_npub.clear();
-                    model.drafts.manual_mesh_id.clear();
-                    model.manual_join_expanded = false;
-                }
-                set_page(&app, Page::Devices);
-            }
         });
     }
     manual_body.append(&add_manual);
@@ -380,49 +382,49 @@ fn import_join_request_or_add_device(app: &AppRef, network_id: String) {
     if request.is_empty() {
         return;
     }
-    let state = if is_valid_device_id(&request) {
-        dispatch(
-            app,
-            NativeAppAction::AddParticipant {
-                network_id,
-                npub: request,
-                alias: None,
-            },
-        )
-    } else {
-        dispatch(app, NativeAppAction::ImportJoinRequest { request })
-    };
-    if state.error.trim().is_empty() {
-        {
-            let mut model = app.borrow_mut();
-            model.drafts.join_request.clear();
-            model.notice.clear();
+    let action = if is_valid_device_id(&request) {
+        NativeAppAction::AddParticipant {
+            network_id,
+            npub: request,
+            alias: None,
         }
-        set_page(app, Page::Devices);
-    }
+    } else {
+        NativeAppAction::ImportJoinRequest { request }
+    };
+    dispatch_with_completion(app, action, |app, state| {
+        if state.error.trim().is_empty() {
+            {
+                let mut model = app.borrow_mut();
+                model.drafts.join_request.clear();
+                model.notice.clear();
+            }
+            set_page(app, Page::Devices);
+        }
+    });
 }
 
 fn add_participant(app: &AppRef, network_id: String, npub: String, alias: String) {
     if npub.is_empty() {
         return;
     }
-    let state = dispatch(
+    dispatch_with_completion(
         app,
         NativeAppAction::AddParticipant {
             network_id: network_id.clone(),
             npub: npub.clone(),
             alias: (!alias.is_empty()).then_some(alias),
         },
+        move |app, state| {
+            if manual_participant_added(state, &network_id, &npub) {
+                {
+                    let mut model = app.borrow_mut();
+                    model.drafts.participant_npub.clear();
+                    model.drafts.participant_alias.clear();
+                }
+                set_page(app, Page::Devices);
+            }
+        },
     );
-    let added = manual_participant_added(&state, &network_id, &npub);
-    if added {
-        {
-            let mut model = app.borrow_mut();
-            model.drafts.participant_npub.clear();
-            model.drafts.participant_alias.clear();
-        }
-        set_page(app, Page::Devices);
-    }
 }
 
 fn manual_participant_added(state: &NativeAppState, network_id: &str, npub: &str) -> bool {

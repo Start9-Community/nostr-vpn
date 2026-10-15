@@ -5,6 +5,7 @@ mod tray;
 mod updater;
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -159,7 +160,11 @@ impl Drafts {
 }
 
 struct AppModel {
-    core: Arc<FfiApp>,
+    core_requests: Sender<Option<NativeAppAction>>,
+    core_results: Receiver<CoreResult>,
+    core_ready: bool,
+    refresh_pending: bool,
+    pending_actions: VecDeque<PendingAction>,
     state: NativeAppState,
     window: adw::ApplicationWindow,
     page: Page,
@@ -203,8 +208,9 @@ impl AppModel {
         // Pass empty so the FFI falls back to its own CARGO_PKG_VERSION
         // (workspace-inherited). The linux crate is excluded from the workspace
         // so its CARGO_PKG_VERSION drifts from nostr-vpn-app-core's.
-        let core = FfiApp::new(default_data_dir(), String::new());
-        let state = core.state();
+        let (core_requests, core_results) =
+            start_core_worker(|| FfiApp::new(default_data_dir(), String::new()));
+        let state = NativeAppState::default();
         let mut drafts = Drafts::default();
         drafts.sync_from_state(&state);
         let tray = tray::TrayRuntime::start(&state);
@@ -212,14 +218,20 @@ impl AppModel {
         let tray_error = tray.last_error();
         let diagnostics_expanded = !state.health.is_empty();
         let (update_sender, update_receiver) = mpsc::channel();
+        let update_preferences = updater::load_preferences(&update_preferences_path());
         let update = updater::UpdateState {
-            auto_install: load_auto_install_updates(),
+            auto_download: update_preferences.auto_download,
+            downloaded: update_preferences.downloaded,
             ..updater::UpdateState::default()
         };
         let update_policy =
             UpdateAutoCheckPolicy::new(Duration::from_secs(update_poll_interval_secs() as u64));
         Self {
-            core,
+            core_requests,
+            core_results,
+            core_ready: false,
+            refresh_pending: true,
+            pending_actions: VecDeque::new(),
             state,
             window,
             page: Page::Devices,
@@ -253,6 +265,7 @@ impl AppModel {
 }
 
 include!("main/startup.rs");
+include!("main/core_worker.rs");
 include!("main/runtime_events.rs");
 include!("main/shell.rs");
 include!("main/devices_page.rs");
