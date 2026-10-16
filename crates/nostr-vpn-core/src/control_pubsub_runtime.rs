@@ -151,8 +151,11 @@ impl ControlPubsubFipsRuntime {
             .as_deref()
             .map(control_pubsub_outbox_directory_from_store_path);
         let graph_root = PublicKey::parse(endpoint.npub())?;
-        let event_store =
-            ControlEventStore::load_for_owner(store_path, update_events.clone(), Some(graph_root))?;
+        let store_updates = update_events.clone();
+        let event_store = control_store_io(move || {
+            ControlEventStore::load_for_owner(store_path, store_updates, Some(graph_root))
+        })
+        .await?;
         let stored_events = event_store.snapshot();
         let pubsub_policy = FipsPubsubPolicy::new(
             Arc::clone(&endpoint),
@@ -559,7 +562,7 @@ async fn publish_verified(context: PublishContext<'_>, verified: VerifiedEvent) 
     };
     tracing::debug!(event_id = %event.id, published, "publishing local control event");
     observe_policy_event(context.pubsub_policy, &event).await;
-    context.events.lock().await.insert(event.clone())?;
+    insert_control_event(context.events, event.clone()).await?;
     ingest_into_fips_discovery(context.endpoint, &event).await;
     Ok(published)
 }
@@ -627,12 +630,7 @@ fn fips_advert_refresh_delay(event: &Event) -> Duration {
 
 async fn publish_policy_maintenance(context: PublishContext<'_>) {
     let now = now_ms();
-    if let Err(error) = context
-        .events
-        .lock()
-        .await
-        .prune_expired_events(now / 1_000)
-    {
+    if let Err(error) = prune_control_events(context.events, now / 1_000).await {
         tracing::warn!(%error, "failed to prune expired control pubsub events");
     }
     let policy_events = match context
@@ -720,7 +718,7 @@ async fn process_fips_delivery(
     let event = verified.as_event().clone();
     observe_policy_event(pubsub_policy, &event).await;
     ingest_into_fips_discovery(endpoint, &event).await;
-    let inserted = match events.lock().await.insert(event.clone()) {
+    let inserted = match insert_control_event(events, event.clone()).await {
         Ok(inserted) => inserted,
         Err(error) => {
             tracing::warn!(%error, event_id = %event.id, "failed to store control pubsub event");
@@ -754,7 +752,7 @@ async fn process_relay_delivery(
     let event = verified.as_event().clone();
     observe_policy_event(pubsub_policy, &event).await;
     ingest_into_fips_discovery(endpoint, &event).await;
-    let inserted = match events.lock().await.insert(event.clone()) {
+    let inserted = match insert_control_event(events, event.clone()).await {
         Ok(inserted) => inserted,
         Err(error) => {
             tracing::warn!(%error, event_id = %event.id, "failed to store control pubsub event");

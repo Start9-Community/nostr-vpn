@@ -22,6 +22,9 @@ use nostr_social_memory::RatingEventExt;
 
 use super::*;
 
+#[path = "tests/persistence.rs"]
+mod persistence;
+
 const FIPS_TEST_EVENTUAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn available_udp_ports() -> [u16; 3] {
