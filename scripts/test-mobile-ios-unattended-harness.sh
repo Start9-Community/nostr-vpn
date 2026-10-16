@@ -7,9 +7,18 @@ source "$ROOT/scripts/lib-mobile-release-join-ui.sh"
 private="$(mktemp -d "${TMPDIR:-/tmp}/nvpn-ios-unattended.XXXXXX")"
 trap 'rm -rf "$private"' EXIT
 mkdir "$private/bin"
+cat >"$private/bin/xcodebuild" <<'PY'
+#!/usr/bin/env python3
+import os,sys,time
+assert sys.argv[1:]==['-checkFirstLaunchStatus']
+mode=os.environ['NVPN_TEST_XCODE_SETUP']
+if mode=='timeout':time.sleep(30)
+sys.exit({'ready':0,'pending':69,'error':1}[mode])
+PY
 cat >"$private/bin/xcrun" <<'PY'
 #!/usr/bin/env python3
 import json,os,sys,time
+open(os.environ['NVPN_TEST_DEVICE_QUERIED'],'w').write('queried\n')
 if sys.argv[4:7]==['device','notification','observe']:
  # CoreDevice can cancel this unrelated observation while the installed
  # XCTest runner remains usable. It must not veto an unlocked device.
@@ -24,10 +33,25 @@ if mode=='timeout':time.sleep(30)
 p=sys.argv[sys.argv.index('--json-output')+1]
 json.dump({'result':{'passcodeRequired':mode=='locked'} if mode!='missing' else {}},open(p,'w'))
 PY
-chmod +x "$private/bin/xcrun"
+chmod +x "$private/bin/xcodebuild" "$private/bin/xcrun"
 export PATH="$private/bin:$PATH"
+export NVPN_TEST_XCODE_SETUP=ready
+export NVPN_TEST_DEVICE_QUERIED="$private/device-queried"
 export NVPN_TEST_LOCK_STATE=unlocked
 ios_release_network_require_unlocked fixture
+[[ -s "$NVPN_TEST_DEVICE_QUERIED" ]]
+# A pending Xcode component install can stall even devicectl --help before
+# contacting the phone. Report the Mac setup problem without a device query.
+for setup in pending error timeout; do
+ export NVPN_TEST_XCODE_SETUP="$setup"
+ rm -f "$NVPN_TEST_DEVICE_QUERIED"
+ if ios_release_network_require_unlocked fixture >"$private/setup-$setup.log" 2>&1; then
+  echo "Physical preflight accepted Xcode setup $setup" >&2;exit 1
+ fi
+ [[ ! -e "$NVPN_TEST_DEVICE_QUERIED" ]]
+ grep -Fq 'Xcode setup' "$private/setup-$setup.log"
+done
+export NVPN_TEST_XCODE_SETUP=ready
 for state in locked unavailable missing timeout; do
  export NVPN_TEST_LOCK_STATE="$state"
  if ios_release_network_require_unlocked fixture >"$private/$state.log" 2>&1; then

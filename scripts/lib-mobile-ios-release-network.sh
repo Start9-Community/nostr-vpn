@@ -43,6 +43,22 @@ import subprocess
 import sys
 import tempfile
 
+# Xcode's devicectl launcher installs pending components before dispatching
+# even read-only queries. A blocked Mac authorization prompt is not evidence
+# that the phone needs unlocking or reconnecting.
+try:
+    setup = subprocess.run(
+        ["xcodebuild", "-checkFirstLaunchStatus"],
+        capture_output=True, timeout=8,
+    )
+except (OSError, subprocess.SubprocessError):
+    raise SystemExit("Xcode setup status unavailable on this Mac; no device query or UI automation session started.") from None
+if setup.returncode != 0:
+    raise SystemExit(
+        f"Xcode setup check failed (exit {setup.returncode}); finish or repair Xcode setup on this Mac before testing. "
+        "No device query or UI automation session started."
+    )
+
 try:
     with tempfile.TemporaryDirectory(prefix="nvpn-ios-lock-") as directory:
         output = Path(directory) / "state.json"
