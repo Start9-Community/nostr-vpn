@@ -156,12 +156,17 @@ impl ControlPubsubFipsRuntime {
             .as_deref()
             .map(control_pubsub_outbox_directory_from_store_path);
         let graph_root = PublicKey::parse(endpoint.npub())?;
-        let event_store = ControlEventStore::load_for_owner(
-            store_path,
-            #[cfg(feature = "updater")]
-            update_events.clone(),
-            Some(graph_root),
-        )?;
+        #[cfg(feature = "updater")]
+        let store_updates = update_events.clone();
+        let event_store = control_store_io(move || {
+            ControlEventStore::load_for_owner(
+                store_path,
+                #[cfg(feature = "updater")]
+                store_updates,
+                Some(graph_root),
+            )
+        })
+        .await?;
         let stored_events = event_store.snapshot();
         let pubsub_policy = FipsPubsubPolicy::new(
             Arc::clone(&endpoint),
@@ -532,7 +537,7 @@ async fn run(
             }
         }
     }
-    if let Err(error) = events.lock().await.persist() {
+    if let Err(error) = flush_control_events(&events).await {
         tracing::warn!(%error, "failed to flush control pubsub cache on shutdown");
     }
 }
@@ -608,7 +613,7 @@ async fn publish_verified(context: PublishContext<'_>, verified: VerifiedEvent) 
     };
     tracing::debug!(event_id = %event.id, published, "publishing local control event");
     observe_policy_event(context.pubsub_policy, &event).await;
-    context.events.lock().await.insert(event.clone())?;
+    insert_control_event(context.events, event.clone()).await?;
     ingest_into_fips_discovery(context.endpoint, &event).await;
     Ok(published)
 }
@@ -676,12 +681,7 @@ fn fips_advert_refresh_delay(event: &Event) -> Duration {
 
 async fn publish_policy_maintenance(context: PublishContext<'_>) {
     let now = now_ms();
-    if let Err(error) = context
-        .events
-        .lock()
-        .await
-        .prune_expired_events(now / 1_000)
-    {
+    if let Err(error) = prune_control_events(context.events, now / 1_000).await {
         tracing::warn!(%error, "failed to maintain control pubsub cache");
     }
     let policy_events = match context

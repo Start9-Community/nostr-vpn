@@ -40,6 +40,49 @@ fn configured_update_events() -> Result<UpdateEventCache> {
     UpdateEventCache::new(&reference).context("failed to configure update announcement cache")
 }
 
+async fn control_store_io<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(operation)
+        .await
+        .context("control pubsub storage task failed")?
+}
+
+async fn insert_control_event(
+    events: &Arc<Mutex<ControlEventStore>>,
+    event: Event,
+) -> Result<bool> {
+    // Keep writes serialized even if the awaiting task is cancelled: the
+    // blocking operation retains the owned guard until its durable write ends.
+    let mut store = Arc::clone(events).lock_owned().await;
+    if store.path.is_none()
+        || !control_event_is_persistent(&event)
+        || (!store.dirty && store.events.contains_key(&event.id.to_hex()))
+    {
+        return store.insert(event);
+    }
+    control_store_io(move || store.insert(event)).await
+}
+
+async fn prune_control_events(
+    events: &Arc<Mutex<ControlEventStore>>,
+    now_secs: u64,
+) -> Result<usize> {
+    let mut store = Arc::clone(events).lock_owned().await;
+    if store.path.is_none() {
+        return store.prune_expired_events(now_secs);
+    }
+    control_store_io(move || store.prune_expired_events(now_secs)).await
+}
+
+async fn flush_control_events(events: &Arc<Mutex<ControlEventStore>>) -> Result<()> {
+    let mut store = Arc::clone(events).lock_owned().await;
+    if store.path.is_none() || !store.dirty {
+        return store.persist();
+    }
+    control_store_io(move || store.persist()).await
+}
+
 impl ControlEventStore {
     #[cfg(any(feature = "paid-exit", test))]
     fn load(
@@ -494,6 +537,183 @@ mod tests {
     use nostr_social_memory::RatingEventExt;
 
     use super::*;
+
+    fn async_store_directory() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "nvpn-control-store-async-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("store directory");
+        directory
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_store_async_keeps_runtime_progress_during_durable_work() {
+        let directory = async_store_directory();
+        let path = directory.join("events.json");
+        let keys = Keys::generate();
+        let event = rating_event(
+            &keys,
+            &Keys::generate().public_key().to_hex(),
+            "fips.peer",
+            50,
+            now_ms() / 1_000,
+        );
+        let expected = event.clone();
+        let stored_path = path.clone();
+        let (started, ready) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let write = control_store_io(move || {
+            let mut store = ControlEventStore::load(Some(stored_path), test_update_events())?;
+            let _ = started.send(());
+            // Model a slow filesystem operation at the production blocking
+            // boundary. The async runtime must run before this work completes.
+            released
+                .recv_timeout(Duration::from_secs(1))
+                .context("async runtime did not progress while storage was busy")?;
+            store.insert(event)
+        });
+        let progress = async {
+            ready.await.expect("storage operation started");
+            release.send(()).is_ok()
+        };
+        let (written, progressed) = tokio::join!(write, progress);
+        let reloaded = ControlEventStore::load(Some(path), test_update_events());
+        fs::remove_dir_all(&directory).expect("remove store directory");
+        assert!(progressed, "async runtime must run while storage is busy");
+        assert!(written.expect("durable write"));
+        assert_eq!(
+            reloaded.expect("reload durable store").snapshot(),
+            vec![expected]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_store_async_insert_preserves_durability_and_memory_only_events() {
+        let directory = async_store_directory();
+        let path = directory.join("events.json");
+        let events = Arc::new(Mutex::new(
+            ControlEventStore::load(Some(path.clone()), test_update_events()).unwrap(),
+        ));
+        let keys = Keys::generate();
+        let rating = rating_event(
+            &keys,
+            &Keys::generate().public_key().to_hex(),
+            "fips.peer",
+            50,
+            now_ms() / 1_000,
+        );
+        assert!(insert_control_event(&events, rating.clone()).await.unwrap());
+        let saved = fs::read(&path).expect("write must be complete when insert returns");
+        assert!(!insert_control_event(&events, rating.clone()).await.unwrap());
+        let advert = EventBuilder::new(nostr_sdk::Kind::Custom(FIPS_PEER_ADVERT_KIND), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert!(insert_control_event(&events, advert).await.unwrap());
+        assert_eq!(events.lock().await.snapshot().len(), 2);
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        let reloaded = ControlEventStore::load(Some(path), test_update_events()).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(reloaded.snapshot(), vec![rating]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_store_async_duplicate_local_event_flushes_received_batch() {
+        let directory = async_store_directory();
+        let path = directory.join("events.json");
+        let events = Arc::new(Mutex::new(
+            ControlEventStore::load(Some(path.clone()), test_update_events()).unwrap(),
+        ));
+        let keys = Keys::generate();
+        let local = rating_event(
+            &keys,
+            &Keys::generate().public_key().to_hex(),
+            "fips.peer",
+            50,
+            now_ms() / 1_000,
+        );
+        assert!(insert_control_event(&events, local.clone()).await.unwrap());
+        let received = rating_event(
+            &keys,
+            &Keys::generate().public_key().to_hex(),
+            "fips.peer",
+            70,
+            now_ms() / 1_000,
+        );
+        assert!(events.lock().await.insert_memory(received.clone()));
+        assert!(!insert_control_event(&events, local).await.unwrap());
+        let reloaded = ControlEventStore::load(Some(path), test_update_events()).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(reloaded.snapshot().len(), 2);
+        assert!(reloaded.snapshot().contains(&received));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_store_async_reports_durable_write_errors() {
+        let directory = async_store_directory();
+        let blocked = directory.join("not-a-directory");
+        fs::write(&blocked, b"occupied").unwrap();
+        let mut store = ControlEventStore::load(None, test_update_events()).unwrap();
+        store.path = Some(blocked.join("events.json"));
+        let events = Arc::new(Mutex::new(store));
+        let keys = Keys::generate();
+        let event = rating_event(
+            &keys,
+            &Keys::generate().public_key().to_hex(),
+            "fips.peer",
+            50,
+            now_ms() / 1_000,
+        );
+        let result = insert_control_event(&events, event).await;
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            result.is_err(),
+            "failed durable write must reach the caller"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_store_async_cancelled_waiter_cannot_reorder_writes() {
+        let directory = async_store_directory();
+        let path = directory.join("events.json");
+        let events = Arc::new(Mutex::new(
+            ControlEventStore::load(Some(path.clone()), test_update_events()).unwrap(),
+        ));
+        let keys = Keys::generate();
+        let subject = Keys::generate().public_key().to_hex();
+        let now = now_ms() / 1_000;
+        let older = rating_event(&keys, &subject, "fips.peer", 20, now - 1);
+        let newer = rating_event(&keys, &subject, "fips.peer", 80, now);
+        let mut guard = Arc::clone(&events).lock_owned().await;
+        let (started, ready) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let first = tokio::spawn(control_store_io(move || {
+            let _ = started.send(());
+            released.recv_timeout(Duration::from_secs(1))?;
+            guard.insert(older)
+        }));
+        ready.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        let second = insert_control_event(&events, newer.clone());
+        tokio::pin!(second);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second)
+                .await
+                .is_err(),
+            "the first write must keep ownership until its durable completion"
+        );
+        release.send(()).unwrap();
+        assert!(second.await.unwrap());
+        let reloaded = ControlEventStore::load(Some(path), test_update_events()).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(reloaded.snapshot(), vec![newer]);
+    }
 
     #[test]
     fn maintenance_flushes_received_events_once_and_retries_failed_writes() {

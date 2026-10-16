@@ -22,6 +22,9 @@ use nostr_social_memory::RatingEventExt;
 
 use super::*;
 
+#[path = "tests/persistence.rs"]
+mod persistence;
+
 const FIPS_TEST_EVENTUAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn peer_rating_filter(owner: &Keys) -> Filter {
