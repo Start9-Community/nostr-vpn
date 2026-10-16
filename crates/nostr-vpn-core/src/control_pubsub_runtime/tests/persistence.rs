@@ -62,10 +62,10 @@ fn control_store_async_received_event_survives_runtime_restart() {
         let event = signed_update_root(&publisher, tree, 1, "cd");
         assert!(sending.publish(event.clone()).await.unwrap());
         wait_for_event(&receiving, event.id).await;
+        receiving.stop().await;
         let saved: StoredEventsFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(saved.events.iter().any(|stored| stored.id == event.id));
 
-        receiving.stop().await;
         sending.stop().await;
         sender.shutdown().await.unwrap();
         receiver.shutdown().await.unwrap();

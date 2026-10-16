@@ -511,6 +511,9 @@ async fn run(
             }
         }
     }
+    if let Err(error) = flush_control_events(&events).await {
+        tracing::warn!(%error, "failed to flush control pubsub cache on shutdown");
+    }
 }
 
 async fn publish_local(context: PublishContext<'_>, event: Event) -> Result<bool> {
@@ -631,7 +634,7 @@ fn fips_advert_refresh_delay(event: &Event) -> Duration {
 async fn publish_policy_maintenance(context: PublishContext<'_>) {
     let now = now_ms();
     if let Err(error) = prune_control_events(context.events, now / 1_000).await {
-        tracing::warn!(%error, "failed to prune expired control pubsub events");
+        tracing::warn!(%error, "failed to maintain control pubsub cache");
     }
     let policy_events = match context
         .pubsub_policy
@@ -718,13 +721,7 @@ async fn process_fips_delivery(
     let event = verified.as_event().clone();
     observe_policy_event(pubsub_policy, &event).await;
     ingest_into_fips_discovery(endpoint, &event).await;
-    let inserted = match insert_control_event(events, event.clone()).await {
-        Ok(inserted) => inserted,
-        Err(error) => {
-            tracing::warn!(%error, event_id = %event.id, "failed to store control pubsub event");
-            false
-        }
-    };
+    let inserted = events.lock().await.insert_memory(event.clone());
     if inserted {
         tracing::debug!(event_id = %event.id, "delivered new standard FIPS pubsub event");
         if let Some(relay) = relay
@@ -752,13 +749,7 @@ async fn process_relay_delivery(
     let event = verified.as_event().clone();
     observe_policy_event(pubsub_policy, &event).await;
     ingest_into_fips_discovery(endpoint, &event).await;
-    let inserted = match insert_control_event(events, event.clone()).await {
-        Ok(inserted) => inserted,
-        Err(error) => {
-            tracing::warn!(%error, event_id = %event.id, "failed to store control pubsub event");
-            false
-        }
-    };
+    let inserted = events.lock().await.insert_memory(event.clone());
     if !inserted {
         return;
     }

@@ -1,17 +1,20 @@
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct StoredEventsFile {
+#[serde(bound(deserialize = "E: Deserialize<'de>"))]
+struct StoredEventsFile<E = Event> {
     version: u8,
-    events: Vec<Event>,
+    events: Vec<E>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    paid_offer_watermarks: Vec<Event>,
+    paid_offer_watermarks: Vec<E>,
 }
 
 #[derive(Debug)]
 struct ControlEventStore {
     graph_root: Option<PublicKey>,
     path: Option<PathBuf>,
+    dirty: bool,
     events: HashMap<String, Event>,
     order: VecDeque<String>,
+    encoded_events: HashMap<nostr_sdk::prelude::EventId, Box<serde_json::value::RawValue>>,
     paid_offer_watermarks: HashMap<(u16, String, String), Event>,
     rating_events: HashMap<RatingEventStoreKey, RatingEventStoreEntry>,
     update_events: UpdateEventCache,
@@ -52,7 +55,7 @@ async fn insert_control_event(
     let mut store = Arc::clone(events).lock_owned().await;
     if store.path.is_none()
         || !control_event_is_persistent(&event)
-        || store.events.contains_key(&event.id.to_hex())
+        || (!store.dirty && store.events.contains_key(&event.id.to_hex()))
     {
         return store.insert(event);
     }
@@ -70,6 +73,14 @@ async fn prune_control_events(
     control_store_io(move || store.prune_expired_events(now_secs)).await
 }
 
+async fn flush_control_events(events: &Arc<Mutex<ControlEventStore>>) -> Result<()> {
+    let mut store = Arc::clone(events).lock_owned().await;
+    if store.path.is_none() || !store.dirty {
+        return store.persist();
+    }
+    control_store_io(move || store.persist()).await
+}
+
 impl ControlEventStore {
     #[cfg(any(feature = "paid-exit", test))]
     fn load(path: Option<PathBuf>, update_events: UpdateEventCache) -> Result<Self> {
@@ -85,8 +96,10 @@ impl ControlEventStore {
             return Ok(Self {
                 graph_root,
                 path: None,
+                dirty: false,
                 events: HashMap::new(),
                 order: VecDeque::new(),
+                encoded_events: HashMap::new(),
                 paid_offer_watermarks: HashMap::new(),
                 rating_events: HashMap::new(),
                 update_events,
@@ -95,8 +108,10 @@ impl ControlEventStore {
         let mut store = Self {
             graph_root,
             path: Some(path.clone()),
+            dirty: false,
             events: HashMap::new(),
             order: VecDeque::new(),
+            encoded_events: HashMap::new(),
             paid_offer_watermarks: HashMap::new(),
             rating_events: HashMap::new(),
             update_events,
@@ -135,23 +150,19 @@ impl ControlEventStore {
                 let _ = store.insert_memory(event);
             }
         }
-        if store.events.len() != saved_count
-            || store.paid_offer_watermarks.len() != saved_watermark_count
-        {
-            store.persist()?;
-        }
+        store.dirty = store.events.len() != saved_count
+            || store.paid_offer_watermarks.len() != saved_watermark_count;
+        store.persist()?;
         Ok(store)
     }
 
     fn insert(&mut self, event: Event) -> Result<bool> {
         let persistent = control_event_is_persistent(&event);
-        if !self.insert_memory(event) {
-            return Ok(false);
-        }
+        let inserted = self.insert_memory(event);
         if persistent {
             self.persist()?;
         }
-        Ok(true)
+        Ok(inserted)
     }
 
     fn insert_memory(&mut self, event: Event) -> bool {
@@ -204,6 +215,7 @@ impl ControlEventStore {
                 self.remove_memory(&stored_id);
             }
             self.paid_offer_watermarks.insert(coordinate, event.clone());
+            self.dirty = true;
             if !is_live {
                 return true;
             }
@@ -272,6 +284,7 @@ impl ControlEventStore {
             self.remove_memory(&oldest);
         }
         self.order.push_back(event_id.clone());
+        self.dirty |= control_event_is_persistent(&event);
         self.events.insert(event_id.clone(), event);
         if let Some((rating_key, created_at)) = rating {
             self.rating_events.insert(
@@ -286,9 +299,10 @@ impl ControlEventStore {
     }
 
     fn remove_memory(&mut self, event_id: &str) -> bool {
-        if self.events.remove(event_id).is_none() {
+        let Some(event) = self.events.remove(event_id) else {
             return false;
-        }
+        };
+        self.dirty |= control_event_is_persistent(&event);
         self.order.retain(|stored_id| stored_id != event_id);
         self.rating_events
             .retain(|_, stored| stored.event_id != event_id);
@@ -336,6 +350,7 @@ impl ControlEventStore {
             .map(|(coordinate, event)| (coordinate.clone(), event.id.to_hex()))
             .collect::<Vec<_>>();
         if remove.is_empty() && expired_watermarks.is_empty() {
+            self.persist()?;
             return Ok(0);
         }
         for event_id in &remove {
@@ -347,37 +362,68 @@ impl ControlEventStore {
             .count();
         for (coordinate, _) in expired_watermarks {
             self.paid_offer_watermarks.remove(&coordinate);
+            self.dirty = true;
         }
         self.persist()?;
         Ok(remove.len() + hidden_watermarks_removed)
     }
 
-    fn persist(&self) -> Result<()> {
+    fn persist(&mut self) -> Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
         let Some(path) = self.path.as_deref() else {
+            self.dirty = false;
             return Ok(());
         };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let mut paid_offer_watermarks = self
-            .paid_offer_watermarks
-            .values()
-            .cloned()
+        let mut paid_offer_watermarks = self.paid_offer_watermarks.values().collect::<Vec<_>>();
+        paid_offer_watermarks.sort_by_key(|event| paid_offer_coordinate(event));
+        let events = self
+            .order
+            .iter()
+            .filter_map(|event_id| self.events.get(event_id))
+            .filter(|event| control_event_is_persistent(event))
             .collect::<Vec<_>>();
-        paid_offer_watermarks.sort_by_key(paid_offer_coordinate);
+        // Signed events are immutable by ID. Encode new records once instead
+        // of converting every signature, key, and tag on each snapshot write.
+        // Keep only encodings referenced by this exact snapshot, including
+        // hidden paid-offer watermarks retained for replay protection.
+        let retained_ids = events
+            .iter()
+            .chain(&paid_offer_watermarks)
+            .map(|event| event.id)
+            .collect::<HashSet<_>>();
+        self.encoded_events
+            .retain(|id, _| retained_ids.contains(id));
+        for event in events.iter().chain(&paid_offer_watermarks) {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.encoded_events.entry(event.id)
+            {
+                entry.insert(
+                    serde_json::value::to_raw_value(*event)
+                        .context("failed to encode control event")?,
+                );
+            }
+        }
         let saved = StoredEventsFile {
             version: STORE_VERSION,
-            events: self
-                .snapshot()
-                .into_iter()
-                .filter(control_event_is_persistent)
+            events: events
+                .iter()
+                .map(|event| self.encoded_events[&event.id].as_ref())
                 .collect(),
-            paid_offer_watermarks,
+            paid_offer_watermarks: paid_offer_watermarks
+                .iter()
+                .map(|event| self.encoded_events[&event.id].as_ref())
+                .collect(),
         };
         let bytes = serde_json::to_vec(&saved).context("failed to encode control pubsub store")?;
         crate::config::write_private_file_preserving_user_owner(path, &bytes)
             .with_context(|| format!("failed to write control pubsub store {}", path.display()))?;
+        self.dirty = false;
         Ok(())
     }
 }
@@ -547,6 +593,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn control_store_async_duplicate_local_event_flushes_received_batch() {
+        let directory = async_store_directory();
+        let path = directory.join("events.json");
+        let events = Arc::new(Mutex::new(
+            ControlEventStore::load(Some(path.clone()), test_update_events()).unwrap(),
+        ));
+        let keys = Keys::generate();
+        let local = rating_event(
+            &keys,
+            &Keys::generate().public_key().to_hex(),
+            "fips.peer",
+            50,
+            now_ms() / 1_000,
+        );
+        assert!(insert_control_event(&events, local.clone()).await.unwrap());
+        let received = rating_event(
+            &keys,
+            &Keys::generate().public_key().to_hex(),
+            "fips.peer",
+            70,
+            now_ms() / 1_000,
+        );
+        assert!(events.lock().await.insert_memory(received.clone()));
+        assert!(!insert_control_event(&events, local).await.unwrap());
+        let reloaded = ControlEventStore::load(Some(path), test_update_events()).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(reloaded.snapshot().len(), 2);
+        assert!(reloaded.snapshot().contains(&received));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn control_store_async_reports_durable_write_errors() {
         let directory = async_store_directory();
         let blocked = directory.join("not-a-directory");
@@ -607,6 +684,108 @@ mod tests {
         let reloaded = ControlEventStore::load(Some(path), test_update_events()).unwrap();
         fs::remove_dir_all(&directory).unwrap();
         assert_eq!(reloaded.snapshot(), vec![newer]);
+    }
+
+    #[test]
+    fn maintenance_flushes_received_events_once_and_retries_failed_writes() {
+        let author = Keys::generate();
+        let now = now_ms() / 1_000;
+        let directory = std::env::temp_dir().join(format!(
+            "nvpn-control-event-batch-{}-{}",
+            std::process::id(),
+            author.public_key()
+        ));
+        fs::create_dir_all(&directory).expect("event store directory");
+        let path = directory.join("control-events.json");
+        let mut store =
+            ControlEventStore::load(Some(path.clone()), test_update_events()).expect("event store");
+        for _ in 0..2 {
+            assert!(store.insert_memory(rating_event(
+                &author,
+                &Keys::generate().public_key().to_hex(),
+                "fips.peer",
+                50,
+                now,
+            )));
+        }
+        assert!(!path.exists(), "received events wait for maintenance");
+        store
+            .prune_expired_events(now)
+            .expect("flush received batch");
+        let reloaded = ControlEventStore::load(Some(path.clone()), test_update_events())
+            .expect("reload received events");
+        assert_eq!(reloaded.snapshot(), store.snapshot());
+
+        fs::rename(&path, directory.join("previous.json")).expect("move saved cache");
+        fs::create_dir(&path).expect("block cache writes");
+        store
+            .prune_expired_events(now)
+            .expect("unchanged cache must not be rewritten");
+        assert!(store.insert_memory(rating_event(
+            &author,
+            &Keys::generate().public_key().to_hex(),
+            "fips.peer",
+            50,
+            now,
+        )));
+        assert!(store.prune_expired_events(now).is_err());
+        fs::remove_dir(&path).expect("restore writable cache path");
+        store
+            .prune_expired_events(now)
+            .expect("retry received batch");
+        let reloaded = ControlEventStore::load(Some(path), test_update_events())
+            .expect("reload retried events");
+        assert_eq!(reloaded.snapshot(), store.snapshot());
+        fs::remove_dir_all(directory).expect("remove event store directory");
+    }
+
+    #[test]
+    fn cached_event_encoding_preserves_snapshots_and_releases_replaced_records() {
+        let author = Keys::generate();
+        let subject = Keys::generate().public_key().to_hex();
+        let now = now_ms() / 1_000;
+        let directory = std::env::temp_dir().join(format!(
+            "nvpn-control-encoding-{}-{}",
+            std::process::id(),
+            author.public_key()
+        ));
+        let path = directory.join("control-events.json");
+        let mut store =
+            ControlEventStore::load(Some(path.clone()), test_update_events()).expect("event store");
+        let older = rating_event(&author, &subject, "fips.peer", 20, now.saturating_sub(1));
+        let newer = rating_event(&author, &subject, "fips.peer", 80, now);
+        assert!(store.insert(older.clone()).expect("save initial rating"));
+        assert!(store.insert(newer.clone()).expect("replace rating"));
+        assert_eq!(store.encoded_events.len(), 1, "replaced bytes are released");
+        assert!(!store.encoded_events.contains_key(&older.id));
+
+        let expected = StoredEventsFile {
+            version: STORE_VERSION,
+            events: vec![newer],
+            paid_offer_watermarks: vec![],
+        };
+        assert_eq!(
+            fs::read(&path).expect("saved bytes"),
+            serde_json::to_vec(&expected).expect("canonical event encoding")
+        );
+        let reloaded = ControlEventStore::load(Some(path.clone()), test_update_events())
+            .expect("reload encoded events");
+        assert_eq!(reloaded.snapshot(), store.snapshot());
+
+        assert_eq!(
+            store
+                .prune_expired_events(now + PEER_RATING_MAX_AGE.as_secs() + 1)
+                .expect("expire cached rating"),
+            1
+        );
+        assert!(
+            store.encoded_events.is_empty(),
+            "expired bytes are released"
+        );
+        let reloaded =
+            ControlEventStore::load(Some(path), test_update_events()).expect("reload empty cache");
+        assert!(reloaded.snapshot().is_empty());
+        fs::remove_dir_all(directory).expect("remove event store directory");
     }
 
     #[test]
