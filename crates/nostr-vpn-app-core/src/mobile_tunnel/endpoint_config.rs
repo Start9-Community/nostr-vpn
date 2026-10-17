@@ -196,6 +196,9 @@ fn fips_endpoint_config_for_platform(
 ) -> FipsConfig {
     let mut config = FipsConfig::new();
     if platform == RuntimePlatform::Ios {
+        // Supporting neighbors keep the phone reachable without using it for
+        // unrelated mesh transit. FIPS preserves routing with older neighbors.
+        config.node.leaf_only = true;
         // Receiver reports retain link and session health with less idle
         // reporting work on a phone.
         config.node.mmp.mode = fips_core::mmp::MmpMode::Lightweight;
@@ -694,6 +697,7 @@ mod endpoint_config_tests {
 
         assert_eq!(config.node.mmp.mode, fips_core::mmp::MmpMode::Lightweight);
         assert_eq!(config.node.session_mmp.mode, fips_core::mmp::MmpMode::Lightweight);
+        assert!(config.node.leaf_only);
         assert!(config.node.discovery.nostr.enabled);
         assert!(
             config.node.discovery.nostr.share_local_candidates,

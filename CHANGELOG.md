@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## 4.1.18 - 2026-10-15
+## 4.1.18 - 2026-10-17
 
 ### Release notes
 
@@ -21,6 +21,7 @@ settings and identities. iOS does not support paid exits.
 ### Fixed
 
 - Update Rustls to 0.23.46 to include the latest TLS security fixes.
+- Update Negentropy to reject malformed reconciliation messages before allocating memory.
 - Correct FIPS TCP transport handling for reliable peer connections.
 - Recover from transient network refresh failures without terminating the daemon,
   preserving successful carrier rebinds and keeping status and control work available.
@@ -35,7 +36,7 @@ settings and identities. iOS does not support paid exits.
 - Keep the Linux window responsive while the backend starts or handles slow commands.
 - Remember Linux update downloads across restarts, select packages for the host
   distribution and architecture, and open download folders only on request.
-- Show accepted payment mints on Linux with explicit trust actions, and allow
+- Show accepted payment mints on Linux and Android with explicit trust actions, and allow
   free offers without a trusted mint.
 - Open pasted paid-exit provider links immediately on macOS.
 - Persist custom seller offer IDs and withdraw superseded listings.
@@ -50,15 +51,20 @@ settings and identities. iOS does not support paid exits.
   self-update code.
 - Batch received discovery-cache writes and reuse unchanged event encodings
   to reduce background disk and CPU activity.
+- Keep networking responsive during durable discovery-cache writes.
 - Reuse verified relay events to avoid repeated cryptographic work.
 - Reduce repeated discovery scans and idle packet-processing allocations.
 - Avoid repeated processing when incoming packets are waiting for an outgoing
   send, and preserve received packets whether that send succeeds or fails.
 - Preserve already-received packets when older queued traffic fills a processing
   turn, preventing packet loss during reconnects.
+- Keep WebSocket control traffic moving when native packet traffic continuously
+  refills the receive queue.
 - Avoid timer wakeups while discovery is waiting for new events.
 - Reduce iOS tunnel wakeups with lightweight link and session reports and one async I/O
   worker, retaining the separate cryptographic worker pool.
+- Keep iPhones reachable without forwarding unrelated mesh traffic when their
+  connected peers support client-only routing; preserve compatibility with older peers.
 - Wake for new join approvals on Apple devices instead of repeatedly scanning
   an unchanged directory.
 - Schedule TCP work at its actual deadlines and finish selected receive batches
