@@ -35,7 +35,10 @@ fn paid_exit_run_persists_custom_offer_identity_across_processes() {
         output_json(&output)["provider_link"].as_str().unwrap(),
     )
     .unwrap();
-    assert!(provider.mint.is_empty(), "multiple mints must remain alternatives");
+    assert!(
+        provider.mint.is_empty(),
+        "multiple mints must remain alternatives"
+    );
     assert_eq!(
         AppConfig::load(&path).unwrap().paid_exit_offer_id(),
         "custom-exit"

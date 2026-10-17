@@ -16,8 +16,8 @@ use fips_core::{Config as FipsConfig, FipsEndpoint};
 use hashtree_updater::{
     ProductAssetPolicy, SecurePubsubBlossomConfig, SecurePubsubBlossomSelection, UpdateAsset,
     UpdateManifest, build_secure_pubsub_blossom_updater, current_archive_target, dedupe_nonempty,
-    download_product_selection, env_csv,
-    preferred_app_asset_for_suffixes, preferred_cli_asset_for_target, select_product_update,
+    download_product_selection, env_csv, preferred_app_asset_for_suffixes,
+    preferred_cli_asset_for_target, select_product_update,
     selected_download_path as shared_selected_download_path, update_ref_from_override,
 };
 pub use hashtree_updater::{

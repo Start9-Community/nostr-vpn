@@ -32,7 +32,7 @@ pub(super) fn app_asset_suffixes(os_release: &str, arch: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hashtree_updater::{preferred_app_asset_for_suffixes, UpdateAsset, UpdateManifest};
+    use hashtree_updater::{UpdateAsset, UpdateManifest, preferred_app_asset_for_suffixes};
 
     #[test]
     fn release_selection_matches_linux_distribution_and_architecture() {
@@ -72,11 +72,10 @@ mod tests {
             assert!(selected.name.ends_with(expected), "{}", selected.name);
         }
         for release in ["ID=fedora", "", "# ID_LIKE=debian", "ID=archlinuxish"] {
-            assert!(preferred_app_asset_for_suffixes(
-                &manifest,
-                &app_asset_suffixes(release, "x86_64")
-            )
-            .is_none());
+            assert!(
+                preferred_app_asset_for_suffixes(&manifest, &app_asset_suffixes(release, "x86_64"))
+                    .is_none()
+            );
         }
         assert!(app_asset_suffixes("ID=debian", "arm").is_empty());
         let portable = UpdateManifest {
@@ -86,10 +85,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(preferred_app_asset_for_suffixes(
-            &portable,
-            &app_asset_suffixes("ID=fedora", "x86_64")
-        )
-        .is_some());
+        assert!(
+            preferred_app_asset_for_suffixes(&portable, &app_asset_suffixes("ID=fedora", "x86_64"))
+                .is_some()
+        );
     }
 }
