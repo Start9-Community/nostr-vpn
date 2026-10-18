@@ -81,6 +81,7 @@ const harnessOnlyPaths = new Set([
   'scripts/macos-release-exit-dns-ui-remote.sh',
   'scripts/macos-release-mobile-join-remote.sh',
   'scripts/macos-vm-desktop-daemon-idle-e2e.sh',
+  'scripts/macos-vm-git-sync.sh',
   'scripts/macos-vm-desktop-wireguard-exit-e2e.sh',
   'scripts/macos-vm-release-exit-dns-ui-e2e.sh',
   'scripts/macos-vm-release-mobile-join-e2e.sh',
