@@ -358,7 +358,8 @@ fake_compose() {
       touch "$ROOT/funding-started"
       printf '{"sessions":[{"session_id":"session","payment":{"cashu_spilman":{"has_funding":%s,"has_signature":%s}},"routing":{"allow_routing":%s}}]}\\n' "$funded" "$funded" "$funded"
       ;;
-    *'node-b sh -lc ip route'*) echo 'default dev utun100' ;;
+    *'node-b sh -lc ip -4 route show table 20054 default'*|*'node-b sh -lc ip route get '*)
+      echo 'default dev utun100' ;;
     *'internet-target sh -lc timeout'*)
       [[ -f "$ROOT/funded" ]] || { echo 'capture started before funded admission' >&2; return 29; }
       echo '198.19.246.10 > 198.19.246.100'
