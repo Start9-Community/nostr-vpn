@@ -102,16 +102,19 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          cache-on-failure: true
 
       # One full workspace run includes every focused nvpn/app-core test.
       # Keep lint in this job so it shares the same resolved dependencies.
-      - name: Check sources and run workspace tests once
+      - name: Check source formatting and lints
         run: |
           python3 scripts/test-native-lab.py
           node scripts/sync-versions.mjs --check
           cargo fmt --check -p nvpn -p nostr-vpn-app-core -p nostr-vpn-core -p nostr-vpn-sim -p nostr-vpn-web -p nostr-vpn-wintun -p nostr-vpn-uniffi-bindgen
           cargo clippy --locked --workspace --exclude nvpn-cashu-service --exclude nvpn-cdk-spilman --all-targets --no-deps -- -D warnings
-          cargo test --workspace
+
+      - name: Run workspace tests once
+        run: cargo test --workspace
 
   web:
     name: Web typecheck

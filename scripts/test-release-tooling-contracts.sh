@@ -8,8 +8,10 @@ source "$ROOT_DIR/scripts/lib-release-gate-parallel.sh"
 run_contract_batch() {
   local contract contract_status status=0
   for contract in "$@"; do
+    printf "Running release tooling contract: %s\n" "$contract"
     "$contract" || {
       contract_status="$?"
+      printf "Release tooling contract failed: %s (exit %s)\n" "$contract" "$contract_status" >&2
       ((status != 0)) || status="$contract_status"
     }
   done
