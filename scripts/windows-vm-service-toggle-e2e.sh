@@ -38,7 +38,7 @@ run_ps() {
 }
 
 consent_state() {
-  run_ps "if (Get-Process consent -ErrorAction SilentlyContinue) { Write-Output 'NVPN_CONSENT_PRESENT' } else { Write-Output 'NVPN_CONSENT_CLOSED' }"
+  run_ps "if (!(Get-Process consent -ErrorAction SilentlyContinue)) { Write-Output 'NVPN_CONSENT_CLOSED' } elseif (Test-Path -LiteralPath '$GUEST_ARTIFACT_ROOT\\windows-service-toggle\\consent-observed.json') { Write-Output 'NVPN_CONSENT_READY' } else { Write-Output 'NVPN_CONSENT_UNACKNOWLEDGED' }"
 }
 
 case "${NVPN_WINDOWS_SKIP_GIT_SYNC:-0}" in
@@ -99,12 +99,14 @@ while kill -0 "$interactive_pid" >/dev/null 2>&1; do
     sleep 0.1
     continue
   }
-  if [[ "$state" == *NVPN_CONSENT_PRESENT* ]]; then
+  # Wait for the guest to record both the app's elevation child and consent.
+  # Cancelling on host observation alone races the guest's CIM query.
+  if [[ "$state" == *NVPN_CONSENT_READY* ]]; then
     consent_stable_count=0
     while ((consent_stable_count < 3)); do
       sleep 0.1
       state="$(consent_state 2>/dev/null)" || continue 2
-      if [[ "$state" != *NVPN_CONSENT_PRESENT* ]]; then
+      if [[ "$state" != *NVPN_CONSENT_READY* ]]; then
         continue 2
       fi
       consent_stable_count=$((consent_stable_count + 1))

@@ -271,19 +271,16 @@ extension NostrVpnReleaseNetworkUITests {
                 Thread.sleep(forTimeInterval: 0.05)
                 continue
             }
+            let wifiSwitches = settings.switches.matching(identifier: "Wi-Fi")
+                .allElementsBoundByIndex
+                .filter { $0.exists && $0.isHittable && binaryControlState($0) != nil }
+            if wifiSwitches.count == 1 {
+                return wifiSwitches[0]
+            }
             let nativeSwitches = settings.switches.allElementsBoundByIndex
                 .filter { $0.exists && $0.isHittable }
             if nativeSwitches.count == 1 {
                 return nativeSwitches[0]
-            }
-            let binaryControls = settings.descendants(matching: .any)
-                .allElementsBoundByIndex
-                .filter { element in
-                    element.exists && element.isHittable
-                        && binaryControlState(element) != nil
-                }
-            if binaryControls.count == 1 {
-                return binaryControls[0]
             }
             Thread.sleep(forTimeInterval: 0.05)
         } while ProcessInfo.processInfo.systemUptime < deadline
