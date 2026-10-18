@@ -54,8 +54,14 @@ jobs:
           import pathlib, tomllib
           lock = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
           packages = {p['name']: p for p in lock['package']}
-          for name in ('nvpn-fips-core', 'nvpn-fips-endpoint', 'nvpn-fips-identity'):
-              assert packages[name]['version'] == '0.4.104', name
+          for name, crate in (
+              ('nvpn-fips-core', 'fips-core'),
+              ('nvpn-fips-endpoint', 'fips-endpoint'),
+              ('nvpn-fips-identity', 'fips-identity'),
+          ):
+              manifest = pathlib.Path('.release-fips/crates') / crate / 'Cargo.toml'
+              version = tomllib.loads(manifest.read_text())['package']['version']
+              assert packages[name]['version'] == version, name
           PY
       - name: Exercise nvpn TCP transit under client churn
         shell: bash
