@@ -339,10 +339,30 @@ temporary.replace(path)
 PY
 }
 
+ios_release_network_reused_app_sha() {
+  local receipt="$1" candidate_tree
+  candidate_tree="$(git -C "$ROOT" rev-parse "${NVPN_EXPECTED_APP_GIT_SHA}^{tree}")" || return
+  assert_release_checkout_state \
+    "$ROOT" "$NVPN_EXPECTED_APP_GIT_SHA" "$candidate_tree" \
+    "iOS retained network artifact" || return
+  node --input-type=module - \
+    "$ROOT" "$receipt" "$NVPN_EXPECTED_APP_GIT_SHA" "$candidate_tree" <<'JS'
+import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+const [root, path, commit, tree] = process.argv.slice(2)
+const { requireReceiptSource } = await import(pathToFileURL(`${root}/scripts/release-artifact-provenance-lib.mjs`))
+const receipt = JSON.parse(readFileSync(path, 'utf8'))
+requireReceiptSource(receipt, {
+  commit, tree, candidateRoot: root, platform: 'ios', label: 'Retained iOS network artifact',
+})
+console.log(receipt.appGitSha)
+JS
+}
+
 ios_release_network_prepare_reuse() {
   local device="$1" app derived xctestrun receipt runner_receipt runner
   local app_tree runner_tree xctestrun_sha test_products_tree
-  local device_udid device_sha values install_mode runner_install_receipt
+  local device_udid device_sha values install_mode runner_install_receipt artifact_app_sha
   app="${NVPN_MOBILE_IOS_RELEASE_APP_PATH:-}"
   derived="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-}"
   xctestrun="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}"
@@ -357,6 +377,9 @@ ios_release_network_prepare_reuse() {
     echo "Exact iOS reuse requires pinned app, runner, xctestrun, and receipts" >&2
     return 1
   }
+  # Keep the signed app's original identity after a harness-only correction.
+  # Prove unchanged product inputs before even resolving the physical device.
+  artifact_app_sha="$(ios_release_network_reused_app_sha "$receipt")" || return
   app_tree="$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$app")" \
     || return 1
   runner_tree="$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$runner")" \
@@ -377,7 +400,7 @@ ios_release_network_prepare_reuse() {
     "$receipt" "$runner_receipt" "$IOS_RELEASE_NETWORK_DEVICE_RECEIPT" \
     "$app_tree" "$runner_tree" "$xctestrun_sha" "$test_products_tree" \
     "$device_sha" \
-    "$NVPN_EXPECTED_APP_GIT_SHA" "$NVPN_EXPECTED_FIPS_GIT_SHA" \
+    "$artifact_app_sha" "$NVPN_EXPECTED_FIPS_GIT_SHA" \
     "$NVPN_MOBILE_IOS_RELEASE_RUNNER_TREE_SHA256" "$IOS_BUNDLE_ID" <<'PY'
 import json, sys
 (receipt_path, runner_path, device_path, app_tree, runner_tree, xctest_sha,
@@ -426,7 +449,7 @@ PY
   IFS=$'\t' read -r IOS_RELEASE_NETWORK_APP_TREE \
     IOS_RELEASE_NETWORK_FIPS_TREE NVPN_EXPECTED_FIPS_VERSION \
     IOS_RELEASE_NETWORK_BASE_CDHASH <<<"$values"
-  IOS_RELEASE_NETWORK_APP_HEAD="$NVPN_EXPECTED_APP_GIT_SHA"
+  IOS_RELEASE_NETWORK_APP_HEAD="$artifact_app_sha"
   IOS_RELEASE_NETWORK_BASE_TREE_SHA="$app_tree"
   IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA="$test_products_tree"
   IOS_RELEASE_NETWORK_DERIVED_DATA="$derived"

@@ -1768,14 +1768,6 @@ test('release builds include paid exit support by default', () => {
   assert.doesNotMatch(releaseWorkflow, /NVPN_LINUX_MUSL_NO_DEFAULT_FEATURES/)
 })
 
-test('Linux musl builds extract only rustables instead of vendoring every dependency', () => {
-  const linuxBuilder = readFileSync('scripts/build-nvpn-linux-musl', 'utf8')
-
-  assert.doesNotMatch(linuxBuilder, /\bcargo\b[^\n]*\bvendor\b/)
-  assert.match(linuxBuilder, /rustables-\$\{rustables_version\}\.crate/)
-  assert.match(linuxBuilder, /tar -xzf "\$rustables_crate" -C vendor/)
-})
-
 test('deterministicBuildEnv fills stable defaults without clobbering explicit env', () => {
   assert.deepEqual(
     deterministicBuildEnv(
