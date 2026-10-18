@@ -542,7 +542,7 @@ def validate_ios_support(
             "observedCheckpointCount": len(observed),
             "sampleCount": process.get("sampleCount"),
         }
-        if case == "automatic-profile":
+        if case == "automatic-profile" and mode == "underlay-lifecycle":
             summaries[case]["connectedUse"] = validate_ios_connected_use(markers)
         if case == "through-exit":
             summaries[case]["directCheckpointProcesses"] = direct_processes
