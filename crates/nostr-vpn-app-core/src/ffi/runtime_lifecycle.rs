@@ -254,10 +254,17 @@ impl NativeAppRuntime {
                 })
                 .unwrap_or_default()
         };
+        // The device approval request is shared by every network. Validate and
+        // encode it once per snapshot instead of repeating the crypto per row.
+        let join_request_qr_code_or_link = if config_unavailable {
+            String::new()
+        } else {
+            self.current_join_request_link()
+        };
         let networks = if config_unavailable {
             Vec::new()
         } else {
-            self.network_states(&own_pubkey_hex, vpn_active)
+            self.network_states(&own_pubkey_hex, vpn_active, &join_request_qr_code_or_link)
         };
         let fips_peer_stats = active_network_fips_peer_stats(&networks, &own_pubkey_hex);
         let other_fips_peer_count =
@@ -395,11 +402,7 @@ impl NativeAppRuntime {
             } else {
                 self.config.effective_network_id()
             },
-            join_request_qr_code_or_link: if config_unavailable {
-                String::new()
-            } else {
-                self.current_join_request_link()
-            },
+            join_request_qr_code_or_link,
             internet_source: if config_unavailable {
                 String::new()
             } else {

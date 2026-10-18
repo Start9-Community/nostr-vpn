@@ -1,9 +1,14 @@
 impl NativeAppRuntime {
-    fn network_states(&self, own_pubkey_hex: &str, vpn_active: bool) -> Vec<NativeNetworkState> {
+    fn network_states(
+        &self,
+        own_pubkey_hex: &str,
+        vpn_active: bool,
+        join_request_link: &str,
+    ) -> Vec<NativeNetworkState> {
         self.config
             .networks
             .iter()
-            .map(|network| self.network_state(network, own_pubkey_hex, vpn_active))
+            .map(|network| self.network_state(network, own_pubkey_hex, vpn_active, join_request_link))
             .collect()
     }
 
@@ -163,6 +168,7 @@ impl NativeAppRuntime {
         network: &NetworkConfig,
         own_pubkey_hex: &str,
         vpn_active: bool,
+        join_request_link: &str,
     ) -> NativeNetworkState {
         let mut admins = network
             .admins
@@ -201,8 +207,6 @@ impl NativeAppRuntime {
             .filter(|participant| participant.reachable && participant.roster_accepted)
             .count() as u64;
         let expected_count = participants.len() as u64;
-        let join_request_qr_code_or_link = self.current_join_request_link();
-
         NativeNetworkState {
             id: network.id.clone(),
             name: network.name.clone(),
@@ -220,7 +224,7 @@ impl NativeAppRuntime {
                 .outbound_join_request
                 .as_ref()
                 .map(native_outbound_join_request),
-            join_request_qr_code_or_link,
+            join_request_qr_code_or_link: join_request_link.to_string(),
             inbound_join_requests: network
                 .inbound_join_requests
                 .iter()

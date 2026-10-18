@@ -34,7 +34,7 @@ fn connected_device_stays_joining_until_its_roster_receipt_arrives() {
         ..Default::default()
     });
     let assert_joining = |runtime: &NativeAppRuntime| {
-        let state = runtime.network_state(&network, &own, true);
+        let state = runtime.network_state(&network, &own, true, &runtime.current_join_request_link());
         let device = state
             .participants
             .iter()
@@ -59,7 +59,7 @@ fn connected_device_stays_joining_until_its_roster_receipt_arrives() {
     std::fs::remove_file(&path).unwrap(); // The old delivery retry budget expires.
     assert_joining(&runtime);
     nostr_vpn_core::join_delivery::complete_join_roster_delivery(&path, &delivery).unwrap();
-    let state = runtime.network_state(&network, &own, true);
+    let state = runtime.network_state(&network, &own, true, &runtime.current_join_request_link());
     let device = state
         .participants
         .iter()

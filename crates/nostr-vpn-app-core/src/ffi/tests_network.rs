@@ -666,6 +666,7 @@ exit 0
         runtime.mobile_runtime = true;
         runtime.config_path = dir.join("config.toml");
         create_test_network(&mut runtime, "Home");
+        create_test_network(&mut runtime, "Work");
         runtime
             .config
             .save(&runtime.config_path)
@@ -673,9 +674,24 @@ exit 0
 
         let state = runtime.state();
         assert!(state.join_request_qr_code_or_link.starts_with("nvpn://join-request/"));
-        assert!(state.networks[0]
-            .join_request_qr_code_or_link
-            .starts_with("nvpn://join-request/"));
+        assert_eq!(state.networks.len(), 2);
+        assert!(state.networks.iter().all(|network| {
+            network.join_request_qr_code_or_link == state.join_request_qr_code_or_link
+        }));
+
+        runtime.config.clear_pending_nostr_join_request();
+        runtime.config.ensure_pending_nostr_join_request(unix_timestamp()).unwrap();
+        let rotated = runtime.state();
+        assert_ne!(rotated.join_request_qr_code_or_link, state.join_request_qr_code_or_link);
+        assert!(rotated.networks.iter().all(|network| {
+            network.join_request_qr_code_or_link == rotated.join_request_qr_code_or_link
+        }));
+
+        runtime.config.pending_nostr_join_request.as_mut().unwrap().request_private_key =
+            Keys::generate().secret_key().to_secret_hex();
+        let invalid = runtime.state();
+        assert!(invalid.join_request_qr_code_or_link.is_empty());
+        assert!(invalid.networks.iter().all(|network| network.join_request_qr_code_or_link.is_empty()));
 
         let _ = fs::remove_dir_all(&dir);
     }
