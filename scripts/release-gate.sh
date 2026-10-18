@@ -1071,6 +1071,47 @@ linux_platform_lane_requested() {
     || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E:-required}"
 }
 
+verify_retained_host_linux_vm_bundle() {
+  node --input-type=module - "$ROOT_DIR" "$1" <<'JS'
+import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+const [root, bundle] = process.argv.slice(2)
+const { requireReceiptSource } = await import(pathToFileURL(`${root}/scripts/release-artifact-provenance-lib.mjs`))
+const { readWorkspaceVersionTag, semverFromTag } = await import(pathToFileURL(`${root}/scripts/local-release-lib.mjs`))
+const receipt = JSON.parse(readFileSync(`${bundle}/receipt.json`, 'utf8'))
+const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
+const hash = path => createHash('sha256').update(readFileSync(`${root}/${path}`)).digest('hex')
+requireReceiptSource(receipt, { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}'),
+  candidateRoot: root, platform: 'linux', label: 'Retained Linux release bundle' })
+const expected = {
+  appVersion: semverFromTag(readWorkspaceVersionTag(readFileSync(`${root}/Cargo.toml`, 'utf8'))),
+  fipsGitSha: process.env.NVPN_EXPECTED_FIPS_GIT_SHA,
+  fipsGitTree: process.env.NVPN_EXPECTED_FIPS_GIT_TREE,
+  fipsVersion: process.env.NVPN_EXPECTED_FIPS_VERSION,
+  builderMode: process.env.NVPN_HOST_LINUX_VM_BUILDER_MODE,
+  sourceDateEpoch: Number(git('log', '-1', '--format=%ct', receipt.appGitSha)),
+}
+for (const [key, value] of Object.entries(expected)) {
+  if (value === undefined || receipt[key] !== value) throw new Error(`Retained Linux bundle differs: ${key}`)
+}
+const lockTool = `${root}/scripts/verify-cargo-path-patch-lock.py`
+const python = (...args) => execFileSync('python3', args, { cwd: root, encoding: 'utf8' }).trim()
+const specs = python(lockTool, '--manifest-specs', process.env.NVPN_FIPS_REPO_PATH).split('\n')
+if (specs.length !== 8) throw new Error('Retained Linux bundle lacks eight exact FIPS source packages')
+const rustToolchain = process.env.NVPN_HOST_LINUX_VM_RUST_TOOLCHAIN || '1.95.0'
+execFileSync('python3', [`${root}/scripts/verify-host-linux-vm-bundle.py`, bundle, `${bundle}/receipt.json`,
+  receipt.appGitSha, receipt.appGitTree, expected.appVersion,
+  expected.fipsGitSha, expected.fipsGitTree, expected.fipsVersion,
+  hash('Cargo.lock'), python(lockTool, '--expected-sha256', `${root}/Cargo.lock`, ...specs),
+  hash('linux/Cargo.lock'), python(lockTool, '--expected-sha256', `${root}/linux/Cargo.lock`, ...specs),
+  'x86_64-unknown-linux-gnu', expected.builderMode, rustToolchain,
+  hash('Dockerfile.linux-vm-gate'), hash('scripts/build-host-linux-vm-bundle-in-container.sh'), ...specs],
+  { cwd: root, stdio: 'inherit' })
+JS
+}
+
 prepare_host_linux_vm_bundle_and_record() {
   local bundle receipt temporary
   if [[ -z "${NVPN_HOST_LINUX_VM_BUILDER_MODE:-}" \
@@ -1086,7 +1127,12 @@ prepare_host_linux_vm_bundle_and_record() {
       export NVPN_HOST_LINUX_VM_NATIVE_BUILDER_JUMP="${NVPN_HOST_LINUX_VM_NATIVE_BUILDER_JUMP:-${NVPN_UBUNTU_SSH_JUMP:-}}"
     fi
   fi
-  bundle="$(./scripts/prepare-host-linux-vm-bundle.sh)"
+  if [[ -n "${NVPN_HOST_LINUX_VM_BUNDLE_DIR:-}" ]]; then
+    bundle="$NVPN_HOST_LINUX_VM_BUNDLE_DIR"
+    verify_retained_host_linux_vm_bundle "$bundle" >&2
+  else
+    bundle="$(./scripts/prepare-host-linux-vm-bundle.sh)"
+  fi
   [[ "$bundle" == /* && -d "$bundle" && ! -L "$bundle" ]] \
     || { echo "Host Linux VM bundle builder returned an invalid path." >&2; return 1; }
   NVPN_HOST_LINUX_VM_BUNDLE_DIR="$bundle"

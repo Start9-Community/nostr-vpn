@@ -254,9 +254,20 @@ ubuntu_vm_import_release_bundle() {
   # shellcheck disable=SC1091
   source "$release_root/scripts/lib-mobile-release-join-artifacts.sh"
   load_release_env "$release_root"
-  assert_release_checkout_state \
-    "$release_root" "$app_sha" "$app_tree" "Ubuntu VM host bundle" || {
-    ubuntu_vm_import_error "host bundle differs from the exact app checkout"
+  node --input-type=module - "$release_root" "$receipt" <<'JS_SOURCE' || {
+import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+const [root, path] = process.argv.slice(2)
+const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
+if (git('status', '--porcelain', '--untracked-files=all')) throw new Error('Linux release checkout is dirty')
+const { requireReceiptSource } = await import(pathToFileURL(`${root}/scripts/release-artifact-provenance-lib.mjs`))
+requireReceiptSource(JSON.parse(readFileSync(path, 'utf8')), {
+  commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}'),
+  candidateRoot: root, platform: 'linux', label: 'Ubuntu VM host bundle',
+})
+JS_SOURCE
+    ubuntu_vm_import_error "host bundle product inputs differ from the release checkout"
     return 1
   }
   harness_sha="$(git -C "$ROOT" rev-parse HEAD)" || return 1
