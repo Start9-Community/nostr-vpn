@@ -1402,12 +1402,15 @@ if release_gate.count(full_dns) < 2:
 initial_mobile_network = release_gate.split(
     "run_mobile_wireguard_exit_gates() {", 1
 )[1].split("\nverify_paid_exit_seller_ui_gates() {", 1)[0]
-if "NVPN_MOBILE_WG_EXIT_INSTALL_IOS=1" not in initial_mobile_network:
-    raise SystemExit("initial iOS network gate can skip installing its exact build")
+if 'NVPN_MOBILE_WG_EXIT_INSTALL_IOS="${NVPN_MOBILE_WG_EXIT_INSTALL_IOS:-1}"' not in initial_mobile_network:
+    raise SystemExit("initial iOS network gate does not default to installing its exact build")
+if 'NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD="${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"' not in initial_mobile_network:
+    raise SystemExit("initial iOS network gate does not preserve verified artifact reuse")
+if 'ios_release_network_require_installed_reuse' not in network:
+    raise SystemExit("retained iOS network gate omits installed artifact verification")
 if 'NVPN_MOBILE_WG_EXIT_INSTALL_IOS="$((1 - MOBILE_IOS_APP_READY))"' in initial_mobile_network:
     raise SystemExit("iOS app readiness is incorrectly treated as exact artifact reuse")
 for pinned in (
-    "NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=0",
     "NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES=1",
     "NVPN_IOS_RELEASE_NETWORK_BACKGROUND_DWELL_SECS=20",
     "NVPN_MOBILE_UNDERLAY_ASSOCIATION_TIMEOUT_SECS=30",
@@ -1436,15 +1439,15 @@ for source in (network, join):
 for source, label in ((network, "network"), (release_gate, "join gate")):
     if "select_generated_ios_release_xctestrun" not in source:
         raise SystemExit(f"{label} does not select the generated xctestrun")
-# The underlay lane explicitly forwards its locally generated, receipt-bound
-# plan. Restrict the no-external-input assertion to the join gate it protects.
+# The underlay lane forwards its generated, receipt-bound plan. The join lane
+# can retain verified runner products, but still selects the plan itself.
 join_gate_source = release_gate.split("run_mobile_join_e2e_gate() {", 1)[1].split(
     "\nrun_windows_release_mobile_join_e2e_gate() {", 1
 )[0]
 if "NVPN_MOBILE_IOS_RELEASE_XCTESTRUN" in join_gate_source:
     raise SystemExit("join gate still trusts an external xctestrun")
-if "NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA" in join_gate_source:
-    raise SystemExit("join gate still trusts external iOS test products")
+if '"$ios_derived_data/Build/Products"' not in join_gate_source:
+    raise SystemExit("join gate does not select its plan from the verified runner products")
 for required in (
     'xctestrun="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}"',
     'xctestrun_sha="$(shasum -a 256 "$xctestrun"',

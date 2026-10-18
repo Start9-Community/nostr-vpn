@@ -391,10 +391,8 @@ impl FipsPrivateTunnelRuntime {
     }
 
     fn block_linux_wireguard_exit_if_strict(&mut self, enabled: bool) {
-        if enabled {
-            if let Err(error) = crate::linux_exit_intent::pending() {
-                eprintln!("fips: failed to retain pending Linux egress protection: {error:#}");
-            }
+        if enabled && let Err(error) = crate::linux_exit_intent::pending() {
+            eprintln!("fips: failed to retain pending Linux egress protection: {error:#}");
         }
     }
 

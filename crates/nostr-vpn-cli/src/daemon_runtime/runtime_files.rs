@@ -102,11 +102,9 @@ fn write_runtime_file_atomically_with_mode(
             )
         });
     }
-    if durable {
-        if let Err(error) = file.sync_all() {
-            let _ = fs::remove_file(&temp_path);
-            return Err(error).context("failed to sync private runtime intent");
-        }
+    if durable && let Err(error) = file.sync_all() {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).context("failed to sync private runtime intent");
     }
     drop(file);
     fs::rename(&temp_path, path).with_context(|| {

@@ -284,7 +284,7 @@ impl FipsPrivateTunnelRuntime {
         }
         #[cfg(target_os = "linux")]
         {
-            return Ok(());
+            Ok(())
         }
         #[cfg(target_os = "macos")]
         {

@@ -300,7 +300,8 @@ fn read_servers(
     legacy: &str,
 ) -> io::Result<Vec<Server>> {
     use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
-    let result: Result<Vec<(i32, i32, Vec<u8>, u16, String)>, dbus::Error> =
+    type ExtendedServer = (i32, i32, Vec<u8>, u16, String);
+    let result: Result<Vec<ExtendedServer>, dbus::Error> =
         manager.get("org.freedesktop.resolve1.Manager", extended);
     match result {
         Ok(servers) => Ok(servers
