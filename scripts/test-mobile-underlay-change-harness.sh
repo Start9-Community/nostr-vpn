@@ -836,9 +836,10 @@ for required in (
     'row.staticTexts["Wi-Fi"].firstMatch',
     "settings.navigationBars.buttons.firstMatch",
     "settings.switches.allElementsBoundByIndex",
-    "settings.descendants(matching: .any)",
-    "binaryControlState(element) != nil",
-    "binaryControls.count == 1",
+    'settings.switches.matching(identifier: "Wi-Fi")',
+    "binaryControlState($0) != nil",
+    "wifiSwitches.count == 1",
+    "nativeSwitches.count == 1",
 ):
     if required not in navigation:
         raise SystemExit(
@@ -846,8 +847,8 @@ for required in (
         )
 if 'settings.cells.containing(.staticText,identifier:"Wi-Fi")' not in compact_navigation:
     raise SystemExit("iOS Settings does not select its unique public Wi-Fi row")
-if 'settings.switches["Wi-Fi"]' in navigation:
-    raise SystemExit("iOS Settings still assumes the destination switch is named Wi-Fi")
+if "settings.descendants(matching: .any)" in navigation:
+    raise SystemExit("iOS Settings scans unrelated controls instead of its Wi-Fi switches")
 if "App-Prefs:" in navigation or "prefs:" in navigation.lower():
     raise SystemExit("iOS Settings navigation uses a private Settings URL")
 if "for _ in 0..<5" in navigation:
