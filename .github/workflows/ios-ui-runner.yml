@@ -1,0 +1,45 @@
+name: iOS UI runner
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/nvpn-ios-runner-only]
+    paths:
+      - .github/workflows/ios-ui-runner.yml
+      - scripts/prepare-ios-ui-runner.py
+      - ios/UITests/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ui-runner-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare test target without the application
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          python3 scripts/prepare-ios-ui-runner.py
+          xcodegen generate --spec work/ios-ui-runner/project.yml
+      - name: Build the UI runner
+        run: |
+          xcodebuild -project work/ios-ui-runner/NostrVpnUIRunner.xcodeproj \
+            -scheme NostrVpnIosUITests -destination 'generic/platform=iOS' \
+            -configuration Release -derivedDataPath work/ios-ui-runner/DerivedData \
+            -jobs 2 ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO build-for-testing
+          python3 scripts/prepare-ios-ui-runner.py --receipt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ios-ui-runner-${{ github.sha }}
+          path: |
+            work/ios-ui-runner/ios-ui-runner.tar.gz
+            work/ios-ui-runner/build-receipt.json
+          retention-days: 7
+          if-no-files-found: error
