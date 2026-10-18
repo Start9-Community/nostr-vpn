@@ -55,6 +55,8 @@ settings and identities. iOS does not support paid exits.
   to reduce background disk and CPU activity.
 - Keep networking responsive during durable discovery-cache writes.
 - Reuse verified relay events to avoid repeated cryptographic work.
+- Reuse successful discovery signature checks while rechecking event contents,
+  reducing repeated cryptographic work in the tunnel.
 - Reduce repeated discovery scans and idle packet-processing allocations.
 - Avoid repeated processing when incoming packets are waiting for an outgoing
   send, and preserve received packets whether that send succeeds or fails.
