@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## 4.1.18 - 2026-10-18
+## 4.1.18 - 2026-10-19
 
 ### Release notes
 
@@ -72,6 +72,8 @@ settings and identities. iOS does not support paid exits.
   connected peers support client-only routing; preserve compatibility with older peers.
 - Show whether the iPhone is using client-only routing or compatibility with
   older peers in Diagnostics.
+- Keep the iPhone VPN stopped after switching it off, including when iOS is
+  recovering from a tunnel failure.
 - Wake for new join approvals on Apple devices instead of repeatedly scanning
   an unchanged directory.
 - Schedule TCP work at its actual deadlines and finish selected receive batches
