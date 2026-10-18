@@ -1555,11 +1555,29 @@ raise SystemExit(
 }
 
 verify_production_ios_idle_cpu() {
+    local artifact_app_sha
+    # A harness-only correction must not rebuild or relabel the signed app.
+    # Prove its product inputs are unchanged, then validate CPU evidence
+    # against the original artifact source and all original measurement bytes.
+    artifact_app_sha="$(node --input-type=module - \
+      "$ROOT_DIR" "${NVPN_MOBILE_IOS_REUSE_RECEIPT:?Missing production artifact receipt}" \
+      "$NVPN_EXPECTED_APP_GIT_SHA" <<'JS'
+import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+const [root, path, commit] = process.argv.slice(2)
+const { requireReceiptSource } = await import(pathToFileURL(`${root}/scripts/release-artifact-provenance-lib.mjs`))
+const receipt = JSON.parse(readFileSync(path, 'utf8'))
+const tree = execFileSync('git', ['rev-parse', `${commit}^{tree}`], { cwd: root, encoding: 'utf8' }).trim()
+requireReceiptSource(receipt, { commit, tree, candidateRoot: root, platform: 'ios', label: 'Production CPU artifact' })
+console.log(receipt.appGitSha)
+JS
+    )" || return
     python3 "$ROOT_DIR/scripts/verify-ios-release-gate-cpu.py" \
       --receipt "${NVPN_IOS_PRODUCTION_IDLE_CPU_RECEIPT:?Missing signed production iOS CPU evidence}" \
       --artifact-receipt "${NVPN_MOBILE_IOS_REUSE_RECEIPT:?Missing production artifact receipt}" \
       --app "${NVPN_MOBILE_IOS_RELEASE_APP_PATH:?Missing production app}" \
-      --app-git-sha "$NVPN_EXPECTED_APP_GIT_SHA" \
+      --app-git-sha "$artifact_app_sha" \
       --fips-git-sha "$NVPN_EXPECTED_FIPS_GIT_SHA"
 }
 

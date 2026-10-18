@@ -65,6 +65,8 @@ dump_debug() {
   "${COMPOSE[@]}" exec -T node-a sh -lc "ip rule || true" || true
   echo "--- node-a: ip route show table 51888 ---"
   "${COMPOSE[@]}" exec -T node-a sh -lc "ip -4 route show table 51888 || true" || true
+  echo "--- node-a: application egress policy routes ---"
+  "${COMPOSE[@]}" exec -T node-a sh -lc "ip -4 route show table 20054 || true" || true
   echo "--- node-a: wg show ---"
   "${COMPOSE[@]}" exec -T node-a sh -lc "wg show || true" || true
   echo "--- node-a: iptables filter ---"
@@ -330,10 +332,14 @@ if ! "${COMPOSE[@]}" exec -T node-b ping -I "$BOB_TUNNEL_IP" -c 5 -W 2 "$ALICE_T
   exit 1
 fi
 
-DEFAULT_ROUTE="$("${COMPOSE[@]}" exec -T node-a sh -lc "ip route show default | head -n1 | tr -d '\r'")"
+# The egress guard owns table 20054, while the network manager keeps the
+# physical default in main for protected carrier sockets. Inspect the policy
+# default and effective application lookup instead of requiring a main-table
+# mutation that would break the carrier's underlay route.
+DEFAULT_ROUTE="$("${COMPOSE[@]}" exec -T node-a sh -lc "ip -4 route show table 20054 default | tr -d '\r'")"
 if ! grep -q "dev $WG_IFACE" <<<"$DEFAULT_ROUTE"; then
-  echo "wireguard-exit e2e failed: node-a default route did not switch to the WG upstream" >&2
-  echo "default route: $DEFAULT_ROUTE"
+  echo "wireguard-exit e2e failed: node-a application policy default does not use the WG upstream" >&2
+  echo "policy default route: $DEFAULT_ROUTE"
   exit 1
 fi
 
@@ -367,7 +373,7 @@ fi
 COUNT_VIA_WG="$("${COMPOSE[@]}" exec -T internet-target sh -lc "iptables -L nvpn-wg-counts -v -n -x | awk -v ip='${WG_UPSTREAM_PUBLIC_IP}' '\$0 ~ ip { print \$1 }'" | tr -d '\r')"
 COUNT_DIRECT="$("${COMPOSE[@]}" exec -T internet-target sh -lc "iptables -L nvpn-wg-counts -v -n -x | awk -v ip='${NODE_A_IP}' '\$0 ~ ip { print \$1 }'" | tr -d '\r')"
 
-echo "--- node-a default route ---"
+echo "--- node-a application policy default route ---"
 echo "$DEFAULT_ROUTE"
 echo "--- node-a route to ${TARGET_IP} ---"
 echo "$PUBLIC_ROUTE"

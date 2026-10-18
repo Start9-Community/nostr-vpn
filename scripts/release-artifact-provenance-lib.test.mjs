@@ -494,6 +494,7 @@ test('component proof scopes desktop crates and Rust test modules', () => {
     'crates/nostr-vpn-app-core/src/mobile_tunnel/ios_packet_flow.rs',
     'crates/nostr-vpn-app-core/src/c_abi/ios_packet_flow.rs',
     'crates/nostr-vpn-app-core/src/mobile_tunnel.rs',
+    'scripts/e2e-wireguard-exit-docker.sh',
   ]
   try {
     git('init', '-q')
@@ -534,6 +535,7 @@ test('component proof scopes desktop crates and Rust test modules', () => {
     assertScope('macos-service', [paths[1]], ['macos'])
     assertScope('windows-wintun', [paths[2]], ['windows'])
     assertScope('harness-only', paths.slice(3, 7), [])
+    assertScope('wireguard-exit-harness', [paths[19]], [])
     assertScope('linux-wireguard-exit-module', [paths[7]], ['linux'])
     assertScope('linux-wireguard-exit-sources', paths.slice(8, 10), ['linux'])
     assertScope('linux-wireguard-exit-tests', paths.slice(10, 12), [])
