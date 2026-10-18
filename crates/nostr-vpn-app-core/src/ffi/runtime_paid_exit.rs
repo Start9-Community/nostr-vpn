@@ -394,10 +394,12 @@ impl NativeAppRuntime {
     }
 
     fn pending_paid_route_funding_status(&self) -> Option<(String, bool)> {
+        let _ = self;
         None
     }
 
     fn selected_paid_route_error(&self) -> Option<String> {
+        let _ = self;
         None
     }
 
@@ -486,6 +488,7 @@ impl NativeAppRuntime {
     }
 
     fn reselect_paid_exit(&mut self) -> Result<()> {
+        let _ = self;
         Err(anyhow!("paid exits are unavailable"))
     }
 
