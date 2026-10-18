@@ -272,6 +272,25 @@ impl NativeAppRuntime {
                 self.service_binary_version.clone()
             };
 
+        let mut runtime_status_detail = capabilities.runtime_status_detail;
+        if let Some(routing) = daemon_state.and_then(|state| state.fips_routing)
+            && routing.client_only_requested
+            && vpn_active
+        {
+            if !runtime_status_detail.is_empty() {
+                runtime_status_detail.push_str(" · ");
+            }
+            let routing_detail = if routing.client_only {
+                "Client routing active".to_string()
+            } else {
+                format!(
+                    "Router compatibility ({} peers without client support)",
+                    routing.peers_without_client_support
+                )
+            };
+            runtime_status_detail.push_str(&routing_detail);
+        }
+
         NativeAppState {
             rev: self.rev,
             platform: capabilities.platform,
@@ -280,7 +299,7 @@ impl NativeAppRuntime {
             cli_install_supported: capabilities.cli_install_supported,
             startup_settings_supported: capabilities.startup_settings_supported,
             tray_behavior_supported: capabilities.tray_behavior_supported,
-            runtime_status_detail: capabilities.runtime_status_detail,
+            runtime_status_detail,
             app_version: if self.app_version.is_empty() {
                 env!("CARGO_PKG_VERSION").to_string()
             } else {

@@ -225,6 +225,12 @@ async fn persist_mobile_runtime_state(
     state.wireguard_exit_ready = diagnostics.wireguard_handshake.is_some_and(
         nostr_vpn_core::wg_upstream::WgUpstreamHandshakeObserver::has_completed_handshake,
     );
+    state.fips_routing = Some(
+        endpoint
+            .routing_status()
+            .await
+            .context("mobile FIPS routing status")?,
+    );
     write_mobile_runtime_state(path, &state)
 }
 

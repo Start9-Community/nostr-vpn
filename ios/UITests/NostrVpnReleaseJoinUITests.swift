@@ -418,6 +418,17 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             "Join carrier never authenticated a public bootstrap peer"
         )
         emit("NVPN_RELEASE_JOIN_BOOTSTRAP_CONNECTED=\(nonNegativeIntegerValue(carrier))")
+        let runtime = scrollTo("diagnostics-runtime")
+        XCTAssertTrue(
+            waitUntil(timeout: setupTimeout) {
+                let detail = runtime.value as? String ?? ""
+                return detail.contains("Client routing active")
+                    || detail.contains("Router compatibility (")
+            },
+            "Tunnel did not report its negotiated routing role"
+        )
+        let detail = runtime.value as? String ?? ""
+        emit("NVPN_RELEASE_JOIN_CLIENT_ONLY=\(detail.contains("Client routing active") ? 1 : 0)")
         app.tabBars.buttons["Devices"].tap()
     }
 

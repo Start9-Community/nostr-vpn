@@ -799,6 +799,12 @@ impl MobileTunnel {
                 state.secure_dns_failures = counters.failures;
             }
             state.wireguard_exit_ready = wireguard_exit_ready;
+            state.fips_routing = Some(
+                endpoint
+                    .routing_status()
+                    .await
+                    .context("mobile FIPS routing status")?,
+            );
             serde_json::to_string(&state).context("serialize mobile runtime state")
         })
     }
