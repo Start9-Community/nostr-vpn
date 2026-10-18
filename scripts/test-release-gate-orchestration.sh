@@ -22,6 +22,7 @@ node --test scripts/release-gate-hosted.test.mjs scripts/release-gate-scheduling
 node --test scripts/linux-underlay-evidence-capture.test.mjs
 node --test scripts/windows-manual-join-preparation.test.mjs
 node --test scripts/github-release-publication.test.mjs
+python3 scripts/test-ios-release-gate-cpu.py
 scripts/test-release-gate-parallel-harness.sh
 scripts/test-release-gate-timing-harness.sh
 scripts/test-desktop-network-handoff-harness.sh

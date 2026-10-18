@@ -402,6 +402,9 @@ run_release_gate_candidate_preflight() {
   # Release harness defects are cheap to catch and catastrophically expensive
   # after an exact-candidate VM build or physical-device run has started.
   ./scripts/test-release-gate-orchestration.sh
+  if bool_is_true "${NVPN_RELEASE_GATE_REQUIRE_COMPLETE:-0}"; then
+    verify_production_ios_idle_cpu
+  fi
   # Fail on cheap source-quality errors before any remote platform starts an
   # expensive exact-candidate build. These use the locked release graph and
   # are not repeated by the later full host validation lane.
@@ -1551,7 +1554,25 @@ raise SystemExit(
 '
 }
 
+verify_production_ios_idle_cpu() {
+    python3 "$ROOT_DIR/scripts/verify-ios-release-gate-cpu.py" \
+      --receipt "${NVPN_IOS_PRODUCTION_IDLE_CPU_RECEIPT:?Missing signed production iOS CPU evidence}" \
+      --artifact-receipt "${NVPN_MOBILE_IOS_REUSE_RECEIPT:?Missing production artifact receipt}" \
+      --app "${NVPN_MOBILE_IOS_RELEASE_APP_PATH:?Missing production app}" \
+      --app-git-sha "$NVPN_EXPECTED_APP_GIT_SHA" \
+      --fips-git-sha "$NVPN_EXPECTED_FIPS_GIT_SHA"
+}
+
 run_mobile_idle_cpu_gates() {
+  if [[ -n "${NVPN_IOS_PRODUCTION_IDLE_CPU_RECEIPT:-}" ]]; then
+    verify_production_ios_idle_cpu || return
+    MOBILE_IOS_APP_READY=1
+    return
+  fi
+  if bool_is_true "${NVPN_RELEASE_GATE_REQUIRE_COMPLETE:-0}"; then
+    echo "Complete release requires signed production iOS CPU evidence." >&2
+    return 1
+  fi
   case "$NVPN_IDLE_CPU_GATE" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping mobile idle CPU gates because NVPN_IDLE_CPU_GATE=$NVPN_IDLE_CPU_GATE"
