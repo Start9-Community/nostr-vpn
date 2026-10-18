@@ -104,7 +104,13 @@ run_cargo_test_checked() {
   fi
   for filter in "${filters[@]}"; do
     if ! awk -v filter="$filter" '
-      $1 == "test" && index($2, filter) > 0 && $NF == "ok" { found = 1 }
+      /^running [0-9]+ tests?$/ { results = 1; next }
+      /^$/ { results = 0 }
+      results && $1 == "test" && index($2, filter) > 0 {
+        ordinary = (NF == 4 && $3 == "..." && $4 == "ok")
+        panicked = (NF == 7 && $3 == "-" && $4 == "should" && $5 == "panic" && $6 == "..." && $7 == "ok")
+        if (ordinary || panicked) found = 1
+      }
       END { exit(found ? 0 : 1) }
     ' "$output"; then
       rm -f "$output"
