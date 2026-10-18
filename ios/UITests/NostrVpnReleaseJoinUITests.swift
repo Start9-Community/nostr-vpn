@@ -725,10 +725,30 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
 
     private func dismissSystemPromptsIfPresent() throws {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let simSetup = XCUIApplication(bundleIdentifier: "com.apple.SIMSetupUIService")
         let deadline = Date().addingTimeInterval(5)
         var clearSince: Date?
         var springboardCoverSince: Date?
         repeat {
+            if simSetup.state == .runningForeground,
+               simSetup.staticTexts["Enter your SIM PIN"].exists
+            {
+                // Wi-Fi gates do not need to unlock the SIM. Dismiss its
+                // optional sheet using the visible upper-left close control.
+                let dismissals = simSetup.buttons.allElementsBoundByIndex.filter {
+                    $0.isEnabled && $0.isHittable
+                        && $0.frame.midX < simSetup.frame.width * 0.25
+                        && $0.frame.midY < simSetup.frame.height * 0.2
+                }
+                guard dismissals.count == 1 else {
+                    throw GateError.systemUICoveringApp
+                }
+                dismissals[0].tap()
+                emit("NVPN_RELEASE_JOIN_OPTIONAL_SIM_PIN_DISMISSED=1")
+                clearSince = nil
+                springboardCoverSince = nil
+                continue
+            }
             if springboard.staticTexts["Enter iPhone Passcode"].exists {
                 emit("NVPN_RELEASE_JOIN_VPN_APPROVAL_PASSCODE_REQUIRED=1")
                 throw GateError.vpnApprovalPasscodeRequired
