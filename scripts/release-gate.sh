@@ -1979,7 +1979,7 @@ run_mobile_join_e2e_gate() {
   esac
 
   local android_result_dir android_receipt android_fips_metadata
-  local ios_result_dir ios_derived_data ios_app ios_xctestrun ios_receipt
+  local ios_result_dir ios_derived_data ios_variant_derived_data ios_app ios_xctestrun ios_receipt
   local ios_production_receipt
   local ios_fips_metadata release_join_result_dir selected_android
   android_result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-android}"
@@ -1987,8 +1987,9 @@ run_mobile_join_e2e_gate() {
   android_fips_metadata="${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-android/fips-linkage.json}"
   ios_result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-ios}"
   release_join_result_dir="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-release-join}"
-  ios_derived_data="${NVPN_RELEASE_JOIN_IOS_VARIANT_DERIVED_DATA:-$release_join_result_dir/ios-derived-data}"
-  ios_app="${NVPN_RELEASE_JOIN_IOS_VARIANT_APP_PATH:-$ios_derived_data/Build/Products/Release-iphoneos/Nostr VPN.app}"
+  ios_variant_derived_data="${NVPN_RELEASE_JOIN_IOS_VARIANT_DERIVED_DATA:-$release_join_result_dir/ios-derived-data}"
+  ios_derived_data="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-$ios_variant_derived_data}"
+  ios_app="${NVPN_RELEASE_JOIN_IOS_VARIANT_APP_PATH:-$ios_variant_derived_data/Build/Products/Release-iphoneos/Nostr VPN.app}"
   ios_production_receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$ios_result_dir/mobile-ios-release-artifact.json}"
   ios_receipt="${NVPN_RELEASE_JOIN_IOS_VARIANT_RECEIPT:-$release_join_result_dir/ios-join-test-variant.json}"
   ios_fips_metadata="${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-ios/fips-linkage.json}"
