@@ -1697,6 +1697,15 @@ run_mobile_wireguard_exit_gates() {
       ./scripts/mobile-wireguard-exit-e2e.sh android
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
+  if bool_is_true "${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"; then
+    # The reuse path verifies these against the installed runner before tests.
+    # Retain them in this gate's evidence directory for subsequent radio tests.
+    cp "${NVPN_MOBILE_IOS_RELEASE_RUNNER_RECEIPT:?Missing retained runner diagnostics}" \
+      "$ios_artifact_dir/mobile-ios-release-runner-diagnostics.json"
+    cp "${NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT:?Missing retained runner install receipt}" \
+      "$ios_artifact_dir/installed-runner-receipt.json"
+  fi
+
   release_gate_parallel_start \
     "iOS physical WireGuard exit and DNS" \
     release_gate_run_with_timeout \
@@ -1712,14 +1721,14 @@ run_mobile_wireguard_exit_gates() {
       NVPN_MOBILE_WG_EXIT_SOURCE_IP_URL=https://api.ipify.org \
       NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
       NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
-      NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=0 \
+      NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD="${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}" \
       NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-ios-$$" \
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.78.2 \
       NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.78.53 \
       NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$((port_base + 1))" \
-      NVPN_MOBILE_WG_EXIT_INSTALL_IOS=1 \
+      NVPN_MOBILE_WG_EXIT_INSTALL_IOS="${NVPN_MOBILE_WG_EXIT_INSTALL_IOS:-1}" \
       NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR="$ios_artifact_dir" \
       NVPN_MOBILE_IOS_NETWORK_EVIDENCE_OUTPUT="$evidence_dir/ios-wireguard-dns.json" \
       ./scripts/mobile-wireguard-exit-e2e.sh ios
