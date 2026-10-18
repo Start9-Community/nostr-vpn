@@ -393,6 +393,20 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         XCTAssertTrue(settings.waitForExistence(timeout: 5), "Settings tab was unavailable")
         settings.tap()
 
+        // The retained app may have left Settings at Diagnostics. LazyVStack
+        // removes earlier controls from the accessibility tree, so a missing
+        // switch does not tell us which direction to scroll. Start at the
+        // visible first card before traversing the settings in order.
+        let firstCard = app.staticTexts["This Device"].firstMatch
+        for _ in 0..<12 {
+            if firstCard.exists && firstCard.isHittable { break }
+            app.swipeDown()
+        }
+        XCTAssertTrue(
+            firstCard.exists && firstCard.isHittable,
+            "Settings did not return to its first card"
+        )
+
         setSwitchOn("fips-connect-non-roster")
         setSwitchOn("fips-nostr-discovery")
         setSwitchOn("fips-bootstrap")
@@ -484,7 +498,8 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     }
 
     private func scrollTo(_ target: XCUIElement, named identifier: String) -> XCUIElement {
-        for _ in 0..<12 where !target.isHittable {
+        for _ in 0..<12 {
+            if target.exists && target.isHittable { break }
             if target.exists, target.frame.midY < app.frame.midY {
                 app.swipeDown()
             } else {
