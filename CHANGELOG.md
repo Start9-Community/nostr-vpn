@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## 4.1.18 - 2026-10-17
+## 4.1.18 - 2026-10-18
 
 ### Release notes
 
@@ -27,6 +27,8 @@ settings and identities. iOS does not support paid exits.
   preserving successful carrier rebinds and keeping status and control work available.
 - Recover through an authenticated fallback when the initial UDP handshake reply
   is lost, then return to UDP when it becomes available.
+- Recover when the first WebRTC connection offer or reply is lost without
+  extending the original connection deadline.
 - Skip exhausted-hop events during peer replay so valid cached announcements
   remain available without triggering malformed-frame cooldowns.
 - Keep joining devices pending until their signed network roster arrives,
@@ -65,6 +67,8 @@ settings and identities. iOS does not support paid exits.
   worker, retaining the separate cryptographic worker pool.
 - Keep iPhones reachable without forwarding unrelated mesh traffic when their
   connected peers support client-only routing; preserve compatibility with older peers.
+- Show whether the iPhone is using client-only routing or compatibility with
+  older peers in Diagnostics.
 - Wake for new join approvals on Apple devices instead of repeatedly scanning
   an unchanged directory.
 - Schedule TCP work at its actual deadlines and finish selected receive batches
