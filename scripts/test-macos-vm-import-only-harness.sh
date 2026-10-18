@@ -169,7 +169,7 @@ if not (
 
 for required in (
     'git -C "$ROOT" archive --format=tar "$APP_GIT_SHA"',
-    'git clone --quiet --no-checkout --no-hardlinks',
+    'git clone --quiet --no-checkout --no-local --depth=1 --no-tags',
     'checkout --quiet --detach "$RELEASE_JOIN_FIPS_SHA"',
     'MACOS_RUST_PROFILE="${NVPN_MACOS_RUST_PROFILE:-release}"',
     'MACOS_XCODE_CONFIGURATION="${NVPN_MACOS_XCODE_CONFIGURATION:-Release}"',
