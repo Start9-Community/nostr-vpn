@@ -673,9 +673,13 @@ run_dns_case() {
   signal_guest "dns-$name.go"
   wait_for_guest_marker "dns-$name.configured" 30
   before="$(stable_dns_counters)"
+  printf '%s\n' "$before" >"$ARTIFACT_DIR/dns-$name.before.txt"
+  python3 -c 'import time; print(time.time())' >"$ARTIFACT_DIR/dns-$name.query-unix-seconds.txt"
   signal_guest "dns-$name.query"
   wait_for_guest_marker "dns-$name.receipt" 30
   after="$(stable_dns_counters)"
+  printf '%s\n' "$after" >"$ARTIFACT_DIR/dns-$name.after.txt"
+  python3 -c 'import time; print(time.time())' >"$ARTIFACT_DIR/dns-$name.snapshot-unix-seconds.txt"
   signal_guest "dns-$name.snapshotted"
   wait_for_guest_marker "dns-$name.resumed" 30
   for key in "${counters[@]}"; do
@@ -877,6 +881,7 @@ capture_peer_state() {
     "sudo -n tar --ignore-failed-read -C '$PEER_STATE_DIR' -cf - \
       daemon.state.json daemon.stderr.log daemon.stdout.log signed-rosters.json \
       dns.log dnsmasq.log fips-underlay.pcap.txt wireguard-underlay.pcap.txt \
+      doh-traffic.pcap.txt doh-tcpdump.log \
       peer-payload.log tcpdump.log wg-tcpdump.log" \
     | tar -C "$ARTIFACT_DIR/peer-state" -xf -
 }
