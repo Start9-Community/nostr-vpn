@@ -1,0 +1,87 @@
+name: Release transit regressions
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/nvpn-dns-packet-evidence]
+    paths: [.github/workflows/release-transit.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-transit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  transit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      RUSTUP_TOOLCHAIN: 1.95.0
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: mmalmi/fips
+          ref: 12a7b154fa2fe8e86483c51ac10708501e50cdfe
+          path: .release-fips
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          cache-on-failure: true
+      - name: Record exact source and compiler
+        shell: bash
+        run: |
+          mkdir -p work/release-transit
+          {
+            printf 'nvpn_commit=%s\n' "$(git rev-parse HEAD)"
+            printf 'nvpn_tree=%s\n' "$(git rev-parse 'HEAD^{tree}')"
+            printf 'fips_commit=%s\n' "$(git -C .release-fips rev-parse HEAD)"
+            printf 'fips_tree=%s\n' "$(git -C .release-fips rev-parse 'HEAD^{tree}')"
+            rustc -Vv
+            cargo -V
+          } > work/release-transit/inputs.txt
+          python3 - <<'PY'
+          import pathlib, tomllib
+          lock = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
+          packages = {p['name']: p for p in lock['package']}
+          for name in ('nvpn-fips-core', 'nvpn-fips-endpoint', 'nvpn-fips-identity'):
+              assert packages[name]['version'] == '0.4.104', name
+          PY
+      - name: Exercise nvpn TCP transit under client churn
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p nostr-vpn-core --test fips_public_transit \
+            local_two_seed_fips_tcp_transit_survives_client_churn \
+            -- --ignored --exact --test-threads=1 --nocapture \
+            2>&1 | tee work/release-transit/nvpn.log
+          grep -F 'test local_two_seed_fips_tcp_transit_survives_client_churn ... ok' work/release-transit/nvpn.log
+      - name: Exercise FIPS persistent WebSocket transit under client churn
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+            cargo test --locked --manifest-path .release-fips/Cargo.toml \
+            -p nvpn-fips-core --test public_websocket_transit \
+            persistent_two_seed_websocket_transit_survives_client_churn \
+            -- --exact --nocapture \
+            2>&1 | tee work/release-transit/fips.log
+          grep -F 'test persistent_two_seed_websocket_transit_survives_client_churn ... ok' work/release-transit/fips.log
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: release-transit-${{ github.sha }}
+          path: work/release-transit
+          retention-days: 7
+          if-no-files-found: error
