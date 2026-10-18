@@ -57,7 +57,8 @@ settings and identities. iOS does not support paid exits.
 - Reuse verified relay events to avoid repeated cryptographic work.
 - Reuse successful discovery signature checks while rechecking event contents,
   reducing repeated cryptographic work in the tunnel.
-- Reduce repeated discovery scans and idle packet-processing allocations.
+- Reduce repeated discovery scans, reuse cryptographic contexts and packet
+  storage, and batch iOS UDP reads and writes to reduce per-packet work.
 - Avoid repeated processing when incoming packets are waiting for an outgoing
   send, and preserve received packets whether that send succeeds or fails.
 - Preserve already-received packets when older queued traffic fills a processing
