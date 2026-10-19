@@ -1151,8 +1151,9 @@ test('release receipt collection requires exact source and strict public UI gate
       fipsGitTree: androidArtifact.fipsGitTree,
       package: androidArtifact.package,
       preexistingCanonicalPackage: true,
-      replacementInstall: true,
-      replacementInstallVerified: true,
+      replacementInstall: process.env.NVPN_TEST_REUSE_ANDROID_INSTALL !== '1',
+      replacementInstallVerified: process.env.NVPN_TEST_REUSE_ANDROID_INSTALL !== '1',
+      installedArtifactVerified: true,
       debuggable: false,
       canonicalPackageCount: 1,
       canonicalProcessCount: 1,
@@ -2173,7 +2174,16 @@ test('release receipt collection requires exact source and strict public UI gate
     assertRejectedReceiptMutation(
       paths.android.install,
       (receipt) => {
+        receipt.replacementInstall = !receipt.replacementInstall
+      },
+      /install receipt is not bound to the exact physical artifact/,
+    )
+    assertRejectedReceiptMutation(
+      paths.android.install,
+      (receipt) => {
         receipt.replacementInstall = false
+        receipt.replacementInstallVerified = false
+        receipt.installedArtifactVerified = false
       },
       /install receipt is not bound to the exact physical artifact/,
     )
@@ -2788,4 +2798,15 @@ test('StartOS post-build proof requires the real exact-package inspector result'
     }),
     /lacks a real exact-package StartOS validation/,
   )
+})
+
+test('complete receipt collection accepts verified Android reuse with separate replacement coverage', () => {
+  const env = { ...process.env, NVPN_TEST_REUSE_ANDROID_INSTALL: '1' }
+  delete env.NODE_TEST_CONTEXT
+  const result = spawnSync(process.execPath, [
+    '--test',
+    '--test-name-pattern=^release receipt collection requires exact source and strict public UI gates$',
+    join(process.cwd(), 'scripts/release-artifact-provenance-lib.test.mjs'),
+  ], { env, encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
 })
