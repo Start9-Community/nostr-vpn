@@ -122,8 +122,10 @@ impl MobileTunnel {
             initial_peers.len(),
             local_capability_hints.len()
         ));
+        let endpoint_config = fips_endpoint_config(&scope, &config);
+        let nostr_advert_app = endpoint_config.node.discovery.nostr.app.clone();
         let endpoint = FipsEndpoint::builder()
-            .config(fips_endpoint_config(&scope, &config))
+            .config(endpoint_config)
             .identity_nsec(config.identity_nsec.clone())
             .discovery_scope(scope)
             .without_system_tun()
@@ -132,8 +134,9 @@ impl MobileTunnel {
             .context("failed to bind mobile FIPS endpoint")?;
         mobile_debug_log("MobileTunnel::start_async FIPS endpoint bound");
         let endpoint = Arc::new(endpoint);
-        let control_pubsub = ControlPubsubFipsRuntime::start_for_peers(
+        let control_pubsub = ControlPubsubFipsRuntime::start_for_peers_with_advert_app(
             Arc::clone(&endpoint),
+            &nostr_advert_app,
             app_config.nostr.pubsub.clone(),
             config.nostr_relays.clone(),
             private_state_config_path

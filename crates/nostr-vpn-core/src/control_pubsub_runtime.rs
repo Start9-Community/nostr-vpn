@@ -106,7 +106,30 @@ impl ControlPubsubFipsRuntime {
             None,
             #[cfg(feature = "updater")]
             None,
-            target_peer_npubs,
+            relay_advert_filters(None, target_peer_npubs),
+        )
+        .await
+    }
+
+    /// Scope relay adverts to the endpoint's configured Nostr discovery app.
+    /// This is `config.node.discovery.nostr.app`, not the endpoint's LAN scope.
+    pub async fn start_for_peers_with_advert_app(
+        endpoint: Arc<FipsEndpoint>,
+        nostr_advert_app: &str,
+        config: NostrPubsubConfig,
+        relays: Vec<String>,
+        store_path: Option<PathBuf>,
+        target_peer_npubs: &[String],
+    ) -> Result<Option<Self>> {
+        Self::start_inner(
+            endpoint,
+            config,
+            relays,
+            store_path,
+            None,
+            #[cfg(feature = "updater")]
+            None,
+            relay_advert_filters(Some(nostr_advert_app), target_peer_npubs),
         )
         .await
     }
@@ -126,7 +149,29 @@ impl ControlPubsubFipsRuntime {
             Some(peer_policy),
             #[cfg(feature = "updater")]
             None,
-            &[],
+            relay_advert_filters(None, &[]),
+        )
+        .await
+    }
+
+    /// Apply peer policy and the endpoint's configured Nostr advert app.
+    pub async fn start_with_peer_policy_and_advert_app(
+        endpoint: Arc<FipsEndpoint>,
+        nostr_advert_app: &str,
+        config: NostrPubsubConfig,
+        relays: Vec<String>,
+        store_path: Option<PathBuf>,
+        peer_policy: Arc<dyn MeshPeerPolicy>,
+    ) -> Result<Option<Self>> {
+        Self::start_inner(
+            endpoint,
+            config,
+            relays,
+            store_path,
+            Some(peer_policy),
+            #[cfg(feature = "updater")]
+            None,
+            relay_advert_filters(Some(nostr_advert_app), &[]),
         )
         .await
     }
@@ -138,7 +183,7 @@ impl ControlPubsubFipsRuntime {
         store_path: Option<PathBuf>,
         peer_policy: Option<Arc<dyn MeshPeerPolicy>>,
         #[cfg(feature = "updater")] update_events_override: Option<UpdateEventCache>,
-        target_peer_npubs: &[String],
+        advert_filters: Vec<Filter>,
     ) -> Result<Option<Self>> {
         if config.mode == NostrPubsubMode::Off {
             return Ok(None);
@@ -148,10 +193,6 @@ impl ControlPubsubFipsRuntime {
             Some(update_events) => update_events,
             None => configured_update_events()?,
         };
-        let target_advert_authors = target_peer_npubs
-            .iter()
-            .filter_map(|peer| PublicKey::parse(peer).ok())
-            .collect::<Vec<_>>();
         let outbox_path = store_path
             .as_deref()
             .map(control_pubsub_outbox_directory_from_store_path);
@@ -192,11 +233,13 @@ impl ControlPubsubFipsRuntime {
             endpoint.host_network(),
             config.mode,
             relays,
-            #[cfg(feature = "updater")]
-            &update_events,
-            &target_advert_authors,
+            relay_subscription_filters(
+                &rating_filter,
+                #[cfg(feature = "updater")]
+                &update_events,
+                advert_filters,
+            ),
             graph_root,
-            &rating_filter,
         )
         .await?;
         let relay_client = relay.as_ref().map(|provider| provider.bus.client().clone());

@@ -49,7 +49,7 @@ async fn peer_policy_rejects_events_from_authenticated_udp_fips_peer_run() {
         None,
         Some(Arc::new(RejectAllPeers)),
         Some(update_events),
-        &[],
+        relay_advert_filters(None, &[]),
     )
     .await
     .expect("start policy-bound FIPS pubsub")
@@ -189,13 +189,16 @@ fn peerfinding_without_paid_exit_never_subscribes_to_or_retains_paid_offers() {
     let offer = EventBuilder::new(Kind::Custom(PAID_EXIT_OFFER_KIND), "offer")
         .sign_with_keys(&publisher)
         .unwrap();
-    for filter in relay_subscription_filters(&peer_rating_filter(&publisher), &updates, &[])
-        .into_iter()
-        .chain(fips_subscription_filters(
-            &peer_rating_filter(&publisher),
-            &updates,
-        ))
-    {
+    for filter in relay_subscription_filters(
+        &peer_rating_filter(&publisher),
+        &updates,
+        relay_advert_filters(None, &[]),
+    )
+    .into_iter()
+    .chain(fips_subscription_filters(
+        &peer_rating_filter(&publisher),
+        &updates,
+    )) {
         assert!(!filter.match_event(&offer, MatchEventOptions::new()));
     }
     assert!(!is_control_event(&offer, &updates));
@@ -222,7 +225,11 @@ fn subscriptions_do_not_request_untrusted_machine_ratings() {
         .sign_with_keys(&stranger)
         .unwrap();
     for filters in [
-        relay_subscription_filters(&peer_rating_filter(&owner), &updates, &[]),
+        relay_subscription_filters(
+            &peer_rating_filter(&owner),
+            &updates,
+            relay_advert_filters(None, &[]),
+        ),
         fips_subscription_filters(&peer_rating_filter(&owner), &updates),
     ] {
         assert!(
@@ -396,7 +403,7 @@ async fn legacy_foreign_ratings_do_not_crowd_out_owner_replay_run() {
         Some(path),
         None,
         Some(updates),
-        &[],
+        relay_advert_filters(None, &[]),
     )
     .await
     .unwrap()

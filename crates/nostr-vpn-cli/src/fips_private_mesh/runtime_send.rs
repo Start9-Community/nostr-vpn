@@ -8,6 +8,17 @@ impl FipsPrivateMeshRuntime {
         local_tunnel_ips: Vec<IpAddr>,
         paid_route_admissions: Vec<FipsPaidRouteAdmission>,
     ) -> Result<Self> {
+        let scope = scope
+            .map(|scope| scope.trim().to_string())
+            .filter(|s| !s.is_empty());
+        // The FIPS builder applies discovery_scope to Nostr only for its
+        // default empty connectivity config. Explicit configs keep their app.
+        let nostr_advert_app = match scope.as_ref() {
+            Some(scope) if !config.node.discovery.nostr.enabled && config.transports.is_empty() => {
+                scope.clone()
+            }
+            _ => config.node.discovery.nostr.app.clone(),
+        };
         let mut endpoint_builder = FipsEndpoint::builder()
             .config(config)
             .identity_nsec(identity_nsec)
@@ -17,8 +28,7 @@ impl FipsPrivateMeshRuntime {
         if let Some(network) = crate::linux_host_network::current() {
             endpoint_builder = endpoint_builder.host_network(network);
         }
-        if let Some(scope) = scope.map(|scope| scope.trim().to_string()).filter(|s| !s.is_empty())
-        {
+        if let Some(scope) = scope {
             endpoint_builder = endpoint_builder.discovery_scope(scope);
         }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -47,6 +57,7 @@ impl FipsPrivateMeshRuntime {
 
         Ok(Self {
             endpoint,
+            nostr_advert_app,
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             direct_endpoint_rx,
             #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -19,10 +19,8 @@ impl RelayProvider {
         host_network: Option<Arc<dyn fips_core::host_network::HostNetwork>>,
         mode: NostrPubsubMode,
         relays: Vec<String>,
-        #[cfg(feature = "updater")] update_events: &UpdateEventCache,
-        target_advert_authors: &[PublicKey],
+        mut filters: Vec<Filter>,
         graph_root: PublicKey,
-        rating_filter: &Filter,
     ) -> Result<Option<Self>> {
         if mode != NostrPubsubMode::Relay || relays.is_empty() {
             return Ok(None);
@@ -39,13 +37,10 @@ impl RelayProvider {
         let bus = Arc::new(bus);
         let (notification_tx, notifications) = mpsc::channel(RELAY_REPLAY_LIMIT * 5);
         let ingress_tx = notification_tx.clone();
+        filters.push(exit_graph_filter(graph_root));
         let subscription = NostrEventSubscriber::subscribe(
             bus.as_ref(),
-            {
-                let mut filters = relay_subscription_filters(rating_filter, #[cfg(feature = "updater")] update_events, target_advert_authors);
-                filters.push(exit_graph_filter(graph_root));
-                filters
-            },
+            filters,
             Arc::new(move |event| {
                 if ingress_tx.try_send(event).is_err() {
                     tracing::warn!("dropping control pubsub relay event because the bounded ingress queue is full");

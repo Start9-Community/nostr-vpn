@@ -159,7 +159,7 @@ async fn start_pubsub(
         None,
         None,
         Some(update_events),
-        &[],
+        relay_advert_filters(None, &[]),
     )
     .await
     .expect("start FIPS pubsub")
@@ -239,8 +239,11 @@ fn relay_subscriptions_bound_retained_replay() {
     let target = Keys::generate().public_key();
     let update_events = update_events(&publisher, "releases/bounded-relay-replay");
 
-    let filters =
-        relay_subscription_filters(&peer_rating_filter(&publisher), &update_events, &[target]);
+    let filters = relay_subscription_filters(
+        &peer_rating_filter(&publisher),
+        &update_events,
+        relay_advert_filters(Some("fips-overlay-v1"), &[target.to_hex()]),
+    );
 
     assert_eq!(
         filters.len(),

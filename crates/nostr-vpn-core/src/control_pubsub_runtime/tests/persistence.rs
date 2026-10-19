@@ -17,7 +17,7 @@ async fn persistent_runtime(
         Some(path),
         None,
         Some(updates),
-        &[],
+        relay_advert_filters(None, &[]),
     )
     .await
     .unwrap()

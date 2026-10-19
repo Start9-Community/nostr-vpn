@@ -234,6 +234,7 @@ use crate::fips_host_tunnel::FipsHostTunnelConfig;
 
 pub(crate) struct FipsPrivateMeshRuntime {
     endpoint: Arc<FipsEndpoint>,
+    nostr_advert_app: String,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     direct_endpoint_rx: FipsEndpointDirectReceiver,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
