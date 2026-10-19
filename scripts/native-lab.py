@@ -1236,7 +1236,10 @@ def run_managed(args):
                 )
                 return INFRASTRUCTURE_UNAVAILABLE
             if outcome is None:
-                resources = sorted({item for check in checks if (item := health_resource(check))})
+                resources = sorted({
+                    item for check in checks
+                    if (item := health_resource(check)) and item != args.resource
+                })
                 for resource in resources:
                     lock, owner = acquire(resource, args.stale_after, owner_context)
                     if deferred.received is not None:

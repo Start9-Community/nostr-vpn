@@ -1088,6 +1088,40 @@ raise SystemExit(
         self.assertFalse(self.resource_lock(primary).exists())
         self.assertFalse(self.resource_lock("android:first").exists())
 
+    def test_primary_health_resource_is_acquired_once_and_exclusive(self) -> None:
+        primary = "android:primary-health-device"
+        result = Path(self.temp.name) / "primary-health.json"
+        marker = Path(self.temp.name) / "child-ran"
+        args = argparse.Namespace(
+            resource=primary, stale_after=21600,
+            health=[primary, primary], allocation_env=[],
+            command=["--", sys.executable, "-c",
+                     "from pathlib import Path; import sys; Path(sys.argv[1]).touch()", str(marker)],
+            timeout=5, signal_grace=1, result=str(result),
+        )
+        checks = [{"spec": primary, "available": True,
+                   "allocation": "primary-health-device"}] * 2
+        with mock.patch.object(NATIVE_LAB, "health_report", return_value=checks):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = NATIVE_LAB.run_managed(args)
+        self.assertEqual(code, 0, result.read_text())
+        self.assertTrue(marker.exists())
+        self.assertFalse(self.resource_lock(primary).exists())
+        report = json.loads(result.read_text())
+        self.assertTrue(report["process_group_reaped"])
+        self.assertEqual(report["reserved_resources"], [])
+        marker.unlink()
+        lock, _ = NATIVE_LAB.acquire(primary, 21600)
+        self.assertIsNotNone(lock)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = NATIVE_LAB.run_managed(args)
+            self.assertEqual(code, 75)
+            self.assertFalse(marker.exists())
+            self.assertTrue(self.resource_lock(primary).exists())
+        finally:
+            NATIVE_LAB.shutil.rmtree(lock)
+
     def test_recovery_rejects_non_posix_before_filesystem_access(self) -> None:
         args = argparse.Namespace(
             resource="unused",
