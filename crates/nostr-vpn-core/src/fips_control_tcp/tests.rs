@@ -28,7 +28,7 @@ fn test_join_roster() -> (JoinRosterControl, String) {
 }
 
 #[tokio::test]
-async fn carries_one_stateful_record_over_real_fips_tcp() {
+async fn carries_small_and_multichunk_records_over_real_fips_tcp() {
     let endpoint = Arc::new(
         FipsEndpoint::builder()
             .without_system_tun()
@@ -40,25 +40,26 @@ async fn carries_one_stateful_record_over_real_fips_tcp() {
     let mut control = FipsControlTcpRuntime::start(Arc::clone(&endpoint))
         .await
         .expect("start state-control runtime");
-    let frame = FipsControlFrame::Capabilities {
-        network_id: "network".to_string(),
-        capabilities: Default::default(),
-    };
-
-    let sent = tokio::time::timeout(Duration::from_secs(3), control.send(local, &frame))
-        .await
-        .expect("state-control send timed out")
-        .expect("send state-control frame");
-    assert_eq!(
-        sent,
-        encode_fips_control_frame(&frame).expect("encode").len()
-    );
-    let received = tokio::time::timeout(Duration::from_secs(3), control.recv())
-        .await
-        .expect("state-control receive timed out")
-        .expect("receive state-control frame");
-    assert_eq!(received.source_peer, local);
-    assert_eq!(received.frame, frame);
+    for network_id in ["network".to_string(), "n".repeat(IO_CHUNK_BYTES * 3)] {
+        let frame = FipsControlFrame::Capabilities {
+            network_id,
+            capabilities: Default::default(),
+        };
+        let sent = tokio::time::timeout(Duration::from_secs(3), control.send(local, &frame))
+            .await
+            .expect("state-control send timed out")
+            .expect("send state-control frame");
+        assert_eq!(
+            sent,
+            encode_fips_control_frame(&frame).expect("encode").len()
+        );
+        let received = tokio::time::timeout(Duration::from_secs(3), control.recv())
+            .await
+            .expect("state-control receive timed out")
+            .expect("receive state-control frame");
+        assert_eq!(received.source_peer, local);
+        assert_eq!(received.frame, frame);
+    }
 
     control.stop().await;
     endpoint.shutdown().await.expect("shutdown endpoint");
@@ -382,6 +383,9 @@ async fn retains_a_record_while_the_local_delivery_queue_is_full() {
             .expect("state-control send timed out")
             .expect("send state-control frame");
     }
+    // Let both TCP close-retention deadlines pass. Freeing capacity must wake
+    // delivery even when there is no remaining TCP timer or network input.
+    tokio::time::sleep(Duration::from_millis(CONTROL_CLOSE_RETENTION_MS * 2)).await;
     for index in 0..=1 {
         let received = tokio::time::timeout(Duration::from_secs(3), control.recv())
             .await
@@ -450,18 +454,232 @@ fn route_discovery_time_does_not_consume_the_stream_delivery_window() {
 }
 
 #[test]
-fn idle_control_runtime_uses_only_the_close_retention_deadline() {
+fn idle_runtime_has_no_timer_and_tcp_deadlines_keep_their_origin() {
+    let origin = Instant::now();
+    let outbound = HashMap::new();
+    let inbound = HashMap::new();
+    assert_eq!(next_drive_deadline(None, origin, &outbound, &inbound), None);
+    let due = origin + Duration::from_millis(CONTROL_CLOSE_RETENTION_MS);
     assert_eq!(
-        next_drive_delay(false),
-        Duration::from_millis(CONTROL_CLOSE_RETENTION_MS)
+        next_drive_deadline(
+            Some(CONTROL_CLOSE_RETENTION_MS),
+            origin,
+            &outbound,
+            &inbound
+        ),
+        Some(due),
+        "closed TCP tuples still schedule their canonical expiry"
     );
-    assert!(
-        next_drive_delay(false) > DRIVE_INTERVAL * 10,
-        "quiet control must not retain the 20 ms active wake cadence"
+    assert_eq!(
+        next_drive_deadline(Some(0), origin, &outbound, &inbound),
+        Some(origin),
+        "a due TCP deadline is not delayed to a new polling interval"
     );
 }
 
 #[test]
-fn active_control_work_keeps_the_fast_deadline() {
-    assert_eq!(next_drive_delay(true), DRIVE_INTERVAL);
+fn record_deadlines_preserve_connection_and_stream_windows() {
+    let origin = Instant::now();
+    let id = ConnectionId::from_raw(1);
+    let mut outbound = HashMap::from([(
+        id,
+        OutboundRecord {
+            bytes: vec![1],
+            offset: 0,
+            final_marker: None,
+            started: origin,
+            connected_at: None,
+            response: None,
+        },
+    )]);
+    let inbound = HashMap::new();
+    assert_eq!(
+        next_drive_deadline(None, origin, &outbound, &inbound),
+        Some(origin + CONNECTION_TIMEOUT)
+    );
+    let connected = origin + Duration::from_secs(30);
+    outbound.get_mut(&id).unwrap().connected_at = Some(connected);
+    assert_eq!(
+        next_drive_deadline(None, origin, &outbound, &inbound),
+        Some(connected + STREAM_TIMEOUT),
+        "route discovery must not consume the post-connect stream window"
+    );
+    assert_eq!(
+        next_drive_deadline(Some(31_000), origin, &outbound, &inbound),
+        Some(origin + Duration::from_secs(31)),
+        "an earlier TCP retry must still win"
+    );
+}
+
+#[test]
+fn decoded_records_wait_for_capacity_without_an_expired_record_timer() {
+    let origin = Instant::now();
+    let peer =
+        PeerIdentity::from_npub(&Keys::generate().public_key().to_bech32().unwrap()).unwrap();
+    let id = ConnectionId::from_raw(1);
+    let mut inbound = HashMap::from([(
+        id,
+        InboundRecord {
+            peer,
+            bytes: Vec::new(),
+            started: origin,
+            ready: None,
+        },
+    )]);
+    let outbound = HashMap::new();
+    assert_eq!(
+        next_drive_deadline(None, origin, &outbound, &inbound),
+        Some(origin + STREAM_TIMEOUT)
+    );
+    inbound.get_mut(&id).unwrap().ready = Some(FipsControlFrame::Capabilities {
+        network_id: "network".into(),
+        capabilities: Default::default(),
+    });
+    assert_eq!(next_drive_deadline(None, origin, &outbound, &inbound), None);
+}
+
+async fn connected_loopback_tcp() -> (
+    Arc<FipsEndpoint>,
+    FipsTcpEndpoint,
+    ConnectionId,
+    ConnectionId,
+) {
+    let endpoint = Arc::new(
+        FipsEndpoint::builder()
+            .without_system_tun()
+            .bind()
+            .await
+            .expect("bind endpoint"),
+    );
+    let local = PeerIdentity::from_npub(endpoint.npub()).unwrap();
+    let mut tcp = FipsTcpEndpoint::bind(
+        Arc::clone(&endpoint),
+        FIPS_STATE_CONTROL_SERVICE_PORT,
+        Config::default(),
+        1,
+    )
+    .await
+    .unwrap();
+    let client = tcp.connect(local, 0).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for _ in 0..3 {
+            tcp.receive_report(0).await.unwrap();
+        }
+    })
+    .await
+    .expect("loopback handshake");
+    let server = tcp.accept().expect("accepted loopback connection");
+    (endpoint, tcp, client, server)
+}
+
+#[tokio::test]
+async fn buffered_multichunk_record_drains_before_fin_without_timer_progress() {
+    let (endpoint, mut tcp, client, server) = connected_loopback_tcp().await;
+    let frame = FipsControlFrame::Capabilities {
+        network_id: "n".repeat(IO_CHUNK_BYTES * 2),
+        capabilities: Default::default(),
+    };
+    let bytes = encode_fips_control_frame(&frame).unwrap();
+    let (accepted, marker) = tcp.write_with_marker(client, &bytes, 0).await.unwrap();
+    assert_eq!(accepted, bytes.len());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while matches!(tcp.marker_status(&marker), MarkerStatus::Pending) {
+            tcp.receive_report(0).await.unwrap();
+        }
+    })
+    .await
+    .expect("buffer and acknowledge the complete record");
+    assert_eq!(
+        tcp.next_poll_at(0),
+        None,
+        "buffered reads need no TCP timer"
+    );
+    tcp.close(client, 0).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tcp.receive_report(0).await.unwrap();
+        tcp.receive_report(0).await.unwrap();
+    })
+    .await
+    .expect("deliver FIN and its ACK");
+    assert!(tcp.is_read_closed(server));
+
+    let mut inbound = HashMap::from([(
+        server,
+        InboundRecord {
+            peer: tcp.peer(server).unwrap(),
+            bytes: Vec::new(),
+            started: Instant::now(),
+            ready: None,
+        },
+    )]);
+    let mut outbound = HashMap::new();
+    let (received, mut messages) = mpsc::channel(1);
+    let (observed, _) = broadcast::channel(1);
+    for _ in 0..4 {
+        if !drive_ready(
+            &mut tcp,
+            &received,
+            &observed,
+            &mut outbound,
+            &mut inbound,
+            0,
+        )
+        .await
+        {
+            break;
+        }
+    }
+    assert!(
+        inbound.is_empty(),
+        "positive reads must schedule the next chunk"
+    );
+    assert_eq!(messages.try_recv().unwrap().frame, frame);
+    endpoint.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn caller_cancellation_wakes_and_aborts_a_stream_without_a_tcp_timer() {
+    let (endpoint, mut tcp, client, _) = connected_loopback_tcp().await;
+    assert_eq!(tcp.next_poll_at(0), None);
+    let (response, receiver) = oneshot::channel();
+    let mut outbound = HashMap::from([(
+        client,
+        OutboundRecord {
+            bytes: vec![1],
+            offset: 0,
+            final_marker: None,
+            started: Instant::now(),
+            connected_at: Some(Instant::now()),
+            response: Some(response),
+        },
+    )]);
+    {
+        let cancelled = wait_for_cancelled_send(&mut outbound);
+        tokio::pin!(cancelled);
+        assert!(futures_util::poll!(&mut cancelled).is_pending());
+        drop(receiver);
+        tokio::time::timeout(Duration::from_secs(1), &mut cancelled)
+            .await
+            .expect("caller cancellation must wake the driver");
+    }
+    let (received, _) = mpsc::channel(1);
+    let (observed, _) = broadcast::channel(1);
+    assert!(
+        !drive_ready(
+            &mut tcp,
+            &received,
+            &observed,
+            &mut outbound,
+            &mut HashMap::new(),
+            0,
+        )
+        .await
+    );
+    assert!(outbound.is_empty());
+    assert_eq!(
+        tcp.state(client),
+        None,
+        "cancelled TCP slot must be reclaimed"
+    );
+    endpoint.shutdown().await.unwrap();
 }
