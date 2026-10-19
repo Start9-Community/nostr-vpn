@@ -147,6 +147,102 @@ class NativeLabTests(unittest.TestCase):
                     self.assertEqual(result["available"], bool(expected))
                     self.assertEqual(result["allocation"], expected)
 
+    def test_ios_health_reconnects_one_dormant_paired_usb_phone(self) -> None:
+        for modern in (False, True):
+            dormant = {
+                "identifier": "phone-core-id",
+                "hardwareProperties": {"udid": "phone-udid", "reality": "physical", "platform": "iOS"},
+                "connectionProperties": {"tunnelState": "disconnected", "pairingState": "paired", "transportType": "wired"},
+                "deviceProperties": {"name": "Test phone", "bootState": "booted"},
+            }
+            if modern:
+                dormant["properties"] = {
+                    "hardware": dormant.pop("hardwareProperties"),
+                    "connection": dormant.pop("connectionProperties"),
+                    "state": dormant.pop("deviceProperties"),
+                }
+                connection = dormant["properties"]["connection"]
+                connection["state"] = connection.pop("tunnelState")
+            ready = json.loads(json.dumps(dormant))
+            if modern:
+                ready["properties"]["connection"]["state"] = "connected"
+            else:
+                ready["connectionProperties"]["tunnelState"] = "connected"
+            for selected in ("auto", "phone-udid", "phone-core-id", "Test phone"):
+                with (
+                    self.subTest(modern=modern, selected=selected),
+                    mock.patch.object(NATIVE_LAB.platform, "system", return_value="Darwin"),
+                    mock.patch.object(NATIVE_LAB.shutil, "which", return_value="/usr/bin/xcrun"),
+                    mock.patch.object(NATIVE_LAB, "probe", side_effect=[
+                        (True, json.dumps({"result": {"devices": [dormant]}})),
+                        (True, json.dumps({"result": ready})),
+                    ]) as probe,
+                ):
+                    result = NATIVE_LAB.check_health(f"ios-device:{selected}")
+                    self.assertTrue(result["available"])
+                    self.assertEqual(result["allocation"], "phone-udid")
+                    self.assertEqual(probe.call_count, 2)
+                    command = probe.call_args.args[0]
+                    self.assertEqual(command[command.index("--device") + 1], "phone-udid")
+                    self.assertEqual(command[command.index("--timeout") + 1], "5")
+                    self.assertEqual(probe.call_args.kwargs["timeout"], 8)
+
+    def test_ios_health_does_not_accept_stale_or_different_refreshed_device(self) -> None:
+        dormant = {
+            "identifier": "phone-core-id",
+            "hardwareProperties": {"udid": "phone-udid", "reality": "physical", "platform": "iOS"},
+            "connectionProperties": {"tunnelState": "disconnected", "pairingState": "paired", "transportType": "wired"},
+            "deviceProperties": {"name": "Test phone", "bootState": "booted"},
+        }
+        wrong = json.loads(json.dumps(dormant))
+        wrong["hardwareProperties"]["udid"] = "different-phone"
+        wrong["connectionProperties"]["tunnelState"] = "connected"
+        wrong_core = json.loads(json.dumps(wrong))
+        wrong_core["hardwareProperties"]["udid"] = "phone-udid"
+        wrong_core["identifier"] = "different-core-id"
+        for refresh in [(False, "timed out"), (True, "invalid json"), (True, '{"result":null}')]+[
+            (True, json.dumps({"result": entry})) for entry in (dormant, wrong, wrong_core)
+        ]:
+            with (
+                self.subTest(refresh=refresh),
+                mock.patch.object(NATIVE_LAB.platform, "system", return_value="Darwin"),
+                mock.patch.object(NATIVE_LAB.shutil, "which", return_value="/usr/bin/xcrun"),
+                mock.patch.object(NATIVE_LAB, "probe", side_effect=[
+                    (True, json.dumps({"result": {"devices": [dormant]}})), refresh,
+                ]) as probe,
+            ):
+                result = NATIVE_LAB.check_health("ios-device:auto")
+                self.assertFalse(result["available"])
+                self.assertFalse(result.get("allocation"))
+                self.assertEqual(probe.call_count, 2)
+
+    def test_ios_health_does_not_probe_unselected_or_ambiguous_dormant_devices(self) -> None:
+        dormant = {
+            "identifier": "phone-core-id",
+            "hardwareProperties": {"udid": "phone-udid", "reality": "physical", "platform": "iOS"},
+            "connectionProperties": {"tunnelState": "disconnected", "pairingState": "paired", "transportType": "wired"},
+            "deviceProperties": {"name": "Test phone", "bootState": "booted"},
+        }
+        cases = [("missing", [dormant]), ("auto", [dormant, dormant])]
+        for section, key, value in [
+            ("connectionProperties", "pairingState", "unpaired"),
+            ("connectionProperties", "transportType", "network"),
+            ("deviceProperties", "bootState", "shutdown"),
+            ("hardwareProperties", "reality", "simulated"),
+        ]:
+            entry = json.loads(json.dumps(dormant))
+            entry[section][key] = value
+            cases.append(("auto", [entry]))
+        for selected, entries in cases:
+            with (
+                self.subTest(selected=selected, entries=entries),
+                mock.patch.object(NATIVE_LAB.platform, "system", return_value="Darwin"),
+                mock.patch.object(NATIVE_LAB.shutil, "which", return_value="/usr/bin/xcrun"),
+                mock.patch.object(NATIVE_LAB, "probe", return_value=(True, json.dumps({"result": {"devices": entries}}))) as probe,
+            ):
+                self.assertFalse(NATIVE_LAB.check_health(f"ios-device:{selected}")["available"])
+                self.assertEqual(probe.call_count, 1)
+
     def test_health_distinguishes_available_and_missing_commands(self) -> None:
         available = self.run_lab("health", "--health", f"command:{Path(sys.executable).name}")
         self.assertEqual(available.returncode, 0, available.stderr)
