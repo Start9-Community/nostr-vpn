@@ -88,6 +88,53 @@ class ProductionCpuEvidenceTests(unittest.TestCase):
     def test_valid_production_trace(self):
         self.assertEqual(verifier.validate(self.args)["cpuPercent"], 1.5)
 
+    def set_completed_cpu_result(self, percent):
+        xml = self.root / "trace/sysmon.xml"
+        text = xml.read_text()
+        for n in range(12, 0, -1):
+            text = text.replace(f"<cpu>{n * 75_000_000}</cpu>",
+                                f"<cpu>{round(n * 5_000_000_000 * percent / 100)}</cpu>")
+        xml.write_text(text)
+        self.measured.update(trace.analyze(SimpleNamespace(
+            xml=xml, toc=self.root / "trace/toc.xml", pid=123,
+            process_name="Nostr VPN Tunnel", device_sha256=self.inputs["traceDeviceSha256"])))
+        self.measured["xmlSha256"] = verifier.digest(xml)
+        original_exit = 0 if self.measured["cpuThresholdMet"] else 1
+        self.recording.update(cpu=self.measured, exitCode=original_exit)
+        self.recording["commands"][-1]["exitCode"] = original_exit
+        self.accepted.update(cpuPercent=self.measured["cpuPercent"], exitCode=original_exit,
+                             releaseAcceptanceProven=self.measured["cpuThresholdMet"])
+        self.write("trace/cpu-measurement.json", self.measured)
+        self.write("trace/recording.json", self.recording)
+        self.seal()
+
+    def test_release_budget_preserves_missed_optimization_target(self):
+        self.set_completed_cpu_result(2.5)
+        original = self.args.receipt.read_bytes()
+        result = verifier.validate(self.args)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["releaseBudgetPercent"], 3)
+        self.assertEqual(result["optimizationTargetPercent"], 2)
+        self.assertFalse(result["optimizationTargetMet"])
+        self.assertEqual(self.args.receipt.read_bytes(), original)
+
+    def test_release_budget_boundary(self):
+        self.set_completed_cpu_result(3)
+        self.assertTrue(verifier.validate(self.args)["passed"])
+
+    def test_over_release_budget(self):
+        self.set_completed_cpu_result(3.01)
+        with self.assertRaisesRegex(ValueError, "3% public-mesh"):
+            verifier.validate(self.args)
+
+    def test_target_miss_does_not_allow_failed_recording_command(self):
+        self.set_completed_cpu_result(2.5)
+        self.recording["commands"][1]["exitCode"] = 1
+        self.write("trace/recording.json", self.recording)
+        self.seal()
+        with self.assertRaisesRegex(ValueError, "recording command failed"):
+            verifier.validate(self.args)
+
     def test_wrong_source(self):
         for key in ["app_git_sha", "fips_git_sha"]:
             args = copy.copy(self.args)

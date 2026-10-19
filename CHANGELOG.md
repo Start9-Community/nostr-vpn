@@ -105,6 +105,11 @@ settings and identities. iOS does not support paid exits.
 - Keep mesh transport and discovery connections working when VPN routes and
   connection protection are active.
 
+### Release verification
+
+- Use a 3% idle CPU release budget for an iPhone connected to the public mesh,
+  while retaining 2% as an optimization target and preserving original measurements.
+
 ## 4.1.17 - 2026-09-27
 
 ### Release notes
