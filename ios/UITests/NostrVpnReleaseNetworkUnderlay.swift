@@ -223,7 +223,11 @@ extension NostrVpnReleaseNetworkUITests {
         }
         emit("NVPN_IOS_WIFI_INITIAL_STATE=\(initial ? 1 : 0)")
         if initial != enabled {
-            toggle.tap()
+            // Settings exposes the whole row as the switch on newer iOS.
+            // Its center can hit the label; target the trailing switch thumb.
+            emit("NVPN_IOS_WIFI_SWITCH_FRAME=\(toggle.frame)")
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5))
+                .withOffset(CGVector(dx: -20, dy: 0)).tap()
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 5
         repeat {
