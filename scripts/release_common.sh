@@ -130,7 +130,8 @@ select_generated_ios_release_xctestrun() {
     [[ -n "$path" ]] && matches+=("$path")
   done < <(
     find "$products_root" \
-      -maxdepth 1 -type f -name 'NostrVpnIos_*.xctestrun' \
+      -maxdepth 1 -type f \( -name 'NostrVpnIos_*.xctestrun' \
+        -o -name 'NostrVpnIosUITests_*.xctestrun' \) \
       | sort
   )
   [[ "${#matches[@]}" -eq 1 ]] || {

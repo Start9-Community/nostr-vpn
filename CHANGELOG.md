@@ -20,6 +20,9 @@ settings and identities. iOS does not support paid exits.
 
 ### Fixed
 
+- Let state-control transport sleep until incoming work or its next TCP deadline,
+  avoiding periodic idle polling while preserving delivery and connection timeouts.
+- Scope relay discovery queries to the configured application identifier.
 - Update Rustls to 0.23.46 to include the latest TLS security fixes.
 - Update Negentropy to reject malformed reconciliation messages before allocating memory.
 - Correct FIPS TCP transport handling for reliable peer connections.

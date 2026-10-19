@@ -1210,6 +1210,19 @@ fi
     echo "Frozen Release did not select its sole generated xctestrun" >&2
     exit 1
   }
+  ui_plan="$generated_products/NostrVpnIosUITests_fixture.xctestrun"
+  mv "$canonical_plan" "$ui_plan"
+  [[ "$(select_generated_ios_release_xctestrun "$generated_products" "fixture")" == "$ui_plan" ]] || {
+    echo "Frozen Release did not select its generated UI-only xctestrun" >&2
+    exit 1
+  }
+  printf 'ambiguous\n' >"$canonical_plan"
+  if select_generated_ios_release_xctestrun \
+    "$generated_products" "fixture" >/dev/null 2>&1
+  then
+    echo "Frozen Release accepted ambiguous generated xctestruns" >&2
+    exit 1
+  fi
 )
 
 # Exercise the real export step without signing, building, or touching a device.
