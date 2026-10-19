@@ -39,6 +39,7 @@ const harnessOnlyPaths = new Set([
   'scripts/desktop-linux-underlay-peer-e2e.sh',
   'scripts/desktop-windows-underlay-change-e2e.ps1',
   'scripts/e2e-macos-release-network.sh',
+  'scripts/e2e-macos-manual-join-ui.sh',
   'scripts/e2e-macos-service-toggle.sh',
   'scripts/e2e-macos-service.sh',
   'scripts/e2e-windows-service-toggle.ps1',
