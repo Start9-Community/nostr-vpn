@@ -47,6 +47,26 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         PhysicalGateMarker.reset()
     }
 
+    func testPhysicalWiFiRadioControl() throws {
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.launch()
+        let toggle = try openWiFiSettings(settings)
+        guard let original = binaryControlState(toggle) else {
+            throw gateError("Settings Wi-Fi switch did not expose its initial state")
+        }
+        let screenshot = XCTAttachment(screenshot: settings.screenshot())
+        screenshot.name = "Settings Wi-Fi before radio change"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        addTeardownBlock { [weak self] in
+            guard let self else { return }
+            try self.setWiFiEnabled(original)
+            self.app.activate()
+        }
+        try setWiFiEnabled(!original)
+        try setWiFiEnabled(original)
+    }
+
     func testReleaseNetworkLifecycle() throws {
         let spec = try releaseSpec()
         try validate(spec)

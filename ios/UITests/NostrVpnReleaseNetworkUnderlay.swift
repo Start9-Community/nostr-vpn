@@ -218,16 +218,26 @@ extension NostrVpnReleaseNetworkUITests {
             throw gateError("Settings did not foreground for the Wi-Fi radio change")
         }
         let toggle = try openWiFiSettings(settings)
-        if toggleIsOn(toggle) != enabled {
+        guard let initial = binaryControlState(toggle) else {
+            throw gateError("Settings Wi-Fi switch did not expose a binary value")
+        }
+        emit("NVPN_IOS_WIFI_INITIAL_STATE=\(initial ? 1 : 0)")
+        if initial != enabled {
             toggle.tap()
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 5
         repeat {
-            if toggleIsOn(toggle) == enabled {
+            if binaryControlState(toggle) == enabled {
+                emit("NVPN_IOS_WIFI_CONFIRMED_STATE=\(enabled ? 1 : 0)")
                 return
             }
             Thread.sleep(forTimeInterval: 0.05)
         } while ProcessInfo.processInfo.systemUptime < deadline
+        let screenshot = XCTAttachment(screenshot: settings.screenshot())
+        screenshot.name = "Settings Wi-Fi radio control failure"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        emit("NVPN_IOS_WIFI_FINAL_VALUE=\(String(describing: toggle.value))")
         throw gateError("Settings Wi-Fi switch did not reach the requested state")
     }
 
