@@ -18,15 +18,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use fips_endpoint::{
     Config as FipsConfig, ConnectPolicy, FipsEndpoint, FipsEndpointMessage, FipsEndpointPeer,
-    FipsEndpointRelayStatus, NostrDiscoveryPolicy, PeerAddress, PeerConfig as FipsPeerConfig,
-    PeerIdentity, RoutingMode, TransportInstances, UdpConfig, WebSocketConfig,
+    NostrDiscoveryPolicy, PeerAddress, PeerConfig as FipsPeerConfig, PeerIdentity, RoutingMode,
+    TransportInstances, UdpConfig, WebSocketConfig,
 };
 use nostr_sdk::prelude::PublicKey;
 use nostr_vpn_core::config::{
     AppConfig, ExitDnsConfig, ExitDnsResolverConfig, MESH_TUNNEL_IPV4_CIDR, WireGuardExitConfig,
-    derive_mesh_tunnel_ip, effective_fips_nostr_relays, maybe_autoconfigure_node,
+    derive_mesh_tunnel_ip, effective_nostr_relays, maybe_autoconfigure_node,
     normalize_fips_transport_address, normalize_nostr_pubkey, normalize_runtime_network_id,
     split_peer_transport_addr,
+};
+use nostr_vpn_core::control_pubsub_runtime::{
+    ControlPubsubClient, ControlPubsubFipsRuntime, ControlRelayStatus,
 };
 use nostr_vpn_core::fips_control::{
     FipsControlFrame, JoinRosterControl, NetworkRoster, PeerCapabilities, PeerEndpointHint,
@@ -61,6 +64,8 @@ use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinHandle;
 
+mod join_roster_watch;
+
 #[cfg(target_os = "android")]
 include!("mobile_tunnel/native_tun.rs");
 #[cfg(any(test, target_os = "ios"))]
@@ -69,6 +74,7 @@ include!("mobile_tunnel/config.rs");
 include!("mobile_tunnel/runtime.rs");
 include!("mobile_tunnel/endpoint_control.rs");
 include!("mobile_tunnel/runtime_state.rs");
+include!("mobile_tunnel/lan_discovery.rs");
 include!("mobile_tunnel/endpoint_config.rs");
 include!("mobile_tunnel/magic_dns.rs");
 #[cfg(feature = "paid-exit")]
@@ -76,12 +82,14 @@ include!("mobile_tunnel/paid_exit_offer.rs");
 
 #[cfg(test)]
 mod tests {
+    include!("mobile_tunnel/tests_lan_discovery.rs");
     include!("mobile_tunnel/tests_core.rs");
     include!("mobile_tunnel/tests_control_source.rs");
     include!("mobile_tunnel/tests_pending_identity.rs");
     include!("mobile_tunnel/tests_identity.rs");
     include!("mobile_tunnel/tests_runtime_join_request.rs");
     include!("mobile_tunnel/tests_runtime.rs");
+    include!("mobile_tunnel/tests_runtime_pubsub.rs");
     include!("mobile_tunnel/tests_runtime_state.rs");
     include!("mobile_tunnel/tests_runtime_manual_join.rs");
     include!("mobile_tunnel/tests_runtime_desktop_mobile_join.rs");

@@ -61,10 +61,6 @@ async fn require_paid_exit_seller_daemon_ready(config_path: &Path, wait: bool) -
     }
 }
 
-fn default_paid_exit_offer_id() -> String {
-    "internet-exit".to_string()
-}
-
 #[cfg(test)]
 fn local_paid_exit_quality_hint() -> PaidRouteQualityMetrics {
     PaidRouteQualityMetrics {

@@ -393,6 +393,20 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         XCTAssertTrue(settings.waitForExistence(timeout: 5), "Settings tab was unavailable")
         settings.tap()
 
+        // The retained app may have left Settings at Diagnostics. LazyVStack
+        // removes earlier controls from the accessibility tree, so a missing
+        // switch does not tell us which direction to scroll. Start at the
+        // visible first card before traversing the settings in order.
+        let firstCard = app.staticTexts["This Device"].firstMatch
+        for _ in 0..<12 {
+            if firstCard.exists && firstCard.isHittable { break }
+            app.swipeDown()
+        }
+        XCTAssertTrue(
+            firstCard.exists && firstCard.isHittable,
+            "Settings did not return to its first card"
+        )
+
         setSwitchOn("fips-connect-non-roster")
         setSwitchOn("fips-nostr-discovery")
         setSwitchOn("fips-bootstrap")
@@ -418,6 +432,17 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
             "Join carrier never authenticated a public bootstrap peer"
         )
         emit("NVPN_RELEASE_JOIN_BOOTSTRAP_CONNECTED=\(nonNegativeIntegerValue(carrier))")
+        let runtime = scrollTo("diagnostics-runtime")
+        XCTAssertTrue(
+            waitUntil(timeout: setupTimeout) {
+                let detail = runtime.value as? String ?? ""
+                return detail.contains("Client routing active")
+                    || detail.contains("Router compatibility (")
+            },
+            "Tunnel did not report its negotiated routing role"
+        )
+        let detail = runtime.value as? String ?? ""
+        emit("NVPN_RELEASE_JOIN_CLIENT_ONLY=\(detail.contains("Client routing active") ? 1 : 0)")
         app.tabBars.buttons["Devices"].tap()
     }
 
@@ -473,7 +498,8 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
     }
 
     private func scrollTo(_ target: XCUIElement, named identifier: String) -> XCUIElement {
-        for _ in 0..<12 where !target.isHittable {
+        for _ in 0..<12 {
+            if target.exists && target.isHittable { break }
             if target.exists, target.frame.midY < app.frame.midY {
                 app.swipeDown()
             } else {
@@ -703,6 +729,28 @@ final class NostrVpnReleaseJoinUITests: XCTestCase {
         var clearSince: Date?
         var springboardCoverSince: Date?
         repeat {
+            let simTitle = springboard.staticTexts["Enter your SIM PIN"]
+            if simTitle.exists {
+                // This optional post-restart sheet belongs to SpringBoard.
+                // Wi-Fi gates can cancel it without entering a SIM PIN.
+                let cancel = springboard.buttons.matching(
+                    NSPredicate(format: "label == %@ OR label == %@", "Cancel", "Close")
+                ).firstMatch
+                guard cancel.exists, cancel.isHittable else {
+                    throw GateError.systemUICoveringApp
+                }
+                cancel.tap()
+                let gone = XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "exists == false"), object: simTitle
+                )
+                guard XCTWaiter.wait(for: [gone], timeout: 5) == .completed else {
+                    throw GateError.systemUICoveringApp
+                }
+                emit("NVPN_RELEASE_JOIN_OPTIONAL_SIM_PIN_DISMISSED=1")
+                clearSince = nil
+                springboardCoverSince = nil
+                continue
+            }
             if springboard.staticTexts["Enter iPhone Passcode"].exists {
                 emit("NVPN_RELEASE_JOIN_VPN_APPROVAL_PASSCODE_REQUIRED=1")
                 throw GateError.vpnApprovalPasscodeRequired

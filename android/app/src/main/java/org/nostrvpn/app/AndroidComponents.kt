@@ -79,7 +79,7 @@ internal fun ParticipantRow(
                     description = "Roster participant $rosterAcceptance ${participant.npub}",
                 ),
         ) {
-            Dot(selected = if (isSelf) state.vpnActive else participant.reachable)
+            Dot(selected = if (isSelf) state.vpnActive else participant.reachable && participant.rosterAccepted)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(

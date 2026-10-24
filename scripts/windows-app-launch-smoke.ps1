@@ -153,7 +153,7 @@ function Invoke-IdleCpuGate {
   }
   $endCpu = $Process.TotalProcessorTime.TotalSeconds
   $elapsed = [Math]::Max($watch.Elapsed.TotalSeconds, 0.001)
-  $cpuPercent = [Math]::Max(0, $endCpu - $startCpu) * 100.0 / $elapsed
+  $cpuPercent = [Math]::Max(0.0, $endCpu - $startCpu) * 100.0 / $elapsed
   $ok = $cpuPercent -le $IdleCpuMaxPercent
   $threads = @($Process.Threads |
       Sort-Object TotalProcessorTime -Descending |

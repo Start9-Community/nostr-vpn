@@ -21,7 +21,7 @@ fips_packages=()
 while IFS= read -r package; do
   fips_packages+=("$package")
 done < <(python3 "$lock_verifier" --manifest-specs /workspace/fips)
-[[ "${#fips_packages[@]}" == 3 ]]
+[[ "${#fips_packages[@]}" == 8 ]]
 
 export CARGO_TARGET_DIR=/target-root
 [[ "$CARGO_HOME" == /cargo-home && "$HOME" == /cargo-home ]]
@@ -80,6 +80,12 @@ python3 "$cargo_cache_verifier" audit \
   /cargo-download-cache /cargo-home \
   /workspace/app/Cargo.lock /workspace/app/linux/Cargo.lock
 export CARGO_NET_OFFLINE=true
+
+cd /workspace/app/linux
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo "${fips_config[@]}" check --frozen
+# The check is complete; release builds own the bounded target volume next.
+cargo "${fips_config[@]}" clean --profile dev
 
 cd /workspace/app
 cargo "${fips_config[@]}" build --frozen --release -p nvpn

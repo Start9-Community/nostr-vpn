@@ -250,11 +250,12 @@ for plist in "$ROOT/ios/Info.plist" "$ROOT/ios/PacketTunnel/Info.plist"; do
   [[ "$(plutil -extract ITSAppUsesNonExemptEncryption raw -o - "$plist")" == "false" ]] \
     || fail "the no-France build must declare export-exempt encryption"
 done
-if rg -q 'NSBonjourServices|NSLocalNetworkUsageDescription|_fips\._udp' \
-  "$ROOT/ios/Info.plist" "$ROOT/ios/PacketTunnel/Info.plist" "$ROOT/macos/Info.plist"
-then
-  fail "Apple app metadata declares unused LAN discovery"
-fi
+for plist in "$ROOT/ios/Info.plist" "$ROOT/ios/PacketTunnel/Info.plist"; do
+  [[ "$(plutil -extract NSBonjourServices.0 raw -o - "$plist")" == "_fips._udp" ]] \
+    || fail "iOS app and packet tunnel must both declare FIPS Bonjour discovery"
+  [[ -n "$(plutil -extract NSLocalNetworkUsageDescription raw -o - "$plist")" ]] \
+    || fail "iOS Bonjour discovery needs a local network usage description"
+done
 if rg -q 'com\.apple\.developer\.networking\.multicast' \
   "$ROOT/ios/NostrVpnIos.entitlements" \
   "$ROOT/ios/PacketTunnel/PacketTunnel.entitlements" \

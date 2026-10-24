@@ -7,7 +7,7 @@ fn now_ms() -> u64 {
 }
 
 pub fn control_pubsub_store_file_path(config_path: &Path) -> PathBuf {
-    nostr_vpn_core::updater::update_event_cache_path(config_path)
+    crate::control_pubsub::control_pubsub_store_path(config_path)
 }
 
 fn control_pubsub_outbox_directory_from_store_path(store_path: &Path) -> PathBuf {
@@ -32,7 +32,7 @@ pub fn queue_control_pubsub_event(config_path: &Path, event: &Event) -> Result<b
     if destination.exists() {
         return Ok(false);
     }
-    nostr_vpn_core::config::write_private_file_preserving_user_owner(&destination, &bytes)
+    crate::config::write_private_file_preserving_user_owner(&destination, &bytes)
         .with_context(|| format!("failed to queue {}", destination.display()))?;
     Ok(true)
 }
@@ -42,8 +42,13 @@ fn validate_control_pubsub_event(event: &Event) -> Result<()> {
         .verify()
         .map_err(|error| anyhow!("invalid signed control pubsub event: {error}"))?;
     let kind = u16::from(event.kind);
+    #[cfg(feature = "updater")]
     let update_events = configured_update_events()?;
-    if !is_control_event(event, &update_events) {
+    if !is_control_event(
+        event,
+        #[cfg(feature = "updater")]
+        &update_events,
+    ) {
         anyhow::bail!("unsupported control pubsub event kind or filter {kind}");
     }
     let bytes = serde_json::to_vec(event).context("failed to encode control pubsub event")?;
@@ -82,9 +87,11 @@ fn control_pubsub_outbox_event_paths(directory: &Path) -> Vec<PathBuf> {
 
 #[cfg(any(feature = "paid-exit", test))]
 pub fn load_control_pubsub_events(config_path: &Path) -> Result<Vec<Event>> {
+    #[cfg(feature = "updater")]
     let update_events = configured_update_events()?;
     Ok(ControlEventStore::load(
         Some(control_pubsub_store_file_path(config_path)),
+        #[cfg(feature = "updater")]
         update_events,
     )?
     .snapshot())

@@ -29,7 +29,7 @@ def sha256_path(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-if len(sys.argv) != 21:
+if len(sys.argv) != 26:
     fail(
         "usage: verify-host-linux-vm-bundle.py "
         "BUNDLE RECEIPT APP_SHA APP_TREE APP_VERSION "
@@ -37,7 +37,7 @@ if len(sys.argv) != 21:
         "ROOT_CARGO_LOCK_SHA256 ROOT_REALIZED_CARGO_LOCK_SHA256 "
         "LINUX_CARGO_LOCK_SHA256 LINUX_REALIZED_CARGO_LOCK_SHA256 TARGET "
         "BUILDER_MODE RUST_TOOLCHAIN DOCKERFILE_SHA256 PAYLOAD_SHA256 "
-        "FIPS_CORE_SPEC FIPS_ENDPOINT_SPEC FIPS_IDENTITY_SPEC"
+        "FIPS_SOURCE_PACKAGE_SPEC [...]"
     )
 
 (
@@ -58,9 +58,7 @@ if len(sys.argv) != 21:
     rust_toolchain,
     dockerfile_sha256,
     container_payload_sha256,
-    fips_core_patch_spec,
-    fips_endpoint_patch_spec,
-    fips_identity_patch_spec,
+    *fips_patch_specs,
 ) = sys.argv[1:]
 bundle = pathlib.Path(bundle_arg)
 receipt_path = pathlib.Path(receipt_arg)
@@ -91,11 +89,7 @@ if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", rust_toolchain) is None:
     fail("Rust toolchain version is invalid")
 
 fips_patch_packages: dict[str, str] = {}
-for specification in (
-    fips_core_patch_spec,
-    fips_endpoint_patch_spec,
-    fips_identity_patch_spec,
-):
+for specification in fips_patch_specs:
     name, separator, version = specification.partition("=")
     if (
         separator != "="
@@ -108,6 +102,11 @@ if set(fips_patch_packages) != {
     "nvpn-fips-core",
     "nvpn-fips-endpoint",
     "nvpn-fips-identity",
+    "nvpn-mdns-sd",
+    "nvpn-turn",
+    "nvpn-webrtc",
+    "nvpn-webrtc-ice",
+    "nvpn-webrtc-util",
 }:
     fail("exact FIPS patched lock package set differs")
 

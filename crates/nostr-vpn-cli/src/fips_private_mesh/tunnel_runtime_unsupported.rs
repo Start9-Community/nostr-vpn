@@ -16,6 +16,14 @@ impl FipsPrivateTunnelRuntime {
         ""
     }
 
+    pub(crate) fn probe_route_changes(&self, _config: &FipsPrivateTunnelConfig) -> bool {
+        true
+    }
+
+    pub(crate) fn exit_route_peer(&self) -> Option<&str> {
+        None
+    }
+
     pub(crate) fn active_listen_port(&self) -> Option<u16> {
         None
     }

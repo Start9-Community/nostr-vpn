@@ -7,6 +7,10 @@ fn daemon_vpn_idle_status_distinguishes_waiting_paused_and_server() {
         crate::WAITING_FOR_PARTICIPANTS_STATUS
     );
     assert_eq!(
+        daemon_vpn_idle_status(true, 0, true),
+        "FIPS server active; no private participants"
+    );
+    assert_eq!(
         daemon_vpn_idle_status(false, 0, true),
         "VPN paused; FIPS server active"
     );
@@ -138,7 +142,7 @@ fn paid_automatic_requires_vpn_on_before_selecting_seller() {
 
 #[cfg(feature = "paid-exit")]
 #[test]
-fn remembered_manual_provider_does_not_override_vpn_off() {
+fn manual_provider_selection_and_direct_restore_respect_vpn_off() {
     let provider = Keys::generate()
         .public_key()
         .to_bech32()
@@ -154,13 +158,19 @@ fn remembered_manual_provider_does_not_override_vpn_off() {
     app.set_manual_paid_exit_provider(&provider)
         .expect("manual provider");
     app.set_internet_source(InternetSource::PaidManual);
+    assert_eq!(app.internet_source, InternetSource::PaidManual);
+    assert!(app.manual_paid_exit_provider_pubkey_hex().is_some());
+    assert!(paid_exit_fips_runtime_active(&app));
+    assert!(!fips_private_runtime_active(&app, false));
+
     app.set_internet_source(InternetSource::Direct);
 
     assert_eq!(app.internet_source, InternetSource::Direct);
-    assert!(app.connect_to_non_roster_fips_peers);
+    assert!(app.manual_paid_exit_provider_pubkey_hex().is_none());
+    assert!(!app.connect_to_non_roster_fips_peers);
     assert!(!app.fips_nostr_discovery_enabled);
     assert!(!app.fips_advertise_public_endpoint);
-    assert!(paid_exit_fips_runtime_active(&app));
+    assert!(!paid_exit_fips_runtime_active(&app));
     assert!(!fips_private_runtime_active(&app, false));
     assert!(fips_private_runtime_active(&app, true));
 }

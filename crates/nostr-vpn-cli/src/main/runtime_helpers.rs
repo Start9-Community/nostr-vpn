@@ -18,7 +18,7 @@ fn is_exit_node_route(route: &str) -> bool {
     route == "0.0.0.0/0" || route == "::/0"
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 fn route_is_host_route(route: &str) -> bool {
     let Some((host, bits)) = route.split_once('/') else {
         return true;
@@ -34,7 +34,7 @@ fn route_is_host_route(route: &str) -> bool {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 fn route_targets_require_endpoint_bypass(route_targets: &[String]) -> bool {
     route_targets
         .iter()
@@ -94,7 +94,11 @@ fn daemon_vpn_idle_status(
     server_active: bool,
 ) -> &'static str {
     if vpn_enabled && expected_peers == 0 {
-        WAITING_FOR_PARTICIPANTS_STATUS
+        if server_active {
+            "FIPS server active; no private participants"
+        } else {
+            WAITING_FOR_PARTICIPANTS_STATUS
+        }
     } else if server_active {
         "VPN paused; FIPS server active"
     } else {
@@ -492,14 +496,6 @@ fn fips_tunnel_config_from_app(
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = underlay_interface;
     config.ethernet_underlay = ethernet_underlay.cloned();
-    // Resolve bypass hosts only after the IP underlay is known. Browser-backed
-    // Ethernet cannot use physical IP routes or DNS before the tunnel starts.
-    #[cfg(target_os = "linux")]
-    if (ethernet_underlay.is_none() || underlay_interface.is_some())
-        && route_targets_require_endpoint_bypass(&config.route_targets)
-    {
-        config.control_plane_bypass_hosts = control_plane_bypass_ipv4_hosts(app);
-    }
     for (kind, recipient) in pending_control_recipients {
         match crate::fips_private_mesh::prioritize_fips_control_recipient(
             config.endpoint_peers.clone(),
@@ -522,7 +518,7 @@ fn fips_tunnel_config_from_app(
             config.local_exit_forwarding_routes = runtime_local_exit_forwarding_routes(app);
         }
         config.paid_route_store_path = paid_route_store_file_path(config_path);
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "macos")]
         if (ethernet_underlay.is_none() || underlay_interface.is_some())
             && matches!(
                 app.internet_source,
@@ -535,9 +531,23 @@ fn fips_tunnel_config_from_app(
             let store = load_paid_route_store(&config.paid_route_store_path)?;
             for mint in &store.wallet.mints {
                 let url = reqwest::Url::parse(&mint.url)?;
-                let addresses = url
-                    .socket_addrs(|| None)
-                    .context("failed to resolve wallet mint for payment routing")?;
+                let addresses = match url.socket_addrs(|| None) {
+                    Ok(addresses) => addresses,
+                    Err(error) => {
+                        let reason = format!("Cannot resolve payment mint {}: {error}", url.host_str().unwrap_or(&mint.url));
+                        eprintln!("paid-exit: {reason}");
+                        update_paid_route_store(&config.paid_route_store_path, |store| {
+                            let now = unix_timestamp();
+                            if store.buyer_mint_failure_retry_at(&mint.url) <= now {
+                                store.defer_buyer_mint_retry(&mint.url, now, Some(&reason), None)?;
+                            }
+                            Ok(())
+                        })?;
+                        // A mint outage must not prevent applying the user's
+                        // configuration or connecting through a different mint.
+                        continue;
+                    }
+                };
                 config
                     .control_plane_bypass_hosts
                     .extend(addresses.into_iter().filter_map(|addr| match addr.ip() {

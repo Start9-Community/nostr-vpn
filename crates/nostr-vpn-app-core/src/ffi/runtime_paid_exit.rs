@@ -39,7 +39,7 @@ mod paid_exit {
     };
 
     const PAID_ROUTE_WALLET_TOP_UP_POLL_CADENCE: std::time::Duration =
-        std::time::Duration::from_secs(3);
+        std::time::Duration::from_secs(15);
 
     #[cfg(any(target_os = "ios", target_os = "android"))]
     include!("paid_exit_wallet_runtime.rs");
@@ -158,12 +158,11 @@ mod paid_exit {
 
             runtime.dispatch(crate::NativeAppAction::ClearPaidRouteActivity);
 
-            assert!(runtime.paid_route_payment_last_action.kind.is_empty());
-            assert!(
+            assert_eq!(runtime.paid_route_payment_last_action.kind, "");
+            assert_eq!(
                 runtime
                     .paid_route_payment_last_action
-                    .status_text
-                    .is_empty()
+                    .status_text, ""
             );
         }
 
@@ -211,7 +210,7 @@ mod paid_exit {
             assert!(state.balance_known);
             assert_eq!(state.total_balance_msat, 0);
             assert_eq!(state.total_balance_text, "0 sat");
-            assert!(state.navigation_balance_text.is_empty());
+            assert_eq!(state.navigation_balance_text, "");
         }
 
         #[test]
@@ -223,8 +222,8 @@ mod paid_exit {
                 paid_route_wallet_state(&store, &NativePaidRouteWalletActionState::default());
 
             assert!(!state.balance_known);
-            assert!(state.total_balance_text.is_empty());
-            assert!(state.mints[0].balance_text.is_empty());
+            assert_eq!(state.total_balance_text, "");
+            assert_eq!(state.mints[0].balance_text, "");
         }
 
         #[test]
@@ -395,6 +394,12 @@ impl NativeAppRuntime {
     }
 
     fn pending_paid_route_funding_status(&self) -> Option<(String, bool)> {
+        let _ = self;
+        None
+    }
+
+    fn selected_paid_route_error(&self) -> Option<String> {
+        let _ = self;
         None
     }
 
@@ -483,6 +488,7 @@ impl NativeAppRuntime {
     }
 
     fn reselect_paid_exit(&mut self) -> Result<()> {
+        let _ = self;
         Err(anyhow!("paid exits are unavailable"))
     }
 

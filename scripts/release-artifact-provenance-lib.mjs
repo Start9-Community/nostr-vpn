@@ -908,6 +908,17 @@ function requireDesktopMobileJoinReceipt({
 }
 
 function requireAndroidInstallReceipt(receipt, artifact) {
+  // Join checks may reuse the verified installed APK. Replacement and legacy
+  // removal remain mandatory in the separate exact-artifact singleton receipt.
+  const installationVerified = (
+    receipt.replacementInstall === true
+    && receipt.replacementInstallVerified === true
+  ) || (
+    receipt.replacementInstall === false
+    && receipt.replacementInstallVerified === false
+    && receipt.preexistingCanonicalPackage === true
+    && receipt.installedArtifactVerified === true
+  )
   if (
     receipt.artifact !== 'Android Release APK'
     || receipt.apkSha256 !== artifact.apkSha256
@@ -920,8 +931,7 @@ function requireAndroidInstallReceipt(receipt, artifact) {
     || receipt.fipsGitTree !== artifact.fipsGitTree
     || receipt.package !== artifact.package
     || typeof receipt.preexistingCanonicalPackage !== 'boolean'
-    || receipt.replacementInstall !== true
-    || receipt.replacementInstallVerified !== true
+    || !installationVerified
     || receipt.debuggable !== false
     || receipt.canonicalPackageCount !== 1
     || receipt.canonicalProcessCount !== 1

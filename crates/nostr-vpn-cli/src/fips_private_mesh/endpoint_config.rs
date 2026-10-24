@@ -14,7 +14,6 @@ struct FipsEndpointTransportConfig {
     advertise_on_nostr: bool,
     webrtc_enabled: bool,
     stun_servers: Vec<String>,
-    nostr_relays: Vec<String>,
     websocket: WebSocketConfig,
     share_local_candidates: bool,
 }
@@ -284,6 +283,7 @@ fn fips_endpoint_config_with_open_discovery_limit(
     config.node.discovery.nostr.enabled = nostr_enabled;
     config.node.discovery.nostr.advertise = advertise_on_nostr;
     config.node.discovery.nostr.peerfinding_source = NostrPeerfindingSource::External;
+    config.node.discovery.nostr.advert_relays.clear();
     // Open discovery by default (unless the user opts into configured-only
     // discovery) so we can FIPS-handshake with any nvpn node we see on relays,
     // not just configured roster peers. This is what lets us route app-mesh
@@ -310,12 +310,15 @@ fn fips_endpoint_config_with_open_discovery_limit(
         && transport
             .map(|transport| transport.share_local_candidates)
             .unwrap_or(false);
+    // A QR joiner cannot know our private network scope before approval.
+    // FIPS authentication and roster ACLs still control admission.
+    config.node.discovery.lan.scope = Some(
+        nostr_vpn_core::fips_discovery::FIPS_LAN_DISCOVERY_SCOPE_PREFIX.to_string(),
+    );
     // Leave the relay-side `app` at fips-core's default ("fips-overlay-v1").
     // We deliberately do NOT bake the per-network mesh id into it: the relay
     // `protocol` tag is publicly visible, so per-network apps would let any
-    // observer count members of each private network. The builder receives a
-    // hashed per-network LAN discovery scope separately; that scope is carried
-    // only in mDNS TXT records on the local link, while the private data plane
+    // observer count members of each private network. The private data plane
     // still enforces roster ownership before packets reach the tun.
     let external_addr = transport
         .filter(|_| advertise_public_endpoint)
@@ -323,9 +326,6 @@ fn fips_endpoint_config_with_open_discovery_limit(
     if let Some(transport) = transport {
         config.node.discovery.nostr.bind_interface = transport.bind_interface.clone();
         config.node.discovery.nostr.stun_servers = transport.stun_servers.clone();
-        if !transport.nostr_relays.is_empty() {
-            config.node.discovery.nostr.advert_relays = transport.nostr_relays.clone();
-        }
         if transport.webrtc_enabled {
             configure_fips_webrtc_transport(
                 &mut config,
@@ -764,6 +764,8 @@ pub(crate) struct FipsPrivateTunnelConfig {
     /// The selected internet source owns system DNS even while its default
     /// route is pending. This keeps roster MagicDNS alive during exit setup.
     secure_dns_requested: bool,
+    #[cfg(feature = "paid-exit")]
+    public_paid_exit_selected: bool,
     public_paid_exit_waiting_for_admission: bool,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) magic_dns_suffix: String,
@@ -798,7 +800,7 @@ pub(crate) struct FipsPrivateTunnelConfig {
     open_discovery_restart_max_pending: usize,
     open_discovery_max_pending: usize,
     mesh_mtu: MeshMtu,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     pub(crate) control_plane_bypass_hosts: Vec<Ipv4Addr>,
 }
 

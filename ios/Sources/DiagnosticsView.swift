@@ -8,6 +8,8 @@ struct DiagnosticsCard: View {
             Text("Diagnostics")
                 .font(.headline)
             Metric("Runtime", state.runtimeStatusDetail.isEmpty ? state.platform : state.runtimeStatusDetail)
+                .accessibilityIdentifier("diagnostics-runtime")
+                .accessibilityValue(state.runtimeStatusDetail)
             Metric("Peers", "\(state.connectedPeerCount)/\(state.expectedPeerCount)")
                 .accessibilityIdentifier("diagnostics-peers")
                 .accessibilityValue("\(state.connectedPeerCount)/\(state.expectedPeerCount)")

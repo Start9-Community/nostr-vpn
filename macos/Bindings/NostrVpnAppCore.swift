@@ -3088,6 +3088,7 @@ public func FfiConverterTypeNativePaidRouteMarketState_lower(_ value: NativePaid
 
 
 public struct NativePaidRouteOfferState {
+    public var displayName: String
     public var key: String
     public var offerId: String
     public var sellerNpub: String
@@ -3126,7 +3127,8 @@ public struct NativePaidRouteOfferState {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(key: String, offerId: String, sellerNpub: String, statusText: String, priceText: String, priceMsatPerGb: UInt64, acceptedMints: [String], maxChannelCapacitySat: UInt64, channelExpirySecs: UInt64, freeProbeUnits: UInt64, freeProbeText: String, graceUnits: UInt64, graceText: String, countryCode: String, networkClass: String, asn: UInt32, ipv4: Bool, ipv6: Bool, personalRating: Int64, canRate: Bool, hasRating: Bool, ratingScore: Int64, ratingUpdatedAtUnix: UInt64, hasQuality: Bool, qualityText: String, bandwidthText: String, latencyMs: UInt32, jitterMs: UInt32, packetLossPpm: UInt32, downBps: UInt64, upBps: UInt64, uptimeSecs: UInt64, firstSeenUnix: UInt64, lastSeenUnix: UInt64, relayUrls: [String]) {
+    public init(displayName: String, key: String, offerId: String, sellerNpub: String, statusText: String, priceText: String, priceMsatPerGb: UInt64, acceptedMints: [String], maxChannelCapacitySat: UInt64, channelExpirySecs: UInt64, freeProbeUnits: UInt64, freeProbeText: String, graceUnits: UInt64, graceText: String, countryCode: String, networkClass: String, asn: UInt32, ipv4: Bool, ipv6: Bool, personalRating: Int64, canRate: Bool, hasRating: Bool, ratingScore: Int64, ratingUpdatedAtUnix: UInt64, hasQuality: Bool, qualityText: String, bandwidthText: String, latencyMs: UInt32, jitterMs: UInt32, packetLossPpm: UInt32, downBps: UInt64, upBps: UInt64, uptimeSecs: UInt64, firstSeenUnix: UInt64, lastSeenUnix: UInt64, relayUrls: [String]) {
+        self.displayName = displayName
         self.key = key
         self.offerId = offerId
         self.sellerNpub = sellerNpub
@@ -3172,6 +3174,9 @@ extension NativePaidRouteOfferState: Sendable {}
 
 extension NativePaidRouteOfferState: Equatable, Hashable {
     public static func ==(lhs: NativePaidRouteOfferState, rhs: NativePaidRouteOfferState) -> Bool {
+        if lhs.displayName != rhs.displayName {
+            return false
+        }
         if lhs.key != rhs.key {
             return false
         }
@@ -3281,6 +3286,7 @@ extension NativePaidRouteOfferState: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
+        hasher.combine(displayName)
         hasher.combine(key)
         hasher.combine(offerId)
         hasher.combine(sellerNpub)
@@ -3328,6 +3334,7 @@ public struct FfiConverterTypeNativePaidRouteOfferState: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePaidRouteOfferState {
         return
             try NativePaidRouteOfferState(
+                displayName: FfiConverterString.read(from: &buf),
                 key: FfiConverterString.read(from: &buf),
                 offerId: FfiConverterString.read(from: &buf),
                 sellerNpub: FfiConverterString.read(from: &buf),
@@ -3367,6 +3374,7 @@ public struct FfiConverterTypeNativePaidRouteOfferState: FfiConverterRustBuffer 
     }
 
     public static func write(_ value: NativePaidRouteOfferState, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.displayName, into: &buf)
         FfiConverterString.write(value.key, into: &buf)
         FfiConverterString.write(value.offerId, into: &buf)
         FfiConverterString.write(value.sellerNpub, into: &buf)

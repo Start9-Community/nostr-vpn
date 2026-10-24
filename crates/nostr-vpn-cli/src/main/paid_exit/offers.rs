@@ -1,10 +1,22 @@
 async fn paid_exit_offer_command(args: PaidExitOfferArgs) -> Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
     let app = load_or_default_config(&config_path)?;
+    if args.publish
+        && args
+            .offer_id
+            .as_deref()
+            .is_some_and(|id| id.trim() != app.paid_exit_offer_id())
+    {
+        return Err(anyhow!(
+            "use paid-exit run --offer-id <ID> --publish to change the published offer ID"
+        ));
+    }
     if args.publish {
         require_paid_exit_seller_daemon_ready(&config_path, false).await?;
     }
-    let offer_id = args.offer_id.unwrap_or_else(default_paid_exit_offer_id);
+    let offer_id = args
+        .offer_id
+        .unwrap_or_else(|| app.paid_exit_offer_id().to_string());
     let local = build_local_paid_exit_offer(&app, &config_path, &offer_id, unix_timestamp())?;
     let provider_link = paid_exit_provider_link_for_offer(&local.offer)?;
 

@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# This harness exercises concurrent lanes even when the parent release runs
+# serially. Serial runner behavior has separate orchestration coverage.
+export NVPN_RELEASE_GATE_SERIAL=0
 # Keep the escalation path covered without making this focused harness pay the
 # production two-second grace period.
 # shellcheck disable=SC2034 # Read by the sourced runner.
@@ -114,7 +117,9 @@ verbose_lane() {
 RELEASE_GATE_PARALLEL_SUCCESS_LOG_LINES=10
 release_gate_parallel_start "bounded output" verbose_lane
 bounded="$RELEASE_GATE_PARALLEL_LAST_INDEX"
-bounded_output="$(release_gate_parallel_wait "$bounded")"
+# Wait in the shell that owns the child before capturing its output.
+release_gate_parallel_wait "$bounded" >"$tmp/bounded-output"
+bounded_output="$(cat "$tmp/bounded-output")"
 [[ "$bounded_output" == *"showing final 10 of 100 lines"* \
   && "$bounded_output" == *"verbose lane line 100"* ]] \
   || fail "successful lane output was not bounded while preserving its log"
@@ -673,7 +678,7 @@ grep -Fq 'release_gate_checkpoint_run "Source quality" run_release_gate_source_q
   <<<"$candidate_preflight_body" \
   || fail "release gate preflight does not validate or reuse exact source-quality evidence"
 source_quality_body="$(sed -n '/^run_release_gate_source_quality() {$/,/^}$/p' "$release_gate")"
-grep -Fq 'cargo clippy --locked --workspace --exclude nvpn-cashu-service --exclude nvpn-cdk-spilman --all-targets -- -D warnings' \
+grep -Fq 'cargo clippy --locked --workspace --exclude nvpn-cashu-service --exclude nvpn-cdk-spilman --all-targets --no-deps -- -D warnings' \
   <<<"$source_quality_body" \
   || fail "release gate candidate preflight omits strict fail-fast Clippy"
 grep -Fq 'cargo fmt --check' <<<"$source_quality_body" \

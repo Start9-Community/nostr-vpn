@@ -32,22 +32,7 @@ pub(super) fn start_funding(
     automatic.funding = Some(tokio::spawn(async move {
         match fund_automatic_paid_exit(&app, &config_path, &session_id, now_unix).await {
             Ok(envelope) => queue_paid_exit_payment(&app, &config_path, &envelope).map(|_| ()),
-            Err(error) => {
-                update_paid_route_store(&paid_route_store_file_path(&config_path), |store| {
-                    let session = store
-                        .sessions
-                        .get(&session_id)
-                        .ok_or_else(|| anyhow!("missing funding session"))?;
-                    let channel = store
-                        .channels
-                        .get_mut(&session.session.payment.channel_id)
-                        .ok_or_else(|| anyhow!("missing funding channel"))?;
-                    channel.error = format!("Payment setup failed: {error:#}");
-                    channel.updated_at_unix = unix_timestamp();
-                    Ok(())
-                })?;
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }));
     Ok(changed)
@@ -71,9 +56,29 @@ pub(super) async fn update_funding(
             .expect("finished funding task")
             .await?;
         if let Err(error) = result {
-            eprintln!("paid-exit: payment setup will retry with the selected provider: {error:#}");
+            eprintln!(
+                "paid-exit: payment setup failed; checking other payable providers: {error:#}"
+            );
             automatic.funding_retry_at =
                 now_unix.saturating_add(state::PAID_EXIT_AUTO_RETRY_COOLDOWN_SECS);
+            if let Some(candidate) = automatic
+                .candidate
+                .as_mut()
+                .filter(|candidate| !candidate.funded)
+            {
+                let store_path = paid_route_store_file_path(config_path);
+                let store = load_paid_route_store(&store_path)?;
+                if store.buyer_session_funding_retry_at(&candidate.session_id) <= now_unix {
+                    update_paid_route_store(&store_path, |store| {
+                        store.fail_selected_buyer_session(
+                            &format!("Payment setup failed: {error:#}"),
+                            now_unix,
+                        )
+                    })?;
+                    candidate.failed = true;
+                    changed = true;
+                }
+            }
         } else {
             automatic.funding_retry_at = 0;
         }

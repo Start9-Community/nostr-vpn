@@ -1,4 +1,78 @@
     #[cfg(feature = "paid-exit")]
+    #[test]
+    fn device_internet_cancels_a_pasted_provider_before_late_offer_discovery() {
+        use nostr_vpn_core::paid_route_store::{
+            load_paid_route_store, paid_route_store_file_path, upsert_paid_route_offer,
+        };
+        use nostr_vpn_core::paid_routes::{
+            ManualPaidExitProvider, PaidExitConfig,
+            signed_paid_exit_offer_from_config_with_receiver,
+        };
+
+        let dir = unique_service_test_dir("nvpn-cancel-manual-provider");
+        let mut runtime = NativeAppRuntime::from_startup_error(&anyhow!("test runtime"));
+        runtime.startup_error = None;
+        runtime.last_error.clear();
+        runtime.mobile_runtime = true;
+        runtime.config_path = dir.join("config.toml");
+        create_test_network(&mut runtime, "Provider cancellation test");
+        runtime.config.save(&runtime.config_path).unwrap();
+        let seller_keys = Keys::generate();
+        let seller = seller_keys.public_key().to_bech32().unwrap();
+        let link = ManualPaidExitProvider::new(&seller, Some(25_000), Some("https://mint.example"))
+            .unwrap()
+            .link()
+            .unwrap();
+        runtime.dispatch(NativeAppAction::SetManualPaidExitProvider { provider: link });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        assert!(!runtime.config.manual_paid_exit_provider.is_default());
+
+        runtime.dispatch(NativeAppAction::UpdateSettings {
+            patch: SettingsPatch {
+                internet_source: Some("direct".to_string()),
+                ..Default::default()
+            },
+        });
+        assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
+        runtime.config = AppConfig::load(&runtime.config_path).unwrap();
+        assert!(runtime.config.manual_paid_exit_provider.is_default());
+        let mut terms = PaidExitConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        terms.pricing.price_msat_per_gb = 25_000;
+        terms.channel.accepted_mints = vec!["https://mint.example".into()];
+        let offer = signed_paid_exit_offer_from_config_with_receiver(
+            "late-provider",
+            &seller_keys,
+            &terms,
+            Some("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
+            None,
+            unix_timestamp(),
+        )
+        .unwrap();
+        upsert_paid_route_offer(
+            &paid_route_store_file_path(&runtime.config_path),
+            offer,
+            Vec::new(),
+            unix_timestamp(),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            runtime.dispatch(NativeAppAction::Tick);
+        }
+        assert_eq!(runtime.config.internet_source, InternetSource::Direct);
+        assert_eq!(runtime.config.exit_node, "");
+        assert_eq!(runtime.state().paid_route_market.manual_provider_link, "");
+        assert!(
+            load_paid_route_store(&paid_route_store_file_path(&runtime.config_path))
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
+    }
+
+    #[cfg(feature = "paid-exit")]
     fn approve_manual_provider_mint(
         runtime: &mut NativeAppRuntime,
         seller_npub: &str,
@@ -13,7 +87,7 @@
         });
         assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
         assert_eq!(runtime.config.manual_paid_exit_provider.npub, seller_npub);
-        assert!(runtime.config.manual_paid_exit_provider.mint.is_empty());
+        assert_eq!(runtime.config.manual_paid_exit_provider.mint, "");
         assert!(
             load_paid_route_store(store_path)
                 .expect("load wallet after bare npub")
@@ -375,6 +449,8 @@
         let mut store =
             approve_manual_provider_mint(&mut runtime, &seller_npub, &offer_config, &store_path);
         assert_eq!(store.wallet.mints[0].url, mint);
+        // This test exercises free-probe admission, without contacting a real mint.
+        store.wallet.mints[0].balance_msat = Some(0);
 
         store
             .upsert_signed_offer(signed, vec!["wss://relay.example".to_string()], unix_timestamp())
@@ -409,7 +485,7 @@
         assert!(runtime.state().paid_route_market.sessions.iter().all(|session| !session.can_rate));
         runtime.dispatch(NativeAppAction::RatePaidExit { seller_npub: seller_npub.clone(), rating: -1 });
         assert!(runtime.last_error.contains("connect through this provider"));
-        assert!(nostr_vpn_core::paid_route_store::load_paid_route_store(&store_path).unwrap().pending_exit_ratings().is_empty());
+        assert_eq!(nostr_vpn_core::paid_route_store::load_paid_route_store(&store_path).unwrap().pending_exit_ratings(), [] as [nostr_sdk::nostr::event::Event; 0]);
         assert_eq!(runtime.config.exit_node, seller.public_key().to_hex());
         assert_paid_route_activation_requires_fresh_end_to_end_probe(
             &mut runtime,
@@ -444,8 +520,9 @@
         runtime.dispatch(NativeAppAction::RatePaidExit { seller_npub: seller_npub.to_owned(), rating: -1 });
         assert!(runtime.last_error.is_empty(), "{}", runtime.last_error);
         assert_eq!(runtime.config.internet_source, InternetSource::PaidManual);
-        assert!(runtime.config.exit_node.is_empty());
-        assert!(runtime.config.exit_node_leak_protection, "downvote must not expose direct traffic");
+        assert_eq!(runtime.config.exit_node, "");
+        assert!(!runtime.config.exit_node_leak_protection, "downvote must preserve the user's protection choice");
+        assert!(!AppConfig::load(&runtime.config_path).unwrap().exit_node_leak_protection);
         assert!(runtime.vpn_enabled);
         let after = nostr_vpn_core::paid_route_store::load_paid_route_store(store_path).unwrap();
         assert!(after.exit_provider_is_avoided(seller_npub));

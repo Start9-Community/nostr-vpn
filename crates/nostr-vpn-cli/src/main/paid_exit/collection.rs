@@ -176,7 +176,7 @@ async fn paid_exit_collect_command(args: PaidExitCollectArgs) -> Result<()> {
         .ok_or_else(|| anyhow!("no accepted Cashu mints configured"))?;
     let wallet_data_dir = paid_exit_wallet_data_dir(&config_path);
     let receiver =
-        FileSpilmanPaymentReceiver::load_with_keyset_refresh(&wallet_data_dir, receiver_config)
+        load_paid_exit_spilman_receiver_with_keyset_refresh(&wallet_data_dir, receiver_config)
             .await
             .map_err(|error| anyhow!("{error}"))?;
 
@@ -291,7 +291,7 @@ async fn paid_exit_collect_due_command(args: PaidExitCollectDueArgs) -> Result<(
         let receiver_config = paid_exit_spilman_receiver_config(&app.paid_exit)
             .ok_or_else(|| anyhow!("no accepted Cashu mints configured"))?;
         let receiver =
-            FileSpilmanPaymentReceiver::load_with_keyset_refresh(&wallet_data_dir, receiver_config)
+            load_paid_exit_spilman_receiver_with_keyset_refresh(&wallet_data_dir, receiver_config)
                 .await
                 .map_err(|error| anyhow!("{error}"))?;
         for state in &due {

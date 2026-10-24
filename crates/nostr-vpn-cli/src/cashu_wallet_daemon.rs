@@ -105,6 +105,14 @@ struct DaemonCashuWalletResponse {
     insufficient_funds: Option<cashu_service::CashuInsufficientFunds>,
 }
 
+pub(crate) fn mint_http_client() -> Result<reqwest::Client> {
+    #[cfg(target_os = "linux")]
+    if let Some(network) = crate::linux_host_network::current() {
+        return network.http_client_builder()?.build().map_err(Into::into);
+    }
+    Ok(reqwest::Client::new())
+}
+
 pub(crate) struct DaemonCashuWallet {
     service: CashuWalletService,
 }
@@ -112,14 +120,23 @@ pub(crate) struct DaemonCashuWallet {
 impl DaemonCashuWallet {
     pub(crate) async fn open(config_path: &Path) -> Result<Self> {
         let data_dir = paid_exit_wallet_data_dir(config_path);
-        let service = CashuWalletService::open_with_seed_store(
-            &data_dir,
-            Arc::new(nostr_vpn_core::PlatformCashuWalletSeedStore::new(
-                config_path,
-            )),
-        )
-        .await
-        .context("failed to open the daemon-owned CDK SQLite Cashu wallet")?;
+        let seed_store: Arc<dyn cashu_service::CashuWalletSeedStore> = Arc::new(
+            nostr_vpn_core::PlatformCashuWalletSeedStore::new(config_path),
+        );
+        #[cfg(target_os = "linux")]
+        let service = if let Some(network) = crate::linux_host_network::current() {
+            CashuWalletService::open_with_seed_store_and_proxy(
+                &data_dir,
+                seed_store,
+                network.http_proxy_url().clone(),
+            )
+            .await
+        } else {
+            CashuWalletService::open_with_seed_store(&data_dir, seed_store).await
+        };
+        #[cfg(not(target_os = "linux"))]
+        let service = CashuWalletService::open_with_seed_store(&data_dir, seed_store).await;
+        let service = service.context("failed to open the daemon-owned CDK SQLite Cashu wallet")?;
         let recovery = service.recover_startup_state().await;
         for warning in recovery.warnings {
             eprintln!("cashu-wallet: startup recovery incomplete: {warning}");

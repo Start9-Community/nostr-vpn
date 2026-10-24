@@ -7,17 +7,23 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
     let _instance_lock = acquire_daemon_instance_lock(&config_path)?;
     #[cfg(any(target_os = "macos", test))]
     crate::ensure_macos_connect_privileges(&config_path)?;
+    #[cfg(target_os = "linux")]
+    crate::linux_exit_intent::initialize(&config_path, Some(true))?;
     if repair_saved_network_state(&config_path)
         .context("connect refused while saved network cleanup remains incomplete")?
     {
         transition_daemon_state_after_network_repair(&config_path)?;
     }
+    #[cfg(target_os = "linux")]
+    crate::linux_host_network::initialize().await?;
     let (mut app, mut network_id) = load_config_with_overrides(
         &config_path,
         args.network_id,
         args.devices,
         ConfigLoadMode::Persist,
     )?;
+    #[cfg(target_os = "linux")]
+    crate::linux_exit_intent::update(&app, true)?;
     let configured_participants = app.participant_pubkeys_hex();
     if configured_participants.is_empty() {
         return Err(anyhow!(
@@ -78,6 +84,10 @@ pub(crate) async fn connect_vpn(args: ConnectArgs) -> Result<()> {
                 break;
             }
             _ = tunnel_heartbeat_interval.tick() => {
+                #[cfg(target_os = "linux")]
+                if let Err(error) = crate::linux_exit_intent::maintain() {
+                    eprintln!("connect: Linux egress protection repair failed: {error:#}");
+                }
                 if let Some(runtime) = fips_tunnel_runtime.as_mut() {
                     let now = unix_timestamp();
                     let pending_manual_join = app

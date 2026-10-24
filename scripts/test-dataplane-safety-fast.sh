@@ -78,10 +78,23 @@ prepare_lock_restore() {
 cargo_config_args=()
 
 run_cargo_test_checked() {
-  local output status
+  local package="$1"
+  shift
+  (($# > 0)) || fail "focused cargo test requires at least one selector"
+  local output status filter
+  local filters=("$@")
+  local command=(cargo test -p "$package")
+  if ((${#cargo_config_args[@]})); then
+    command+=("${cargo_config_args[@]}")
+  fi
   output="$(mktemp)"
   set +e
-  "$@" >"$output" 2>&1
+  # libtest accepts multiple filters as an OR, so Cargo resolves and checks the
+  # same package once per suite. Captured output keeps each result parseable;
+  # --show-output retains successful-test diagnostics after the results. Keep
+  # filters serial so batching does not add concurrent shared-state tests.
+  "${command[@]}" -- --format=pretty --show-output --test-threads=1 \
+    "${filters[@]}" >"$output" 2>&1
   status=$?
   set -e
   cat "$output"
@@ -89,10 +102,21 @@ run_cargo_test_checked() {
     rm -f "$output"
     return "$status"
   fi
-  if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$output"; then
-    rm -f "$output"
-    fail "focused cargo test selected zero tests: $*"
-  fi
+  for filter in "${filters[@]}"; do
+    if ! awk -v filter="$filter" '
+      /^running [0-9]+ tests?$/ { results = 1; next }
+      /^$/ { results = 0 }
+      results && $1 == "test" && index($2, filter) > 0 {
+        ordinary = (NF == 4 && $3 == "..." && $4 == "ok")
+        panicked = (NF == 7 && $3 == "-" && $4 == "should" && $5 == "panic" && $6 == "..." && $7 == "ok")
+        if (ordinary || panicked) found = 1
+      }
+      END { exit(found ? 0 : 1) }
+    ' "$output"; then
+      rm -f "$output"
+      fail "focused cargo test selected no passing test: $package $filter"
+    fi
+  done
   rm -f "$output"
 }
 
@@ -113,11 +137,7 @@ prepare_cargo_config() {
 
 cargo_test() {
   prepare_cargo_config
-  if ((${#cargo_config_args[@]})); then
-    (cd "$ROOT_DIR" && run_cargo_test_checked cargo test "${cargo_config_args[@]}" "$@")
-  else
-    (cd "$ROOT_DIR" && run_cargo_test_checked cargo test "$@")
-  fi
+  (cd "$ROOT_DIR" && run_cargo_test_checked "$@")
 }
 
 validated_fips_repo_path() {
@@ -132,7 +152,11 @@ validated_fips_repo_path() {
 fips_cargo_test() {
   local fips_path
   fips_path="$(validated_fips_repo_path)"
-  (cd "$fips_path" && run_cargo_test_checked cargo test "$@")
+  (
+    cd "$fips_path"
+    cargo_config_args=()
+    run_cargo_test_checked "$@"
+  )
 }
 
 run_harnesses() {
@@ -251,43 +275,47 @@ run_loaded_latency_dry_run() {
 }
 
 run_core() {
-  run cargo_test -p nostr-vpn-core two_device_private_mesh_routes_and_admits_bidirectional_packets
-  run cargo_test -p nostr-vpn-core equal_prefix_route_ambiguity_is_dropped
-  run cargo_test -p nostr-vpn-core fallback_prefix_index_skips_exact_routes_and_preserves_longest_prefix
+  run cargo_test nostr-vpn-core \
+    two_device_private_mesh_routes_and_admits_bidirectional_packets \
+    equal_prefix_route_ambiguity_is_dropped \
+    fallback_prefix_index_skips_exact_routes_and_preserves_longest_prefix
 }
 
 run_nvpn_hotpath() {
-  run cargo_test -p nvpn raw_tun_write_keeps_fd_open_and_writes_platform_frame
-  run cargo_test -p nvpn blocking_tun_write_keeps_fd_open_and_writes_platform_frame
-  run cargo_test -p nvpn tun_pipeline_packet_caches_destination_for_send_route
-  run cargo_test -p nvpn local_tun_pipeline_packets_are_detected_before_mesh_send
-  run cargo_test -p nvpn drain_event_batch_respects_limit
-  run cargo_test -p nvpn percentile_uses_observed_histogram_count_when_stage_count_leads
-  run cargo_test -p nvpn peer_activity_map_preserves_existing_configured_peer_activity
-  run cargo_test -p nvpn peer_identity_map_resolves_endpoint_identities_and_skips_invalid_npubs
-  run cargo_test -p nvpn control_frame_destinations_can_target_pending_join_requester
-  run cargo_test -p nvpn endpoint_data_runtime_sends_and_receives_raw_packet_batch
-  run cargo_test -p nvpn endpoint_data_runtime_sends_tun_pipeline_batch_without_repacking
-  run cargo_test -p nvpn endpoint_data_runtime_recv_batch_into_reuses_buffers
+  run cargo_test nvpn \
+    raw_tun_write_keeps_fd_open_and_writes_platform_frame \
+    blocking_tun_write_keeps_fd_open_and_writes_platform_frame \
+    tun_pipeline_packet_caches_destination_for_send_route \
+    local_tun_pipeline_packets_are_detected_before_mesh_send \
+    drain_event_batch_respects_limit \
+    percentile_uses_observed_histogram_count_when_stage_count_leads \
+    peer_activity_map_preserves_existing_configured_peer_activity \
+    peer_identity_map_resolves_endpoint_identities_and_skips_invalid_npubs \
+    control_frame_destinations_can_target_pending_join_requester \
+    endpoint_data_runtime_sends_and_receives_raw_packet_batch \
+    endpoint_data_runtime_sends_tun_pipeline_batch_without_repacking \
+    endpoint_data_runtime_recv_batch_into_reuses_buffers
 }
 
 run_nvpn_reliability() {
-  run cargo_test -p nvpn fips_peer_liveness_rejects_far_future_presence
-  run cargo_test -p nvpn fips_peer_ping_due_recovers_from_future_timestamps
-  run cargo_test -p nvpn endpoint_config_keeps_static_transit_peers_outside_mesh_routes
-  run cargo_test -p nvpn endpoint_config_keeps_default_route_roster_peers_as_transit
-  run cargo_test -p nvpn tunnel_config_seeds_recent_transit_without_granting_routes
-  run cargo_test -p nvpn tunnel_config_caps_recent_non_roster_transit_peers
-  run cargo_test -p nvpn open_discovery_does_not_loosen_tun_roster_gate
+  run cargo_test nvpn \
+    fips_peer_liveness_rejects_far_future_presence \
+    fips_peer_ping_due_recovers_from_future_timestamps \
+    endpoint_config_keeps_static_transit_peers_outside_mesh_routes \
+    endpoint_config_keeps_default_route_roster_peers_as_transit \
+    tunnel_config_seeds_recent_transit_without_granting_routes \
+    tunnel_config_caps_recent_non_roster_transit_peers \
+    open_discovery_does_not_loosen_tun_roster_gate
 }
 
 run_macos_route() {
-  run cargo_test -p nvpn captive_portal -- --nocapture
-  run cargo_test -p nvpn macos_default_routes_from_netstat_finds_underlay_and_utun_routes
-  run cargo_test -p nvpn macos_route_parser_keeps_private_routes_via_local_underlay_gateway
-  run cargo_test -p nvpn macos_route_get_rejects_private_endpoint_via_hotspot_default_gateway
-  run cargo_test -p nvpn macos_route_get_keeps_private_endpoint_on_direct_lan
-  run cargo_test -p nvpn macos_route_monitor_observes_route_and_interface_changes
+  run cargo_test nvpn \
+    captive_portal \
+    macos_default_routes_from_netstat_finds_underlay_and_utun_routes \
+    macos_route_parser_keeps_private_routes_via_local_underlay_gateway \
+    macos_route_get_rejects_private_endpoint_via_hotspot_default_gateway \
+    macos_route_get_keeps_private_endpoint_on_direct_lan \
+    macos_route_monitor_observes_route_and_interface_changes
 }
 
 run_nvpn() {
@@ -297,39 +325,41 @@ run_nvpn() {
 }
 
 run_app_state() {
-  run cargo_test -p nostr-vpn-app-core daemon_runtime_state_accepts_cli_snake_case_json
-  run cargo_test -p nostr-vpn-app-core mobile_peer_identity_map_resolves_endpoint_identities_and_skips_invalid_npubs
-  run cargo_test -p nostr-vpn-app-core mobile_endpoint_send_run_batches_consecutive_resolved_peer
+  run cargo_test nostr-vpn-app-core \
+    daemon_runtime_state_accepts_cli_snake_case_json \
+    mobile_peer_identity_map_resolves_endpoint_identities_and_skips_invalid_npubs \
+    mobile_endpoint_send_run_batches_consecutive_resolved_peer
 }
 
 run_fips() {
-  run fips_cargo_test -p nvpn-fips-core overlay_adverts -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core update_peers -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core non_reconnect -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core active_fallback -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core live_node_owner_routes_send_endpoint_and_tun_to_transport -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core live_route_table_outbound_source_preserves_tun_slice_after_endpoint_batch_overrun -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_runtime_owns_attach_delivery_and_backlog -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_queue_owns_backlog_message_count -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_queue_preserves_fifo_for_mixed_payload_sizes -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_queue_drops_app_data_when_full -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_queue_dropped_batch_counts_as_success -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_queue_partially_admits_batch_at_message_boundary -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_capacity_counts_messages_not_batches -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_message_count_treats_batch_items_as_public_messages -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_queue_send_fails_after_receiver_drop -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_queue_closes_after_all_senders_drop -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_event_queue_async_recv_closes_when_senders_drop -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core recv_batch_drains_ready_loopback_endpoint_data -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core recv_batch_into_splits_internal_endpoint_batches_without_reordering -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core recv_batch_into_preserves_pending_batch_tail_fifo -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core endpoint_data_batch_enqueue_drops_when_full -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core packet_channel_batch_send_amortizes_bulk_channel_items -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core packet_channel_reuses_pooled_batch_container_after_rx_drain -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core packet_channel_recycles_pooled_packet_buffer_when_bulk_batch_is_dropped -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core packet_channel_keeps_single_lane_batches_grouped -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core packet_channel_dequeue_counts_preserve_item_and_lane_counts -- --nocapture
-  run fips_cargo_test -p nvpn-fips-core packet_channel_priority_overtakes_pending_bulk_batch_tail -- --nocapture
+  run fips_cargo_test nvpn-fips-core \
+    overlay_adverts \
+    update_peers \
+    non_reconnect \
+    active_fallback \
+    live_node_owner_routes_send_endpoint_and_tun_to_transport \
+    live_route_table_outbound_source_preserves_tun_slice_after_endpoint_batch_overrun \
+    endpoint_event_runtime_owns_attach_delivery_and_backlog \
+    endpoint_event_queue_owns_backlog_message_count \
+    endpoint_event_queue_preserves_fifo_for_mixed_payload_sizes \
+    endpoint_event_queue_drops_app_data_when_full \
+    endpoint_event_queue_dropped_batch_counts_as_success \
+    endpoint_event_queue_partially_admits_batch_at_message_boundary \
+    endpoint_event_capacity_counts_messages_not_batches \
+    endpoint_event_message_count_treats_batch_items_as_public_messages \
+    endpoint_event_queue_send_fails_after_receiver_drop \
+    endpoint_event_queue_closes_after_all_senders_drop \
+    endpoint_event_queue_async_recv_closes_when_senders_drop \
+    recv_batch_drains_ready_loopback_endpoint_data \
+    recv_batch_into_splits_internal_endpoint_batches_without_reordering \
+    recv_batch_into_preserves_pending_batch_tail_fifo \
+    endpoint_data_batch_enqueue_drops_when_full \
+    packet_channel_batch_send_amortizes_bulk_channel_items \
+    packet_channel_reuses_pooled_batch_container_after_rx_drain \
+    packet_channel_recycles_pooled_packet_buffer_when_bulk_batch_is_dropped \
+    packet_channel_keeps_single_lane_batches_grouped \
+    packet_channel_dequeue_counts_preserve_item_and_lane_counts \
+    packet_channel_priority_overtakes_pending_bulk_batch_tail
 }
 
 run_suite() {

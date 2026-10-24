@@ -6,7 +6,7 @@ pub(crate) struct LinuxRouteGetSpec {
     pub(crate) src: Option<String>,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LinuxEndpointBypassRoute {
     pub(crate) target: String,
@@ -15,7 +15,7 @@ pub(crate) struct LinuxEndpointBypassRoute {
     pub(crate) src: Option<String>,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LinuxManagedEndpointBypassRoute {
     pub(crate) route: LinuxEndpointBypassRoute,
@@ -70,7 +70,7 @@ pub(crate) fn linux_route_get_spec_from_output(output: &str) -> Option<LinuxRout
     })
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn linux_default_route_from_output_for_interface(
     output: &str,
     interface: Option<&str>,
@@ -233,26 +233,6 @@ pub(crate) fn linux_default_route_from_lines_for_interface(
     linux_default_route_from_output_for_interface(&routes.join("\n"), Some(interface))
 }
 
-#[cfg(test)]
-fn linux_default_route_from_output(output: &str) -> Option<LinuxDefaultRouteSpec> {
-    linux_default_route_from_output_for_interface(output, None)
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn update_linux_underlay_default_route(
-    cached_route: &mut Option<String>,
-    route: LinuxDefaultRouteSpec,
-    tunnel_iface: &str,
-) -> Result<()> {
-    if route.dev == tunnel_iface {
-        return Err(anyhow!(
-            "captured underlay default route points at {tunnel_iface}"
-        ));
-    }
-    *cached_route = Some(route.line);
-    Ok(())
-}
-
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn command_stdout_checked(command: &mut ProcessCommand) -> Result<String> {
     let display = format!("{command:?}");
@@ -279,11 +259,6 @@ pub(crate) fn linux_default_route() -> Result<LinuxDefaultRouteSpec> {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn linux_default_ipv6_route() -> Result<LinuxDefaultRouteSpec> {
-    linux_default_route_for_family("-6", "IPv6", None)
-}
-
-#[cfg(target_os = "linux")]
 pub(crate) fn linux_current_default_route() -> Result<Option<LinuxDefaultRouteSpec>> {
     linux_current_default_route_for_family("-4", None)
 }
@@ -291,20 +266,6 @@ pub(crate) fn linux_current_default_route() -> Result<Option<LinuxDefaultRouteSp
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_current_default_ipv6_route() -> Result<Option<LinuxDefaultRouteSpec>> {
     linux_current_default_route_for_family("-6", None)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn linux_current_default_route_for_interface(
-    interface: &str,
-) -> Result<Option<LinuxDefaultRouteSpec>> {
-    linux_current_default_route_for_family("-4", Some(interface))
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn linux_default_ipv6_route_for_interface(
-    interface: &str,
-) -> Result<LinuxDefaultRouteSpec> {
-    linux_default_route_for_family("-6", "IPv6", Some(interface))
 }
 
 #[cfg(target_os = "linux")]
@@ -373,34 +334,12 @@ fn restore_linux_default_route_for_family(family_flag: &str, route: &str) -> Res
     run_checked(&mut command)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(crate) fn linux_route_replay_args(route: &str) -> Vec<&str> {
     route
         .split_whitespace()
         .filter(|token| *token != "linkdown")
         .collect()
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn delete_linux_default_route() -> Result<()> {
-    run_checked(
-        ProcessCommand::new("ip")
-            .arg("-4")
-            .arg("route")
-            .arg("del")
-            .arg("default"),
-    )
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn delete_linux_default_ipv6_route() -> Result<()> {
-    run_checked(
-        ProcessCommand::new("ip")
-            .arg("-6")
-            .arg("route")
-            .arg("del")
-            .arg("default"),
-    )
 }
 
 #[cfg(target_os = "linux")]
@@ -412,160 +351,6 @@ pub(crate) fn flush_linux_route_cache() -> Result<()> {
             .arg("flush")
             .arg("cache"),
     )
-}
-
-#[cfg(target_os = "linux")]
-fn relay_bypass_ipv4_hosts(app: &AppConfig) -> Vec<Ipv4Addr> {
-    let mut hosts = app
-        .nostr
-        .relays
-        .iter()
-        .flat_map(|relay| relay_ipv4_hosts(relay))
-        .collect::<Vec<_>>();
-    hosts.sort_unstable();
-    hosts.dedup();
-    hosts
-}
-
-#[cfg(target_os = "linux")]
-fn relay_ipv4_hosts(relay: &str) -> Vec<Ipv4Addr> {
-    let Some((host, port)) = relay_host_port(relay) else {
-        return Vec::new();
-    };
-
-    if let Ok(ip) = host.parse::<Ipv4Addr>() {
-        return vec![ip];
-    }
-
-    if host.parse::<IpAddr>().is_ok() {
-        return Vec::new();
-    }
-
-    (host.as_str(), port)
-        .to_socket_addrs()
-        .map(|addrs| {
-            addrs
-                .filter_map(|addr| match addr.ip() {
-                    IpAddr::V4(ip) => Some(ip),
-                    IpAddr::V6(_) => None,
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
-#[cfg(target_os = "linux")]
-fn relay_host_port(relay: &str) -> Option<(String, u16)> {
-    let relay = relay.trim();
-    if relay.is_empty() {
-        return None;
-    }
-
-    let (scheme, remainder) = relay
-        .split_once("://")
-        .map_or(("", relay), |(scheme, rest)| (scheme, rest));
-    let authority = remainder.split('/').next().unwrap_or(remainder);
-    let default_port = match scheme {
-        "wss" | "https" => 443,
-        _ => 80,
-    };
-
-    split_host_port(authority, default_port)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn stun_host_port(server: &str) -> Option<(String, u16)> {
-    let server = server.trim();
-    if server.is_empty() {
-        return None;
-    }
-
-    let authority = server
-        .strip_prefix("stun://")
-        .or_else(|| server.strip_prefix("stun:"))
-        .unwrap_or(server);
-
-    split_host_port(authority, 3478)
-}
-
-#[cfg(target_os = "linux")]
-fn stun_ipv4_hosts(app: &AppConfig) -> Vec<Ipv4Addr> {
-    if !app.fips_nostr_discovery_enabled && !app.fips_webrtc_enabled {
-        return Vec::new();
-    }
-    let mut hosts = app
-        .nat
-        .stun_servers
-        .iter()
-        .filter_map(|server| stun_host_port(server))
-        .flat_map(|(host, port)| {
-            if let Ok(ip) = host.parse::<Ipv4Addr>() {
-                return vec![ip];
-            }
-
-            if host.parse::<IpAddr>().is_ok() {
-                return Vec::new();
-            }
-
-            (host.as_str(), port)
-                .to_socket_addrs()
-                .map(|addrs| {
-                    addrs
-                        .filter_map(|addr| match addr.ip() {
-                            IpAddr::V4(ip) => Some(ip),
-                            IpAddr::V6(_) => None,
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>();
-    hosts.sort_unstable();
-    hosts.dedup();
-    hosts
-}
-
-#[cfg(target_os = "linux")]
-fn management_ipv4_hosts_from_interfaces(interfaces: &[NetworkInterface]) -> Vec<Ipv4Addr> {
-    let mut hosts = interfaces
-        .iter()
-        .filter(|interface| interface.is_up() && !interface.is_loopback() && !interface.is_tun())
-        .flat_map(|interface| {
-            let gateways = interface
-                .gateway
-                .iter()
-                .flat_map(|gateway| gateway.ipv4.iter().copied());
-            let dns_servers = interface
-                .dns_servers
-                .iter()
-                .filter_map(|server| match server {
-                    IpAddr::V4(ip) => Some(*ip),
-                    IpAddr::V6(_) => None,
-                });
-            gateways.chain(dns_servers).collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    hosts.sort_unstable();
-    hosts.dedup();
-    hosts
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn control_plane_bypass_ipv4_hosts_from_interfaces(
-    app: &AppConfig,
-    interfaces: &[NetworkInterface],
-) -> Vec<Ipv4Addr> {
-    let mut hosts = relay_bypass_ipv4_hosts(app);
-    hosts.extend(stun_ipv4_hosts(app));
-    hosts.extend(management_ipv4_hosts_from_interfaces(interfaces));
-    hosts.sort_unstable();
-    hosts.dedup();
-    hosts
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn control_plane_bypass_ipv4_hosts(app: &AppConfig) -> Vec<Ipv4Addr> {
-    control_plane_bypass_ipv4_hosts_from_interfaces(app, &get_interfaces())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
@@ -594,132 +379,6 @@ pub(crate) fn split_host_port(authority: &str, default_port: u16) -> Option<(Str
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn linux_route_get_uses_underlay_interface(
-    route: &LinuxRouteGetSpec,
-    underlay: &LinuxRouteGetSpec,
-) -> bool {
-    route.dev == underlay.dev
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn linux_endpoint_bypass_route_from_output(
-    host: Ipv4Addr,
-    route_get_output: &str,
-    tunnel_iface: &str,
-    original_default_route: Option<&str>,
-) -> Result<LinuxEndpointBypassRoute> {
-    #[cfg(target_os = "linux")]
-    let interfaces = get_interfaces();
-    #[cfg(not(target_os = "linux"))]
-    let interfaces = Vec::new();
-    linux_endpoint_bypass_route_from_output_with_interfaces(
-        host,
-        route_get_output,
-        tunnel_iface,
-        original_default_route,
-        &interfaces,
-    )
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn linux_endpoint_bypass_route_from_output_with_interfaces(
-    host: Ipv4Addr,
-    route_get_output: &str,
-    tunnel_iface: &str,
-    original_default_route: Option<&str>,
-    interfaces: &[netdev::Interface],
-) -> Result<LinuxEndpointBypassRoute> {
-    let underlay = original_default_route
-        .and_then(|line| {
-            linux_route_get_spec_from_output(line).map(|spec| {
-                let on_link =
-                    linux_default_route_spec_from_line(line).is_some_and(|route| route.on_link);
-                (spec, on_link)
-            })
-        })
-        .filter(|(spec, _)| spec.dev != tunnel_iface);
-    let spec = linux_route_get_spec_from_output(route_get_output)
-        .filter(|spec| spec.dev != tunnel_iface)
-        .filter(|spec| {
-            underlay
-                .as_ref()
-                .is_none_or(|(underlay, _)| {
-                    linux_route_get_uses_underlay_interface(spec, underlay)
-                })
-        })
-        .map(|spec| (spec, false))
-        .or(underlay)
-        .ok_or_else(|| anyhow!("failed to resolve bypass route for {host}"))?;
-    let (spec, on_link) = spec;
-    let src = spec.src.or_else(|| {
-        let gateway = spec
-            .gateway
-            .as_deref()
-            .and_then(|gateway| gateway.parse().ok());
-        interfaces
-            .iter()
-            .find(|interface| interface.name == spec.dev)
-            .and_then(|interface| {
-                linux_ipv4_route_primary_address(None, gateway, on_link, interface)
-            })
-            .map(|source| source.to_string())
-    });
-    Ok(LinuxEndpointBypassRoute {
-        target: format!("{host}/32"),
-        gateway: spec.gateway,
-        dev: spec.dev,
-        src,
-    })
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn linux_bypass_route_specs_for_hosts(
-    mut hosts: Vec<Ipv4Addr>,
-    tunnel_iface: &str,
-    original_default_route: Option<&str>,
-) -> Result<Vec<LinuxEndpointBypassRoute>> {
-    hosts.sort_unstable();
-    hosts.dedup();
-
-    let mut routes = Vec::with_capacity(hosts.len());
-    for host in hosts {
-        let output = command_stdout_checked(
-            ProcessCommand::new("ip")
-                .arg("-4")
-                .arg("route")
-                .arg("get")
-                .arg(host.to_string()),
-        )?;
-        routes.push(linux_endpoint_bypass_route_from_output(
-            host,
-            &output,
-            tunnel_iface,
-            original_default_route,
-        )?);
-    }
-
-    Ok(routes)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn apply_linux_endpoint_bypass_route(route: &LinuxEndpointBypassRoute) -> Result<()> {
-    let mut command = ProcessCommand::new("ip");
-    command
-        .arg("-4")
-        .arg("route")
-        .arg("replace")
-        .arg(&route.target);
-    if let Some(gateway) = route.gateway.as_deref() {
-        command.arg("via").arg(gateway);
-    }
-    command.arg("dev").arg(&route.dev);
-    if let Some(src) = route.src.as_deref() {
-        command.arg("src").arg(src);
-    }
-    run_checked(&mut command)
-}
-
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_endpoint_bypass_route_snapshot(target: &str) -> Result<Vec<String>> {
     let output = command_stdout_checked(
@@ -737,7 +396,7 @@ pub(crate) fn linux_endpoint_bypass_route_snapshot(target: &str) -> Result<Vec<S
         .collect())
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(crate) fn linux_endpoint_bypass_route_matches_line(
     route: &LinuxEndpointBypassRoute,
     line: &str,

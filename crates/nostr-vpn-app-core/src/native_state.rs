@@ -278,6 +278,7 @@ pub struct NativePaidRoutePaymentActionState {
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePaidRouteOfferState {
+    pub display_name: String,
     pub key: String,
     pub offer_id: String,
     pub seller_npub: String,

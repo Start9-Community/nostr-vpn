@@ -548,6 +548,39 @@
         );
     }
 
+    #[cfg(feature = "paid-exit")]
+    #[test]
+    fn paid_exit_seller_accounting_preserves_private_exit_dns() {
+        let buyer = Keys::generate();
+        let mut app = AppConfig::generated();
+        let own_pubkey = app.nostr_keys().unwrap().public_key().to_hex();
+        app.set_internet_source(InternetSource::PrivateVpn);
+        app.exit_dns.mode = nostr_vpn_core::config::ExitDnsMode::ThroughExit;
+        app.exit_dns.through_exit_servers = vec!["10.99.79.53".to_string()];
+        let mut config = FipsPrivateTunnelConfig::from_app(
+            &app,
+            "private-exit-seller-dns",
+            "utun-test",
+            Some(&own_pubkey),
+            None,
+            &[],
+        )
+        .unwrap();
+        config.paid_route_accounting_peers.push(
+            crate::fips_private_mesh::FipsPaidRouteAccountingPeer::parse(
+                &buyer.public_key().to_hex(),
+                crate::fips_private_mesh::FipsPaidRouteAccountingRole::LocalSeller,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            config.exit_dns_resolver_config(false).unwrap(),
+            ExitDnsResolverConfig::ThroughExit {
+                servers: vec!["10.99.79.53".parse::<std::net::IpAddr>().unwrap()]
+            }
+        );
+    }
+
     #[test]
     fn paused_background_tunnel_keeps_control_paths_without_client_network_ownership() {
         let own = Keys::generate();

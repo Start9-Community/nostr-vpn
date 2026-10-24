@@ -32,6 +32,7 @@
 		71E581C6F6310F9115EE989A /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C026B0860BA3DC6889593E3F /* AppIntents.framework */; };
 		79E8116198C0F1544EEEB1D2 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B11B87B71A3CB9B7FFB57358 /* PrivacyInfo.xcprivacy */; };
 		7F3B786208DD027EA35DEFC7 /* InternetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BB3DAAE80542C5B7E70586E /* InternetViews.swift */; };
+		88ECE1412FD6F8F1E2003D7B /* AppModelDebugCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63BF8BBA597A1CCEF729C2E /* AppModelDebugCPU.swift */; };
 		9655E8C2070C163CD6BB08D2 /* PacketTunnel.appex in Embed Dependencies */ = {isa = PBXBuildFile; fileRef = 21F75A016D5B4CB3DFBE0621 /* PacketTunnel.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		9D888B0890201C0F12D183CA /* PacketTunnelReplacementTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52D11F4B362872D00F10CF7F /* PacketTunnelReplacementTransaction.swift */; };
 		9E4E18AFBA1E70116199E68D /* NostrVpnIosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8C2C375478E216EE34D7E2A /* NostrVpnIosApp.swift */; };
@@ -41,6 +42,7 @@
 		B9900FE8565EC1E1E2F42891 /* NostrVpnPhysicalGateSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32C567B4190F53A52A6E419A /* NostrVpnPhysicalGateSupport.swift */; };
 		B9BD3A30C0A8D50809A96E69 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F7274F66C76E9FC38CB0DEDB /* Assets.xcassets */; };
 		BCC2E2F503096EA8DA202D4D /* AppModelDebugLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8FB8499CE8F91D4A2BC4255 /* AppModelDebugLifecycle.swift */; };
+		BF4DBC7A12A8B064A6E3701E /* FipsBonjourDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00E5F99A67C6615EAF7A1AFE /* FipsBonjourDiscovery.swift */; };
 		C2CEC87BAF0962926E5DD0A7 /* NostrVpnReleaseNetworkUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18A42119DA80B93BA811494E /* NostrVpnReleaseNetworkUI.swift */; };
 		C702E63D6DC6BEAE80CBEBD7 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BD1EA5A948BC1EEB916CEC3D /* SystemConfiguration.framework */; };
 		D3C042D2A625A40B9B1DD2C6 /* ScreenshotFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47D10A3E63B2672F87095031 /* ScreenshotFixtures.swift */; };
@@ -85,6 +87,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		00E5F99A67C6615EAF7A1AFE /* FipsBonjourDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FipsBonjourDiscovery.swift; sourceTree = "<group>"; };
 		06BD4BC01B5E92B3771DC4E2 /* AppModelDebugAutomation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelDebugAutomation.swift; sourceTree = "<group>"; };
 		10601F7E977CA9A2CA70782B /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
 		106454A084D4E2BC7799376E /* PacketFlowBridgeLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlowBridgeLifecycle.swift; sourceTree = "<group>"; };
@@ -120,6 +123,7 @@
 		BD3C4F5527757D58D8C6196A /* ViewComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewComponents.swift; sourceTree = "<group>"; };
 		C026B0860BA3DC6889593E3F /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
 		C8BAA0EBA6F30832FC35B6E6 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
+		D63BF8BBA597A1CCEF729C2E /* AppModelDebugCPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelDebugCPU.swift; sourceTree = "<group>"; };
 		D8FB8499CE8F91D4A2BC4255 /* AppModelDebugLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelDebugLifecycle.swift; sourceTree = "<group>"; };
 		E3C4E67D5D36550552B70435 /* NativeCoreClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCoreClient.swift; sourceTree = "<group>"; };
 		E8C2C375478E216EE34D7E2A /* NostrVpnIosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostrVpnIosApp.swift; sourceTree = "<group>"; };
@@ -173,6 +177,7 @@
 			children = (
 				4E8D34EBC51BAFC05BF873C3 /* AppModel.swift */,
 				06BD4BC01B5E92B3771DC4E2 /* AppModelDebugAutomation.swift */,
+				D63BF8BBA597A1CCEF729C2E /* AppModelDebugCPU.swift */,
 				D8FB8499CE8F91D4A2BC4255 /* AppModelDebugLifecycle.swift */,
 				9C4F8D33CB171B580681282E /* AppModelDebugTunProbe.swift */,
 				74FA92081064D235A10456E4 /* AppModelDebugURLAutomation.swift */,
@@ -201,6 +206,7 @@
 		6EF67A9C6F0CFFD4E4F15136 /* PacketTunnel */ = {
 			isa = PBXGroup;
 			children = (
+				00E5F99A67C6615EAF7A1AFE /* FipsBonjourDiscovery.swift */,
 				F581F9BC69EA220D465E29EC /* Info.plist */,
 				431444D8F49363F9B144DBB0 /* PacketFlowBridge.swift */,
 				106454A084D4E2BC7799376E /* PacketFlowBridgeLifecycle.swift */,
@@ -378,6 +384,7 @@
 			files = (
 				5B0E1575EB4F5058F05B1913 /* AppModel.swift in Sources */,
 				67372B248F87FDC7705B1203 /* AppModelDebugAutomation.swift in Sources */,
+				88ECE1412FD6F8F1E2003D7B /* AppModelDebugCPU.swift in Sources */,
 				BCC2E2F503096EA8DA202D4D /* AppModelDebugLifecycle.swift in Sources */,
 				A1618DBDFB947AB01162518D /* AppModelDebugTunProbe.swift in Sources */,
 				2376F433BA1FBD612B5DF846 /* AppModelDebugURLAutomation.swift in Sources */,
@@ -406,6 +413,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BF4DBC7A12A8B064A6E3701E /* FipsBonjourDiscovery.swift in Sources */,
 				2E22BA531D53E86404F0D766 /* PacketFlowBridge.swift in Sources */,
 				014C56E3EDDCB4C1B20FE959 /* PacketFlowBridgeLifecycle.swift in Sources */,
 				DC1FC354C9FEA443CBCE3ABF /* PacketTunnelProvider.swift in Sources */,
@@ -576,7 +584,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 4001022;
+				CURRENT_PROJECT_VERSION = 4001024;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -596,7 +604,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.1.17;
+				MARKETING_VERSION = 4.1.18;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				NVPN_IOS_APP_GROUP_IDENTIFIER = group.fi.siriusbusiness.nvpn.shared;
@@ -738,7 +746,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 4001022;
+				CURRENT_PROJECT_VERSION = 4001024;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -752,7 +760,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.1.17;
+				MARKETING_VERSION = 4.1.18;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				NVPN_IOS_APP_GROUP_IDENTIFIER = group.fi.siriusbusiness.nvpn.shared;
@@ -829,7 +837,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 4001022;
+				CURRENT_PROJECT_VERSION = 4001024;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -849,7 +857,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.1.17;
+				MARKETING_VERSION = 4.1.18;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				NVPN_IOS_APP_GROUP_IDENTIFIER = group.fi.siriusbusiness.nvpn.shared;

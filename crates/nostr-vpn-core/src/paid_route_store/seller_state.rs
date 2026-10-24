@@ -1,11 +1,47 @@
 use super::{persistence::*, *};
 
 impl PaidRouteStore {
-    pub fn live_offer_for_selector(&self, selector: &str, now_unix: u64) -> Result<PaidRouteOffer> {
-        let (_, record) = self.resolve_offer(selector)?;
-        if !record.signed_offer.is_live_at(now_unix) {
-            return Err(anyhow!("paid route offer '{}' expired", selector.trim()));
+    /// Retire elapsed free trials without involving a mint or discarding history.
+    pub fn expire_unfunded_seller_sessions(&mut self, now_unix: u64) -> bool {
+        let expired = self
+            .sessions
+            .values()
+            .filter_map(|record| {
+                let session = &record.session;
+                let channel = self.channels.get(&session.payment.channel_id)?;
+                let lease = self.leases.get(&session.lease_id)?;
+                (channel.role == PaidRouteChannelRole::Seller
+                    && !paid_route_session_has_payment_material(session, channel)
+                    && session.payment.paid_msat.max(channel.payment.paid_msat) == 0
+                    && channel.routing_expires_at_unix(lease.lease.expires_at_unix) <= now_unix)
+                    .then(|| (channel.channel_id.clone(), session.lease_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for (channel_id, lease_id) in expired {
+            if let Some(channel) = self.channels.get_mut(&channel_id)
+                && paid_route_lifecycle_allows_routing(channel.status)
+            {
+                channel.status = PaidRouteLifecycleStatus::Expired;
+                channel.updated_at_unix = channel.updated_at_unix.max(now_unix);
+                if channel.error.is_empty() {
+                    channel.error = "Unfunded trial expired".into();
+                }
+                changed = true;
+            }
+            if let Some(lease) = self.leases.get_mut(&lease_id)
+                && paid_route_lifecycle_allows_routing(lease.status)
+            {
+                lease.status = PaidRouteLifecycleStatus::Expired;
+                lease.updated_at_unix = lease.updated_at_unix.max(now_unix);
+                changed = true;
+            }
         }
+        changed
+    }
+
+    pub fn live_offer_for_selector(&self, selector: &str, now_unix: u64) -> Result<PaidRouteOffer> {
+        let (_, record) = self.resolve_offer(selector, now_unix)?;
         record.signed_offer.verify()?;
         Ok(record.offer.clone())
     }
@@ -166,10 +202,7 @@ impl PaidRouteStore {
             .get(&session.session_id)?
             .clone();
         let decision = session.routing_decision(accepted_terms);
-        let expires_at_unix = lease_record
-            .lease
-            .expires_at_unix
-            .min(channel.expires_at_unix);
+        let expires_at_unix = channel.routing_expires_at_unix(lease_record.lease.expires_at_unix);
         let lifecycle_allows = paid_route_lifecycle_allows_routing(lease_record.status)
             && paid_route_lifecycle_allows_routing(channel.status);
         let not_expired = expires_at_unix > now_unix;
@@ -216,7 +249,13 @@ impl PaidRouteStore {
             .lease
             .expires_at_unix
             .min(channel.expires_at_unix);
-        let expired = expires_at_unix > 0 && expires_at_unix <= now_unix;
+        let scheduled_collection =
+            channel.routing_expires_at_unix(lease_record.lease.expires_at_unix);
+        let due_at_unix = if channel.status == PaidRouteLifecycleStatus::Closing {
+            channel.updated_at_unix.min(scheduled_collection)
+        } else {
+            scheduled_collection
+        };
         let terminally_collected = matches!(
             channel.status,
             PaidRouteLifecycleStatus::Closed | PaidRouteLifecycleStatus::Failed
@@ -233,9 +272,9 @@ impl PaidRouteStore {
             && has_spilman_payment
             && paid_msat > 0
             && !channel.channel_id.trim().is_empty();
-        let auto_collect_due = collectable && expired;
+        let auto_collect_due = collectable && due_at_unix <= now_unix;
         let reason = if auto_collect_due {
-            "expired"
+            "settlement_due"
         } else if collectable {
             "manual"
         } else if terminally_collected {
@@ -256,18 +295,27 @@ impl PaidRouteStore {
             reason,
             paid_msat,
             expires_at_unix,
-            due_at_unix: if collectable { expires_at_unix } else { 0 },
+            due_at_unix: if collectable { due_at_unix } else { 0 },
             updated_at_unix: record.updated_at_unix.max(channel.updated_at_unix),
         })
         .filter(|state| state.collectable)
     }
 
-    pub(super) fn resolve_offer(&self, selector: &str) -> Result<(String, &PaidRouteOfferRecord)> {
+    pub(super) fn resolve_offer(
+        &self,
+        selector: &str,
+        now_unix: u64,
+    ) -> Result<(String, &PaidRouteOfferRecord)> {
         let selector = selector.trim();
         if selector.is_empty() {
             return Err(anyhow!("paid route offer selector is empty"));
         }
         if let Some(record) = self.offers.get(selector) {
+            if !record.signed_offer.is_live_at(now_unix) {
+                return Err(anyhow!(
+                    "paid route offer '{selector}' expired or is not yet live; discover sellers again"
+                ));
+            }
             return Ok((selector.to_string(), record));
         }
 
@@ -277,8 +325,17 @@ impl PaidRouteStore {
             .filter(|(_, record)| {
                 record.offer.offer_id == selector || record.offer.seller_npub == selector
             })
+            .filter(|(_, record)| record.signed_offer.is_live_at(now_unix))
             .collect::<Vec<_>>();
         match matches.as_slice() {
+            [] if self.offers.values().any(|record| {
+                record.offer.offer_id == selector || record.offer.seller_npub == selector
+            }) =>
+            {
+                Err(anyhow!(
+                    "paid route offer '{selector}' expired or is not yet live; discover sellers again"
+                ))
+            }
             [] => Err(anyhow!("paid route offer '{selector}' was not found")),
             [(key, record)] => Ok(((*key).clone(), *record)),
             _ => Err(anyhow!(

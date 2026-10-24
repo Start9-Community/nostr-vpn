@@ -55,8 +55,9 @@ impl FipsPrivateTunnelRuntime {
         ensure_linux_tun_permissions(&config.iface)?;
         #[cfg(feature = "paid-exit")]
         mesh.set_paid_route_accounting_peers(config.paid_route_accounting_peers.clone())?;
-        let control_pubsub = crate::control_pubsub_runtime::ControlPubsubFipsRuntime::start_for_peers(
+        let control_pubsub = crate::control_pubsub_runtime::ControlPubsubFipsRuntime::start_for_peers_with_advert_app(
             Arc::clone(mesh.endpoint()),
+            &mesh.nostr_advert_app,
             config.nostr_pubsub.clone(),
             config.nostr_relays.clone(),
             Some(config.control_pubsub_store_path.clone()),
@@ -114,8 +115,6 @@ impl FipsPrivateTunnelRuntime {
             #[cfg(target_os = "linux")]
             original_default_route: None,
             #[cfg(target_os = "linux")]
-            ethernet_underlay_default_route: None,
-            #[cfg(target_os = "linux")]
             original_default_ipv6_route: None,
             #[cfg(target_os = "linux")]
             linux_network_state_initialized: false,
@@ -152,6 +151,7 @@ impl FipsPrivateTunnelRuntime {
         Ok(runtime)
     }
 
+    #[cfg(target_os = "macos")]
     async fn endpoint_bypass_ipv4_hosts(
         &self,
         config: &FipsPrivateTunnelConfig,
@@ -243,9 +243,6 @@ impl FipsPrivateTunnelRuntime {
                 }
             }
         }
-        if self.config.nostr_relays != config.nostr_relays {
-            self.mesh.update_relays(&config.nostr_relays).await?;
-        }
         self.prepare_secure_dns(&config, cleanup_journal_config_path)
             .await?;
         self.apply_interface_config(&config).await?;
@@ -288,19 +285,7 @@ impl FipsPrivateTunnelRuntime {
         }
         #[cfg(target_os = "linux")]
         {
-            if !linux_route_targets_require_ip_endpoint_bypass(&self.config.route_targets) {
-                return Ok(());
-            }
-            let config = self.config.clone();
-            let mut bypass_hosts = config.control_plane_bypass_hosts.clone();
-            bypass_hosts.extend(self.endpoint_bypass_ipv4_hosts(&config).await?);
-            if linux_endpoint_bypass_hosts_unchanged(
-                &self.endpoint_bypass_routes,
-                &bypass_hosts,
-            ) {
-                return Ok(());
-            }
-            return self.apply_interface_config(&config).await;
+            Ok(())
         }
         #[cfg(target_os = "macos")]
         {
@@ -314,7 +299,8 @@ impl FipsPrivateTunnelRuntime {
     pub(crate) async fn stop(self) -> Result<()> {
         let mut runtime = self;
         #[cfg(target_os = "linux")]
-        let network_cleanup = runtime.cleanup_linux_network_state();
+        let network_cleanup = crate::linux_exit_intent::pending()
+            .and_then(|()| runtime.cleanup_linux_network_state());
         #[cfg(target_os = "macos")]
         let mut macos_network_failures = Vec::new();
         #[cfg(target_os = "macos")]

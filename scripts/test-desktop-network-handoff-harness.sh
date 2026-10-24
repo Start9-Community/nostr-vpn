@@ -351,7 +351,7 @@ require_tokens "$LINUX_GUEST" "production SIGKILL/startup-repair evidence" \
   'restart_repair_milliseconds'
 require_tokens "$LINUX_HOST" "mandatory SIGKILL/startup-repair receipt" \
   'run_sigkill_restart_recovery()' \
-  'run_guest_primary crash-repair' \
+  'run_guest_action crash-repair' \
   'crash-repair.receipt.json' \
   'crash-journal-ownership.json' \
   '.binary_sha256 == $binary_sha256' \
@@ -1712,9 +1712,9 @@ grep -Fq "virsh domif-getlink \"\$vm\" \"\$primary_iface\" | awk '{ print \$NF }
 grep -Fq 'capture_remote_state' "$LINUX_HOST" \
   || fail "Linux failure cleanup does not preserve guest and peer evidence"
 require_tokens "$LINUX_HOST_LIB" "detached fail-closed guest-runner supervision" \
-  'run_secondary_bounded()' \
+  'run_guest_control()' \
   'run_hypervisor_bounded()' \
-  'start_guest_secondary_unit()' \
+  'start_guest_unit()' \
   'systemd-run' \
   '--collect' \
   '--property=Type=exec' \
@@ -1740,7 +1740,7 @@ fi
 require_tokens "$LINUX_HOST" "detached guest-runner lifecycle" \
   'realpath' \
   'LINUX_RUN_UNIT=' \
-  'start_guest_secondary_unit run' \
+  'start_guest_unit run' \
   'wait_for_guest_runner_success' \
   'stop_guest_runner_unit'
 require_tokens "$LINUX_HOST" "fail-closed runtime evidence capture" \
@@ -1780,34 +1780,24 @@ ready = source[
     source.index("assert_secondary_underlay_ready() {"):
     source.index("\nrun_gate() {")
 ]
-if 'route show table main default dev "$interface"' in ready:
-    raise SystemExit(
-        "Linux pre-cut readiness incorrectly requires a live physical default under strict exit"
-    )
 for token in (
-    "previous_main_default_routes",
-    "strict exit retained an unmanaged physical default before the host cut",
-    "durable_default_route: true",
-    'defaults_json="$(ip -j -4 route show table main default)"',
-    "length >= 1 and all(.[]; .dev == $wireguard)",
+    "egress_policy_installed",
+    "network-manager physical defaults changed under strict exit",
+    "physical_default_route: true",
+    "egress_policy_protected: true",
+    "application_endpoint_bypass: false",
 ):
     if token not in ready:
-        raise SystemExit(
-            f"Linux pre-cut readiness lacks strict-exit ownership evidence: {token}"
-        )
+        raise SystemExit(f"Linux pre-cut readiness lacks native-route/egress evidence: {token}")
 endpoint_route = source[
     source.index("assert_wireguard_endpoint_route() {"):
     source.index("\nmonotonic_milliseconds() {")
 ]
-if 'route show default dev "$expected_iface"' in endpoint_route:
-    raise SystemExit(
-        "Linux endpoint proof incorrectly derives its gateway from an absent physical default"
-    )
-for token in ("$CLEANUP_JOURNAL", "previous_main_default_routes"):
+for token in ("carrier_route_json", 'wg show "$WG_IFACE" fwmark', "route show table main default"):
     if token not in endpoint_route:
-        raise SystemExit(
-            f"Linux endpoint proof lacks durable underlay ownership: {token}"
-        )
+        raise SystemExit(f"Linux endpoint proof lacks marked carrier routing: {token}")
+if "previous_main_default_routes" in endpoint_route:
+    raise SystemExit("Linux carrier proof still relies on obsolete owned main defaults")
 for token in (
     'wireguard_endpoint_route_matches',
     'initial_last_predicate=',
@@ -1826,19 +1816,13 @@ runner = host[
     host.index("start_linux_runner() {"):
     host.index("\nset_primary_link() {")
 ]
-if ".default_route == true" in runner:
-    raise SystemExit(
-        "Linux host wrapper still requires a live physical default under strict exit"
-    )
 for token in (
-    ".default_route == false",
-    ".durable_default_route == true",
-    ".strict_exit_physical_defaults_absent == true",
+    ".physical_default_route == true",
+    ".egress_policy_protected == true",
+    ".application_endpoint_bypass == false",
 ):
     if token not in runner:
-        raise SystemExit(
-            f"Linux host wrapper lacks strict-exit pre-cut evidence: {token}"
-        )
+        raise SystemExit(f"Linux host wrapper lacks marked-carrier pre-cut evidence: {token}")
 PY
 jq -en \
   --arg status_ip "10.44.0.2/32" \
@@ -1853,14 +1837,16 @@ sed -n \
 source "$route_matcher"
 for dst in "203.0.113.10" "203.0.113.10/32"; do
   wireguard_endpoint_route_matches \
-    "[{\"dst\":\"$dst\",\"dev\":\"eth0\",\"gateway\":\"192.0.2.1\",\"prefsrc\":\"192.0.2.10\"}]" \
+    "[{\"dst\":\"$dst\",\"dev\":\"eth0\",\"gateway\":\"192.0.2.1\",\"prefsrc\":\"192.0.2.10\",\"mark\":20054}]" \
     eth0 192.0.2.1 192.0.2.10 203.0.113.10 \
     || fail "Linux endpoint route rejected the valid $dst kernel spelling"
 done
 for invalid_route in \
-  '[{"dst":"203.0.113.10","dev":"eth1","gateway":"192.0.2.1","prefsrc":"192.0.2.10"}]' \
-  '[{"dst":"203.0.113.10","dev":"eth0","gateway":"192.0.2.2","prefsrc":"192.0.2.10"}]' \
-  '[{"dst":"203.0.113.10","dev":"eth0","gateway":"192.0.2.1","prefsrc":"192.0.2.11"}]'
+  '[{"dst":"203.0.113.10","dev":"eth1","gateway":"192.0.2.1","prefsrc":"192.0.2.10","mark":20054}]' \
+  '[{"dst":"203.0.113.10","dev":"eth0","gateway":"192.0.2.2","prefsrc":"192.0.2.10","mark":20054}]' \
+  '[{"dst":"203.0.113.10","dev":"eth0","gateway":"192.0.2.1","prefsrc":"192.0.2.11","mark":20054}]' \
+  '[{"dst":"203.0.113.10","dev":"eth0","gateway":"192.0.2.1","prefsrc":"192.0.2.10"}]' \
+  '[{"dst":"203.0.113.10","dev":"eth0","gateway":"192.0.2.1","prefsrc":"192.0.2.10","mark":20055}]'
 do
   if wireguard_endpoint_route_matches \
     "$invalid_route" eth0 192.0.2.1 192.0.2.10 203.0.113.10
@@ -1976,7 +1962,8 @@ done
 grep -Fq 'last_rebind_receipts=' "$LINUX_GUEST" \
   || fail "Linux recovery failure omits its rebind evidence"
 require_tokens "$LINUX_GUEST" "pre-cut stable primary assertion" \
-  '$(rebind_count) == 0' \
+  'now - stable_since >= 1000' \
+  '[[ "$(endpoint_start_count)" == 1 ]]' \
   'initial FIPS exit, DNS, HTTPS, and payload did not become ready'
 require_tokens "$PEER" "pre-cut physical-source audit" \
   'initial-source-audit)' \

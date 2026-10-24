@@ -828,6 +828,19 @@ async fn paid_exit_stream_payments_signs_due_buyer_usage_update() {
         })
         .expect("open buyer session");
     store
+        .build_buyer_signed_payment_envelope(
+            &RuntimeFakePaymentSigner,
+            BuildPaidRouteBuyerSignedPaymentEnvelopeRequest {
+                session_id: session.session_id.clone(),
+                buyer_npub: buyer_npub.clone(),
+                kind: BuildPaidRouteBuyerPaymentEnvelopeKind::ChannelOpen,
+                delivered_units: Some(0),
+                paid_msat: Some(0),
+                now_unix: 125,
+            },
+        )
+        .expect("fund the channel before streaming payments");
+    store
         .record_buyer_usage(RecordPaidRouteBuyerUsageRequest {
             seller_pubkey: seller.public_key().to_hex(),
             usage_delta: PaidRouteUsage {
@@ -931,7 +944,7 @@ async fn paid_exit_stream_payments_signs_due_buyer_usage_update() {
                 channel_id: channel_id.to_string(),
                 balance,
                 signature: format!("signed-{channel_id}-{balance}"),
-                params: include_funding.then(|| json!({"channel": channel_id})),
+                params: include_funding.then(|| json!({"channel": channel_id, "unit": "sat"})),
                 funding_proofs: include_funding.then(|| json!({"proofs": []})),
             })
         }

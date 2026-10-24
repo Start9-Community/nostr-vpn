@@ -117,19 +117,6 @@ pub(super) async fn shutdown_daemon_vpn(shutdown: DaemonVpnShutdown<'_>) -> Resu
     )
 }
 
-pub(super) fn finish_daemon_vpn_shutdown(
-    terminal_error: Option<anyhow::Error>,
-    shutdown_result: Result<()>,
-) -> Result<()> {
-    match (terminal_error, shutdown_result) {
-        (None, result) => result,
-        (Some(error), Ok(())) => Err(error),
-        (Some(error), Err(shutdown_error)) => Err(anyhow!(
-            "{error:#}; daemon shutdown also failed: {shutdown_error:#}"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

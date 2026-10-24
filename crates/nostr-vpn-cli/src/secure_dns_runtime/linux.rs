@@ -89,7 +89,10 @@ pub(super) fn install(state: &LinuxSecureDnsCleanupState) -> Result<()> {
             }
             Ok(())
         }
-        LinuxSecureDnsCleanupState::DirectResolvConf { .. } => {
+        LinuxSecureDnsCleanupState::DirectResolvConf { previous } => {
+            if let Some(network) = crate::linux_host_network::current() {
+                network.capture_native_dns(previous)?;
+            }
             write_linux_resolv_conf(LINUX_DIRECT_RESOLV_CONF)
                 .context("failed to install direct secure DNS resolver")
         }

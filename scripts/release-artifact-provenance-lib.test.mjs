@@ -494,6 +494,7 @@ test('component proof scopes desktop crates and Rust test modules', () => {
     'crates/nostr-vpn-app-core/src/mobile_tunnel/ios_packet_flow.rs',
     'crates/nostr-vpn-app-core/src/c_abi/ios_packet_flow.rs',
     'crates/nostr-vpn-app-core/src/mobile_tunnel.rs',
+    'scripts/e2e-wireguard-exit-docker.sh',
   ]
   try {
     git('init', '-q')
@@ -534,6 +535,7 @@ test('component proof scopes desktop crates and Rust test modules', () => {
     assertScope('macos-service', [paths[1]], ['macos'])
     assertScope('windows-wintun', [paths[2]], ['windows'])
     assertScope('harness-only', paths.slice(3, 7), [])
+    assertScope('wireguard-exit-harness', [paths[19]], [])
     assertScope('linux-wireguard-exit-module', [paths[7]], ['linux'])
     assertScope('linux-wireguard-exit-sources', paths.slice(8, 10), ['linux'])
     assertScope('linux-wireguard-exit-tests', paths.slice(10, 12), [])
@@ -1149,8 +1151,9 @@ test('release receipt collection requires exact source and strict public UI gate
       fipsGitTree: androidArtifact.fipsGitTree,
       package: androidArtifact.package,
       preexistingCanonicalPackage: true,
-      replacementInstall: true,
-      replacementInstallVerified: true,
+      replacementInstall: process.env.NVPN_TEST_REUSE_ANDROID_INSTALL !== '1',
+      replacementInstallVerified: process.env.NVPN_TEST_REUSE_ANDROID_INSTALL !== '1',
+      installedArtifactVerified: true,
       debuggable: false,
       canonicalPackageCount: 1,
       canonicalProcessCount: 1,
@@ -2171,7 +2174,16 @@ test('release receipt collection requires exact source and strict public UI gate
     assertRejectedReceiptMutation(
       paths.android.install,
       (receipt) => {
+        receipt.replacementInstall = !receipt.replacementInstall
+      },
+      /install receipt is not bound to the exact physical artifact/,
+    )
+    assertRejectedReceiptMutation(
+      paths.android.install,
+      (receipt) => {
         receipt.replacementInstall = false
+        receipt.replacementInstallVerified = false
+        receipt.installedArtifactVerified = false
       },
       /install receipt is not bound to the exact physical artifact/,
     )
@@ -2619,6 +2631,7 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
       wireguard_endpoint_route_removed: true,
       wireguard_policy_rule_removed: true,
       wireguard_policy_table_empty: true,
+      egress_policy_removed: true,
       verified_https: true,
     }))
     write(join(root, 'crash-repair-receipt.json'), JSON.stringify({
@@ -2627,6 +2640,8 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
       through_exit_dns_before_crash: true,
       verified_https_before_crash: true,
       cleanup_journal_survived_sigkill: true,
+      durable_egress_protection_survived_sigkill: true,
+      egress_policy_removed: true,
       startup_repair_without_explicit_command: true,
       cleanup_journal_removed: true,
       physical_default_restored: true,
@@ -2685,7 +2700,7 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
       }))
     }
     const output = join(root, 'receipt.json')
-    const result = spawnSync(
+    const runBuilder = () => spawnSync(
       'python3',
       [
         join(process.cwd(), 'scripts/release-network-evidence.py'),
@@ -2705,11 +2720,27 @@ test('desktop evidence builder accepts the real repeated five-case DNS ledger', 
       ],
       { encoding: 'utf8' },
     )
+    const result = runBuilder()
     assert.equal(result.status, 0, result.stderr)
     const receipt = JSON.parse(readFileSync(output, 'utf8'))
     assert.equal(receipt.summary.dnsPolicyCount, 5)
     assert.equal(receipt.summary.directRestored, true)
     assert.equal(receipt.summary.singletonAfterCrashRecovery, true)
+    for (const [filename, field, error] of [
+      ['direct-receipt.json', 'egress_policy_removed', /Linux Direct restoration receipt is incomplete/],
+      ['crash-repair-receipt.json', 'durable_egress_protection_survived_sigkill', /Linux SIGKILL\/restart repair receipt is incomplete/],
+      ['crash-repair-receipt.json', 'egress_policy_removed', /Linux SIGKILL\/restart repair receipt is incomplete/],
+    ]) {
+      const path = join(root, filename)
+      const original = readFileSync(path, 'utf8')
+      for (const value of [false, undefined]) {
+        write(path, JSON.stringify({ ...JSON.parse(original), [field]: value }))
+        const rejected = runBuilder()
+        assert.notEqual(rejected.status, 0, `${filename} accepted ${field}=${value}`)
+        assert.match(rejected.stderr, error)
+      }
+      write(path, original)
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -2767,4 +2798,15 @@ test('StartOS post-build proof requires the real exact-package inspector result'
     }),
     /lacks a real exact-package StartOS validation/,
   )
+})
+
+test('complete receipt collection accepts verified Android reuse with separate replacement coverage', () => {
+  const env = { ...process.env, NVPN_TEST_REUSE_ANDROID_INSTALL: '1' }
+  delete env.NODE_TEST_CONTEXT
+  const result = spawnSync(process.execPath, [
+    '--test',
+    '--test-name-pattern=^release receipt collection requires exact source and strict public UI gates$',
+    join(process.cwd(), 'scripts/release-artifact-provenance-lib.test.mjs'),
+  ], { env, encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
 })

@@ -131,8 +131,11 @@ impl SimulationRuntime {
         } = build_reputation_policies(&config, &specs, &keys)?;
         let network = simulation_network(config.seed, &specs);
         register_sim_network(network_id.clone(), network.clone());
-        let endpoints = start_sim_endpoints(&config, &network_id, &specs).await?;
-        let pubsub = start_pubsub_runtimes(&network_id, &endpoints, &peer_policies).await?;
+        let (endpoints, nostr_advert_apps) =
+            start_sim_endpoints(&config, &network_id, &specs).await?;
+        let pubsub =
+            start_pubsub_runtimes(&network_id, &endpoints, &nostr_advert_apps, &peer_policies)
+                .await?;
         let connected_pubsub_node_count = match wait_for_pubsub_connections(
             &pubsub,
             Duration::from_millis(config.convergence_timeout_ms),
@@ -446,12 +449,15 @@ async fn start_sim_endpoints(
     config: &SimulationConfig,
     network_id: &str,
     specs: &[NodeSpec],
-) -> Result<Vec<Arc<FipsEndpoint>>> {
+) -> Result<(Vec<Arc<FipsEndpoint>>, Vec<String>)> {
     let mut endpoints = Vec::with_capacity(config.node_count);
+    let mut nostr_advert_apps = Vec::with_capacity(config.node_count);
     for (index, spec) in specs.iter().enumerate() {
+        let fips_config = endpoint_config(config, network_id, specs, index);
+        nostr_advert_apps.push(fips_config.node.discovery.nostr.app.clone());
         let endpoint = Box::pin(
             FipsEndpoint::builder()
-                .config(endpoint_config(config, network_id, specs, index))
+                .config(fips_config)
                 .identity_nsec(spec.secret_hex.clone())
                 .without_system_tun()
                 .packet_channel_capacity(8_192)
@@ -480,12 +486,13 @@ async fn start_sim_endpoints(
             config.node_count
         );
     }
-    Ok(endpoints)
+    Ok((endpoints, nostr_advert_apps))
 }
 
 async fn start_pubsub_runtimes(
     network_id: &str,
     endpoints: &[Arc<FipsEndpoint>],
+    nostr_advert_apps: &[String],
     peer_policies: &[Option<SharedMeshPeerPolicy>],
 ) -> Result<Vec<ControlPubsubFipsRuntime>> {
     let pubsub_config = NostrPubsubConfig {
@@ -498,8 +505,9 @@ async fn start_pubsub_runtimes(
     for (index, endpoint) in endpoints.iter().enumerate() {
         let runtime = match peer_policies[index].as_ref() {
             Some(peer_policy) => {
-                ControlPubsubFipsRuntime::start_with_peer_policy(
+                ControlPubsubFipsRuntime::start_with_peer_policy_and_advert_app(
                     Arc::clone(endpoint),
+                    &nostr_advert_apps[index],
                     pubsub_config.clone(),
                     Vec::new(),
                     None,
@@ -508,11 +516,13 @@ async fn start_pubsub_runtimes(
                 .await
             }
             None => {
-                ControlPubsubFipsRuntime::start(
+                ControlPubsubFipsRuntime::start_for_peers_with_advert_app(
                     Arc::clone(endpoint),
+                    &nostr_advert_apps[index],
                     pubsub_config.clone(),
                     Vec::new(),
                     None,
+                    &[],
                 )
                 .await
             }

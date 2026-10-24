@@ -1,0 +1,46 @@
+name: Native Linux candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/nvpn-publish-final-104]
+    paths:
+      - .github/workflows/native-linux-candidate.yml
+      - scripts/build-hosted-linux-candidate.sh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-linux-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: mmalmi/fips
+          ref: 12a7b154fa2fe8e86483c51ac10708501e50cdfe
+          fetch-depth: 0
+          path: .hosted-fips
+      - name: Reclaim unused hosted-runner toolchains
+        shell: bash
+        run: |
+          # This fresh, dedicated Linux build job uses none of these SDKs.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Build exact sources with the canonical native driver
+        run: scripts/build-hosted-linux-candidate.sh "$GITHUB_WORKSPACE/.hosted-fips" "$RUNNER_TEMP/nvpn-linux-candidate"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-linux-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/nvpn-linux-candidate
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error

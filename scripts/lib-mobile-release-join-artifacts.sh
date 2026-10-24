@@ -815,6 +815,7 @@ release_join_prepare_ios_release() {
   local app_signed_team tunnel_signed_team app_cert tunnel_cert team_hash
   local app_cdhash tunnel_cdhash device_identifier_sha variant_receipt
   local derived="$RESULT_DIR/ios-derived-data"
+  local build_action=build-for-testing retained_derived="" retained_plan=""
   local app_sha app_tree manifest_sha
   if release_join_reuse_artifacts; then
     [[ "$RELEASE_JOIN_ARTIFACTS_VALIDATED" -eq 1 \
@@ -862,6 +863,15 @@ release_join_prepare_ios_release() {
   app_sha="$(git -C "$ROOT" rev-parse HEAD)"
   app_tree="$(git -C "$ROOT" rev-parse HEAD^{tree})"
 
+  if [[ -n "${NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT:-}" ]]; then
+    retained_derived="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:?Missing retained runner products}"
+    retained_plan="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:?Missing retained XCTest plan}"
+    [[ -d "$retained_derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app" \
+      && -s "$retained_plan" ]] || return 1
+    # Only the QR app variant changes. Keep the already trusted test products.
+    build_action=build
+  fi
+
   export NVPN_IOS_BUNDLE_ID="$bundle"
   export NVPN_IOS_PACKET_TUNNEL_BUNDLE_ID="$tunnel"
   export NVPN_IOS_APP_GROUP_IDENTIFIER="$group"
@@ -885,14 +895,18 @@ release_join_prepare_ios_release() {
     NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID" \
     NVPN_BUILD_GIT_SHA="$app_sha" \
     'OTHER_SWIFT_FLAGS=$(inherited) -DNVPN_RELEASE_JOIN_TESTING' \
-    build-for-testing
-  RELEASE_JOIN_IOS_XCTESTRUN="$(
-    select_generated_ios_release_xctestrun \
-      "$derived/Build/Products" "iOS Release join build"
-  )" || return 1
-  export RELEASE_JOIN_IOS_XCTESTRUN
-
+    "$build_action"
   app_path="$derived/Build/Products/Release-iphoneos/Nostr VPN.app"
+  if [[ -n "$retained_derived" ]]; then
+    derived="$retained_derived"
+    RELEASE_JOIN_IOS_XCTESTRUN="$retained_plan"
+  else
+    RELEASE_JOIN_IOS_XCTESTRUN="$(
+      select_generated_ios_release_xctestrun \
+        "$derived/Build/Products" "iOS Release join build"
+    )" || return 1
+  fi
+  export RELEASE_JOIN_IOS_XCTESTRUN
   [[ -d "$app_path" ]] || {
     echo "iOS Release app was not built for testing" >&2
     return 1
@@ -985,6 +999,8 @@ PY
   export NVPN_RELEASE_JOIN_IOS_RECEIPT RELEASE_JOIN_IOS_APP_SHA
   export RELEASE_JOIN_IOS_APP_TREE RELEASE_JOIN_IOS_APP_CERT
   export RELEASE_JOIN_IOS_APP_TREE_SHA
+  # Signing, source, production relationship and variant bytes passed above.
+  RELEASE_JOIN_ARTIFACTS_VALIDATED=1
   release_join_install_ios_release \
     "$app_path" "$app_sha" "$app_tree" "$manifest_sha" \
     "$team_hash" "$app_cert" "$derived" "$udid"

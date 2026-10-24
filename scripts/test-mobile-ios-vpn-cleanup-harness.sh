@@ -311,10 +311,13 @@ if "return try await waitForDisconnected(manager)" not in disconnect_helper:
 debug_start = automation.split("private func startVpnForDebugProbe()", 1)[1].split(
     "private func fetchDebugProbe", 1
 )[0]
-debug_native_enable = debug_start.index("dispatch(NativeActions.connectVpn())")
-debug_serialized_config = debug_start.index("let tunnelConfigJson = core.mobileTunnelConfigJson()")
-if debug_native_enable >= debug_serialized_config:
-    raise SystemExit("physical iOS probe still serializes disabled native state")
+debug_enable = debug_start.index("setVpnEnabled(true, force: true)")
+debug_wait = debug_start.index("await packetTunnelTransitionTask?.value")
+debug_connected = debug_start.index("guard await vpnController.statusRawValue() == 3")
+if not debug_enable < debug_wait < debug_connected:
+    raise SystemExit("physical iOS probe does not await the shipped VPN transition")
+if "vpnController.start(" in debug_start or "mobileTunnelConfigJson()" in debug_start:
+    raise SystemExit("physical iOS probe bypasses the serialized VPN transition")
 if "--nvpn-debug-connect-result" not in automation or "status == 3" not in automation:
     raise SystemExit("physical iOS probe does not produce a confirmed-connect result")
 if '?? "group.' in app_model or '?? "group.' in packet_tunnel:

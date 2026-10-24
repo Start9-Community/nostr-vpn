@@ -18,9 +18,14 @@ NAME_RE = re.compile(r'^name = "([^"]+)"$')
 VERSION_RE = re.compile(r'^version = "([^"]+)"$')
 CHECKSUM_RE = re.compile(r'^checksum = "[0-9a-f]{64}"$')
 PATCH_CRATES = {
-    "nvpn-fips-core": "fips-core",
-    "nvpn-fips-endpoint": "fips-endpoint",
-    "nvpn-fips-identity": "fips-identity",
+    "nvpn-fips-core": "crates/fips-core",
+    "nvpn-fips-endpoint": "crates/fips-endpoint",
+    "nvpn-fips-identity": "crates/fips-identity",
+    "nvpn-mdns-sd": "vendor/mdns-sd",
+    "nvpn-turn": "vendor/turn",
+    "nvpn-webrtc": "vendor/webrtc",
+    "nvpn-webrtc-ice": "vendor/webrtc-ice",
+    "nvpn-webrtc-util": "vendor/webrtc-util",
 }
 
 
@@ -50,7 +55,7 @@ def manifest_specs(root_arg: str) -> dict[str, str]:
     root = pathlib.Path(root_arg)
     result: dict[str, str] = {}
     for package_name, crate_dir in PATCH_CRATES.items():
-        manifest = root / "crates" / crate_dir / "Cargo.toml"
+        manifest = root / crate_dir / "Cargo.toml"
         try:
             text = manifest.read_text(encoding="utf-8")
         except OSError as error:

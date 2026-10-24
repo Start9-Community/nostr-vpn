@@ -100,7 +100,7 @@ struct PaidExitStatusArgs {
 struct PaidExitRunArgs {
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Stable Nostr d-tag for this seller's paid-exit offer.
+    /// Persist the offer ID used by this command and the daemon's refreshes.
     #[arg(long)]
     offer_id: Option<String>,
     /// Publish the refreshed offer over Nostr pubsub.
@@ -144,7 +144,7 @@ struct PaidExitRunArgs {
 struct PaidExitOfferArgs {
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Stable Nostr d-tag for this seller's paid-exit offer.
+    /// Preview ID override; use `run --offer-id` to change the published offer.
     #[arg(long)]
     offer_id: Option<String>,
     /// Publish the signed offer over Nostr pubsub.
@@ -242,7 +242,7 @@ struct PaidExitUseArgs {
 struct PaidExitProbeArgs {
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Buyer or seller paid-route session id.
+    /// Active buyer paid-route session id. The probe uses that session's tunnel.
     session: String,
     /// Public-IP endpoint. Plain IP or JSON with ip/query/origin is accepted.
     #[arg(long)]

@@ -200,6 +200,9 @@ extension RootView {
                     if isSelf(participant) {
                         badge("This device", style: selected ? .selected : .ok)
                     }
+                    if !participant.rosterAccepted && !isSelf(participant) {
+                        badge("Joining", style: selected ? .selected : .warn)
+                    }
                     if participant.isAdmin {
                         badge("Admin", style: selected ? .selected : .muted)
                     }

@@ -30,7 +30,7 @@ internal fun ParticipantState.statusLabel(appState: AppState): String {
         return when (statusText.trim().lowercase()) {
             "join request sent" -> JOIN_REQUEST_SENT_TEXT
             "waiting for admin" -> "Waiting for admin"
-            else -> "Connecting"
+            else -> if (rosterAccepted) "Connecting" else "Joining"
         }
     }
     return when (state) {

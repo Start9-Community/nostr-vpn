@@ -131,7 +131,7 @@ extension RootView {
                 Button {
                     addPaidRouteMintFromInput()
                 } label: {
-                    Label("Add", systemImage: "plus.circle.fill")
+                    Label("Trust mint", systemImage: "checkmark.shield")
                 }
                 .disabled(manager.actionInFlight || validatedCashuMintURL(paidRouteMintUrl) == nil)
             }

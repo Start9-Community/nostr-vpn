@@ -50,7 +50,7 @@ fn status_commands_do_not_migrate_legacy_config_or_create_sidecars() {
 }
 
 #[test]
-fn status_reports_fips_connections_while_vpn_is_paused() {
+fn status_only_reports_fips_connections_from_platform_runtime_state() {
     let dir = TestDir::new();
     let config_path = dir.path().join("config.toml");
     fs::write(
@@ -92,20 +92,33 @@ fn status_reports_fips_connections_while_vpn_is_paused() {
         String::from_utf8(output.stdout).expect("status is UTF-8")
     };
     let output: serde_json::Value = serde_json::from_str(&status(true)).unwrap();
-    assert_eq!(output["daemon"]["running"], true);
-    assert_eq!(
-        output["daemon"]["state"]["fips_direct_roster_peer_count"],
-        2
-    );
-    assert_eq!(output["daemon"]["state"]["fips_other_peer_count"], 3);
     assert_eq!(output["peer_count"], 0);
     assert_eq!(output["mesh_ready"], false);
     let text = status(false);
-    assert!(text.contains("vpn_status: Paused"), "{text}");
-    assert!(
-        text.contains("fips_peers: 5 connected (2 direct roster, 3 other)"),
-        "{text}"
-    );
+    if cfg!(target_os = "macos") {
+        // macOS status is root-owned; a fresh user-side snapshot cannot forge it.
+        assert_eq!(output["daemon"]["running"], false);
+        assert!(output["daemon"]["state"].is_null());
+        assert_ne!(output["daemon"]["state_file"], state_path.to_str().unwrap());
+        assert!(text.contains("daemon: stopped"), "{text}");
+        assert!(!text.lines().any(|line| line.starts_with("fips_peers:")));
+        assert_eq!(
+            fs::read(&state_path).unwrap(),
+            serde_json::to_vec(&state).unwrap()
+        );
+    } else {
+        assert_eq!(output["daemon"]["running"], true);
+        assert_eq!(
+            output["daemon"]["state"]["fips_direct_roster_peer_count"],
+            2
+        );
+        assert_eq!(output["daemon"]["state"]["fips_other_peer_count"], 3);
+        assert!(text.contains("vpn_status: Paused"), "{text}");
+        assert!(
+            text.contains("fips_peers: 5 connected (2 direct roster, 3 other)"),
+            "{text}"
+        );
+    }
 
     state["updated_at"] = 0.into();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();

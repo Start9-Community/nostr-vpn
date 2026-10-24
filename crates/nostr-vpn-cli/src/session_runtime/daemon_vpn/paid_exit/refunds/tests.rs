@@ -15,13 +15,8 @@
 
     impl TestDirectory {
         fn new() -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "nvpn-paid-exit-refund-worker-{}-{nonce}",
-                std::process::id()
+                "nvpn-paid-exit-refund-worker-{}", uuid::Uuid::new_v4()
             ));
             fs::create_dir_all(&path).expect("create refund worker test directory");
             Self(path)
@@ -142,7 +137,7 @@
             PaidRouteLifecycleStatus::Closed,
         ));
         store.upsert_channel(channel(
-            "active",
+            "expired-active",
             PaidRouteChannelRole::Buyer,
             PaidRouteLifecycleStatus::Active,
         ));
@@ -152,9 +147,18 @@
             PaidRouteLifecycleStatus::Closing,
         ));
 
+        store.upsert_channel(channel("failed", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Failed));
+        store.upsert_channel(channel("expired", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Expired));
+        let mut active = channel("active", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Active);
+        active.expires_at_unix = unix_timestamp() + 3600;
+        store.upsert_channel(active);
+        let mut unfunded = channel("unfunded", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Failed);
+        unfunded.payment.cashu_spilman_payment = None;
+        store.upsert_channel(unfunded);
+
         assert_eq!(
             paid_exit_buyer_refund_channel_ids(&store),
-            vec!["legacy-closed".to_string(), "pending".to_string()]
+            vec!["expired", "expired-active", "failed", "legacy-closed", "pending"]
         );
     }
 
@@ -228,7 +232,7 @@
             store.upsert_channel(channel("refund", PaidRouteChannelRole::Buyer, PaidRouteLifecycleStatus::Closing));
             // The shared cooldown has just expired. A refund must not grab
             // the store lock and renew that cooldown before funding can run.
-            store.defer_buyer_mint_retry(mint, now - 12, true, None)?;
+            store.defer_buyer_mint_retry(mint, now - 12, Some("Mint unavailable"), None)?;
             Ok(session)
         }).unwrap();
         let mut runtime = PaidExitBuyerRefundRuntime::new().unwrap();
@@ -298,7 +302,13 @@
                 .is_none()
         );
         assert_eq!(runtime.active_channel_id.as_deref(), Some(channel_id));
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Establish that the worker has finished before testing how a
+        // suppressed background tick reaps it. TLS setup need not fit 100 ms.
+        let finished = runtime.result_rx.recv_timeout(Duration::from_secs(2))
+            .expect("refund worker finished");
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        finished_tx.send(finished).unwrap();
+        runtime.result_rx = finished_rx;
         write_daemon_control_request(&config_path, DaemonControlRequest::Reload)
             .expect("queue daemon control request");
 
@@ -504,7 +514,7 @@
         let mut now = 1_900_000_000;
         for delay in [10, 20, 40, 80, 160, 320, 600, 600] {
             update_paid_route_store(&path, |store| {
-                store.defer_buyer_mint_retry(mint, now, true, None)
+                store.defer_buyer_mint_retry(mint, now, Some("Mint unavailable"), None)
             })
             .unwrap();
             let store = load_paid_route_store(&path).unwrap();
@@ -514,9 +524,9 @@
             now = deadline;
         }
         update_paid_route_store(&path, |store| {
-            store.defer_buyer_mint_retry(mint, now, true, Some(3600))?;
+            store.defer_buyer_mint_retry(mint, now, Some("Mint unavailable"), Some(3600))?;
             store.clear_buyer_mint_retry(mint, now + 1)?;
-            store.defer_buyer_mint_retry(mint, now + 2, false, None)
+            store.defer_buyer_mint_retry(mint, now + 2, None, None)
         })
         .unwrap();
         let store = load_paid_route_store(&path).unwrap();
@@ -527,7 +537,7 @@
         );
         now += 3601;
         update_paid_route_store(&path, |store| {
-            store.defer_buyer_mint_retry(mint, now, false, None)
+            store.defer_buyer_mint_retry(mint, now, None, None)
         })
         .unwrap();
         let store = load_paid_route_store(&path).unwrap();
@@ -536,10 +546,10 @@
             0,
             "healthy polling must allow funding"
         );
-        assert_eq!(store.buyer_mint_retry_at(mint), now + 11);
-        now += 11;
+        assert_eq!(store.buyer_mint_retry_at(mint), now + 61);
+        now += 61;
         update_paid_route_store(&path, |store| {
-            store.defer_buyer_mint_retry(mint, now, true, None)
+            store.defer_buyer_mint_retry(mint, now, Some("Mint unavailable"), None)
         })
         .unwrap();
         assert_eq!(
@@ -573,10 +583,10 @@
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
             });
-            let error = RefundMintConnection::new(&url)
-                .post_json::<_, serde_json::Value>("/v1/restore", &serde_json::json!({"outputs": []}))
-                .await
-                .unwrap_err();
+            let error = cashu_service::send_mint_request(
+                reqwest::Client::new().post(format!("{url}/v1/restore"))
+                    .json(&serde_json::json!({"outputs": []})),
+            ).await.and_then(cashu_service::check_mint_response).unwrap_err();
             let delay = error
                 .downcast_ref::<cashu_service::MintRetryAfter>()
                 .map(|delay| delay.0);

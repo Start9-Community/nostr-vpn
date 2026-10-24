@@ -1,0 +1,70 @@
+{
+  "catalog": "nostr-vpn",
+  "publisher": "npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm",
+  "source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-vpn",
+  "packages": [
+    {
+      "name": "nostr-vpn",
+      "target": "aarch64-apple-darwin",
+      "asset": "nostr-vpn-{tag}-macos-arm64.app.tar.gz",
+      "description": "Private mesh networking and VPN bandwidth sharing.",
+      "commands": {
+        "nostr-vpn": "Nostr VPN.app/Contents/MacOS/Nostr VPN"
+      },
+      "app": "Nostr VPN.app"
+    },
+    {
+      "name": "nostr-vpn",
+      "target": "x86_64-unknown-linux-gnu",
+      "asset": "nostr-vpn-{tag}-linux-x64.deb",
+      "description": "Private mesh networking and VPN bandwidth sharing.",
+      "commands": {
+        "nostr-vpn": "usr/bin/nostr-vpn"
+      },
+      "desktop": {
+        "name": "Nostr VPN",
+        "command": "nostr-vpn",
+        "icon": "usr/share/icons/hicolor/256x256/apps/nostr-vpn.png"
+      }
+    },
+    {
+      "name": "nvpn",
+      "target": "aarch64-apple-darwin",
+      "asset": "nvpn-{tag}-aarch64-apple-darwin.tar.gz",
+      "description": "Nostr VPN command-line client",
+      "commands": {
+        "nvpn": "nvpn"
+      },
+      "root": "nvpn"
+    },
+    {
+      "name": "nvpn",
+      "target": "x86_64-unknown-linux-gnu",
+      "asset": "nvpn-{tag}-x86_64-unknown-linux-musl.tar.gz",
+      "description": "Nostr VPN command-line client",
+      "commands": {
+        "nvpn": "nvpn"
+      },
+      "root": "nvpn"
+    },
+    {
+      "name": "nvpn",
+      "target": "aarch64-unknown-linux-gnu",
+      "asset": "nvpn-{tag}-aarch64-unknown-linux-musl.tar.gz",
+      "description": "Nostr VPN command-line client",
+      "commands": {
+        "nvpn": "nvpn"
+      },
+      "root": "nvpn"
+    },
+    {
+      "name": "nvpn",
+      "target": "x86_64-pc-windows-msvc",
+      "asset": "nvpn-{tag}-x86_64-pc-windows-msvc.zip",
+      "description": "Nostr VPN command-line client",
+      "commands": {
+        "nvpn": "nvpn.exe"
+      }
+    }
+  ]
+}

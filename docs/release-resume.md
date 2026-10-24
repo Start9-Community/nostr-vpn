@@ -45,6 +45,20 @@ still use the existing `--complete-gate-from-receipts` and
 `--reuse-gate-receipts` paths. An incomplete platform set is not accepted by those
 commands.
 
+## Resource-constrained release hosts
+
+Set `NVPN_RELEASE_GATE_SERIAL=1` when the allocated hosts cannot safely overlap
+release lanes. The same phases, checks, logs and artifact receipts run in order;
+this does not skip verification. Parallel execution remains the default.
+
+The canonical Linux VM bundle builder accepts optional positive integer
+`NVPN_HOST_LINUX_VM_BUILD_CPUS` and `NVPN_HOST_LINUX_VM_CARGO_JOBS` limits, plus
+`NVPN_HOST_LINUX_VM_BUILD_MEMORY` in bytes or with a `k`, `m` or `g` suffix.
+Both local Docker and remote native builds apply these limits. The memory limit
+also caps total memory plus swap at the same value, so it permits no extra swap.
+Keep host-specific values in the release process environment. These controls do
+not replace host/device reservations, free-space checks or isolated measurements.
+
 ## iPhone testing window
 
 Compile the signed test runner for the generic iOS destination. Selecting the
@@ -152,3 +166,17 @@ The native 4.1.12 release is accompanied by the Cargo-only 4.1.13 correction at
 publishes the maintained Cashu and Spilman packages explicitly; it does not
 replace the signed native artifacts or the App Store submission. Keep those
 publication results when resuming; do not repeat the 4.1.12 Cargo upload.
+
+
+### Haps distribution
+
+The final local release flow also publishes desktop/CLI packages using
+`haps-release.json` and the same verified `release.json` assets. Drafts do not
+publish Haps packages. Install Haps with the `import-release` subcommand and Python
+3.9+ on the publisher. Set `HAPS_KEY_FILE` to an existing secret-key file matching
+the public publisher pinned in the mapping (or provision the matching existing
+Haps identity). Never generate a new release identity. The flow verifies
+checksums and package layout before upload, then requires Nostr acknowledgement.
+A Haps failure fails the final release; byte-identical retries reuse the signed
+package versions. Iris Git, native updaters and Haps consume the same release
+artifacts; Android/iOS and native installer channels retain their existing gates.

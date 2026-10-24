@@ -122,21 +122,20 @@ If Metric Network Destination Gateway
     }
 
     #[test]
-    fn parses_windows_ipaddress_alias_from_verbose_netsh() {
-        let sample = "\
-Address 127.0.0.1 Parameters
----------------------------------------------------------
-Interface Luid     : Loopback Pseudo-Interface 1
-
-Address 192.0.2.147 Parameters
----------------------------------------------------------
-Interface Luid     : Ethernet
-Scope Id           : 0.0
-";
-        assert_eq!(
-            parse_windows_ipaddresses_interface(sample, "192.0.2.147".parse().expect("ip")),
-            Some(WindowsAddressInterface::Alias("Ethernet".to_string()))
-        );
+    fn resolves_default_route_from_the_sampled_adapter_inventory() {
+        let mut physical = netdev::Interface::dummy();
+        physical.index = 11;
+        physical.ipv4 = vec!["192.0.2.147/24".parse().expect("physical address")];
+        let mut tunnel = netdev::Interface::dummy();
+        tunnel.index = 77;
+        tunnel.ipv4 = vec!["10.44.0.2/24".parse().expect("tunnel address")];
+        let output = "0.0.0.0 0.0.0.0 10.44.0.1 10.44.0.2 1\n\
+                      0.0.0.0 0.0.0.0 198.51.100.1 198.51.100.2 2\n\
+                      0.0.0.0 0.0.0.0 192.0.2.1 192.0.2.147 25";
+        let route = select_windows_default_route_from_output(output, &[77], &[tunnel, physical])
+            .expect("skip tunnel and address removed during sampling");
+        assert_eq!(route, windows_underlay(11, "192.0.2.1", "192.0.2.147"));
+        assert!(select_windows_default_route_from_output(output, &[], &[]).is_err());
     }
 
     #[test]

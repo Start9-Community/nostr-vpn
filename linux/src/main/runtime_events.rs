@@ -1,50 +1,3 @@
-fn refresh_now(app: &AppRef) {
-    let (core, previous_state) = {
-        let model = app.borrow();
-        (model.core.clone(), model.state.clone())
-    };
-    let state = core.refresh();
-    let should_render = state_needs_render(&previous_state, &state);
-    set_state(app, state);
-    let render_pending = app.borrow().render_pending;
-    if should_render || render_pending {
-        let editing = gtk::prelude::GtkWindowExt::focus(&app.borrow().window)
-            .is_some_and(|widget| widget.is::<gtk::Entry>() || widget.is::<gtk::TextView>());
-        if editing {
-            app.borrow_mut().render_pending = true;
-            return;
-        }
-        render(app);
-    }
-}
-
-fn dispatch(app: &AppRef, action: NativeAppAction) -> NativeAppState {
-    let settle_service = matches!(
-        &action,
-        NativeAppAction::InstallSystemService
-            | NativeAppAction::UninstallSystemService
-            | NativeAppAction::EnableSystemService
-            | NativeAppAction::DisableSystemService
-    );
-    if let NativeAppAction::UpdateSettings { patch } = &action {
-        if let Some(enabled) = patch.launch_on_startup {
-            if let Err(error) = configure_launch_on_startup(enabled) {
-                set_notice(app, error);
-                return app.borrow().state.clone();
-            }
-        }
-    }
-    let core = app.borrow().core.clone();
-    let state = core.dispatch(action);
-    let result = state.clone();
-    set_state(app, state);
-    render(app);
-    if settle_service {
-        start_service_settlement_polling(app);
-    }
-    result
-}
-
 fn sync_launch_on_startup_setting(app: &AppRef) {
     let enabled = {
         let model = app.borrow();
@@ -80,6 +33,14 @@ fn drain_tray_commands(app: &AppRef) {
 
     let commands = app.borrow_mut().tray.drain();
     for command in commands {
+        if !app.borrow().core_ready
+            && !matches!(
+                &command,
+                tray::TrayCommand::ShowWindow | tray::TrayCommand::Quit
+            )
+        {
+            continue;
+        }
         match command {
             tray::TrayCommand::ShowWindow => show_window(app),
             tray::TrayCommand::ToggleVpn => {
@@ -139,7 +100,7 @@ fn drain_tray_commands(app: &AppRef) {
 fn check_updates(app: &AppRef, manual: bool) {
     let (current_version, config_path, sender) = {
         let mut model = app.borrow_mut();
-        if model.update.checking || model.update.downloading {
+        if !model.core_ready || model.update.checking || model.update.downloading {
             return;
         }
         if manual {
@@ -164,6 +125,9 @@ fn check_updates(app: &AppRef, manual: bool) {
 fn check_updates_if_due(app: &AppRef) {
     let due = {
         let mut model = app.borrow_mut();
+        if !model.core_ready {
+            return;
+        }
         model.update_policy.should_start_check(true, Instant::now())
     };
     if due {
@@ -174,11 +138,15 @@ fn check_updates_if_due(app: &AppRef) {
 fn download_update(app: &AppRef) {
     let (asset, config_path, sender) = {
         let mut model = app.borrow_mut();
-        if model.update.checking || model.update.downloading {
+        if model.update.checking
+            || model.update.downloading
+            || model.update.downloaded_path().is_some()
+        {
             return;
         }
         let Some(asset) = model.update.asset.clone() else {
             model.update.status = "No Linux update asset found".to_string();
+            drop(model);
             render(app);
             return;
         };
@@ -192,6 +160,23 @@ fn download_update(app: &AppRef) {
     };
     render(app);
     updater::download(asset, config_path, sender);
+}
+
+fn show_or_download_update(app: &AppRef) {
+    let downloaded = app.borrow().update.downloaded_path().map(PathBuf::from);
+    let Some(path) = downloaded else {
+        download_update(app);
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let uri = gio::File::for_path(parent).uri();
+        if let Err(error) =
+            gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>)
+        {
+            app.borrow_mut().update.status = format!("Could not show downloaded update: {error}");
+            render(app);
+        }
+    }
 }
 
 fn drain_update_events(app: &AppRef) {
@@ -218,9 +203,11 @@ fn drain_update_events(app: &AppRef) {
                             if check.newer {
                                 model.update.status = if !check.verified {
                                     format!(
-                                        "Update {} found from unverified {}; install disabled",
+                                        "Update {} found from unverified {}; download disabled",
                                         check.tag, check.source
                                     )
+                                } else if model.update.downloaded_path().is_some() {
+                                    format!("Update {} downloaded; ready to install", check.tag)
                                 } else if model.update.asset.is_some() {
                                     format!("Update {} available", check.tag)
                                 } else {
@@ -229,8 +216,7 @@ fn drain_update_events(app: &AppRef) {
                                         check.tag
                                     )
                                 };
-                                auto_download =
-                                    model.update.auto_install && model.update.asset.is_some();
+                                auto_download = model.update.should_auto_download();
                             } else if manual {
                                 model.update.status = "Up to date".to_string();
                             } else {
@@ -249,13 +235,17 @@ fn drain_update_events(app: &AppRef) {
                 updater::UpdateEvent::Downloaded(result) => {
                     model.update.downloading = false;
                     match result {
-                        Ok(path) => {
+                        Ok(download) => {
                             model.update.status = format!(
-                                "Downloaded {}",
-                                path.file_name()
+                                "Downloaded {}; open the download folder to install it",
+                                download
+                                    .path
+                                    .file_name()
                                     .and_then(|name| name.to_str())
                                     .unwrap_or("update")
                             );
+                            model.update.downloaded = Some(download);
+                            save_update_preferences(&mut model.update);
                         }
                         Err(error) => {
                             model.update.status = error;
@@ -364,6 +354,9 @@ fn drain_pending_urls(runtime: &AppRuntime) {
     let Some(app) = runtime.model.borrow().clone() else {
         return;
     };
+    if !app.borrow().core_ready {
+        return;
+    }
     let urls: Vec<String> = runtime.pending_urls.borrow_mut().drain(..).collect();
     for url in urls {
         handle_deep_link(&app, &url);

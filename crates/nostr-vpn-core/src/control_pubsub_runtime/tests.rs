@@ -2,6 +2,12 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::{NostrPubsubConfig, NostrPubsubMode};
+#[cfg(feature = "paid-exit")]
+use crate::paid_routes::{
+    PaidExitConfig, SignedPaidRouteOffer, signed_paid_exit_offer_from_config,
+};
+use crate::updater::UpdateRef;
 use fips_core::PeerIdentity;
 use fips_endpoint::{
     Config, NostrPeerfindingSource, PeerConfig, RoutingMode, TransportInstances, UdpConfig,
@@ -9,17 +15,25 @@ use fips_endpoint::{
 };
 use nostr_pubsub::MeshPeer;
 use nostr_sdk::prelude::{EventBuilder, EventId, Keys, Kind, Tag, TagKind, Timestamp, ToBech32};
+#[cfg(feature = "paid-exit")]
 use nostr_social_graph::Rating;
+#[cfg(feature = "paid-exit")]
 use nostr_social_memory::RatingEventExt;
-use nostr_vpn_core::config::{NostrPubsubConfig, NostrPubsubMode};
-use nostr_vpn_core::paid_routes::{
-    PaidExitConfig, SignedPaidRouteOffer, signed_paid_exit_offer_from_config,
-};
-use nostr_vpn_core::updater::UpdateRef;
 
 use super::*;
 
+#[path = "tests/persistence.rs"]
+mod persistence;
+
 const FIPS_TEST_EVENTUAL_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn peer_rating_filter(owner: &Keys) -> Filter {
+    nostr_pubsub_social_graph::PeerReputation::new(&owner.public_key().to_hex(), Default::default())
+        .unwrap()
+        .0
+        .rating_filter()
+        .unwrap()
+}
 
 fn available_udp_ports() -> [u16; 3] {
     let sockets = (0..3)
@@ -145,7 +159,7 @@ async fn start_pubsub(
         None,
         None,
         Some(update_events),
-        &[],
+        relay_advert_filters(None, &[]),
     )
     .await
     .expect("start FIPS pubsub")
@@ -225,9 +239,16 @@ fn relay_subscriptions_bound_retained_replay() {
     let target = Keys::generate().public_key();
     let update_events = update_events(&publisher, "releases/bounded-relay-replay");
 
-    let filters = relay_subscription_filters(&update_events, &[target]);
+    let filters = relay_subscription_filters(
+        &peer_rating_filter(&publisher),
+        &update_events,
+        relay_advert_filters(Some("fips-overlay-v1"), &[target.to_hex()]),
+    );
 
-    assert_eq!(filters.len(), 5);
+    assert_eq!(
+        filters.len(),
+        if cfg!(feature = "paid-exit") { 6 } else { 4 }
+    );
     assert!(
         filters.iter().all(|filter| filter.limit.is_some()),
         "every public-relay subscription must bound retained replay"
@@ -238,6 +259,7 @@ fn relay_subscriptions_bound_retained_replay() {
     );
     for kind in [
         FIPS_PEER_ADVERT_KIND,
+        #[cfg(feature = "paid-exit")]
         PAID_EXIT_OFFER_KIND,
         RATING_FACT_KIND,
     ] {
@@ -245,7 +267,7 @@ fn relay_subscriptions_bound_retained_replay() {
             filter
                 .kinds
                 .as_ref()
-                .is_some_and(|kinds| kinds.len() == 1 && kinds.contains(&Kind::Custom(kind)))
+                .is_some_and(|kinds| kinds.contains(&Kind::Custom(kind)))
         }));
     }
 }
@@ -262,22 +284,138 @@ fn fips_advert_refreshes_at_half_its_signed_lifetime() {
     assert_eq!(fips_advert_refresh_delay(&event), Duration::from_secs(60));
 }
 
+#[tokio::test]
+async fn fips_advert_retries_back_off_and_stop_after_partial_publication() {
+    use futures_util::StreamExt;
+    use nostr_sdk::{ClientMessage, JsonUtil};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local relay");
+    let url = format!("ws://{}", listener.local_addr().expect("relay address"));
+    let (events_tx, mut events_rx) = mpsc::channel(8);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept relay connection");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("accept relay websocket");
+        while let Some(Ok(message)) = socket.next().await {
+            if let Ok(ClientMessage::Event(event)) = ClientMessage::from_json(message.into_data()) {
+                events_tx
+                    .send(event.into_owned())
+                    .await
+                    .expect("record event");
+            }
+        }
+    });
+    let relay = Arc::new(
+        RelayEventBus::new([url.clone()], Duration::from_secs(2))
+            .await
+            .expect("start relay provider"),
+    );
+    relay
+        .client()
+        .wait_for_connection(Duration::from_secs(2))
+        .await;
+    // A disconnected provider exercises the real router's partial-success report.
+    let failed = Arc::new(
+        RelayEventBus::with_client(Client::default(), [url.clone()], Duration::from_secs(2))
+            .await
+            .expect("start failing provider"),
+    );
+    failed.client().shutdown().await;
+
+    let mut config = Config::new();
+    config.transports.websocket = TransportInstances::Single(WebSocketConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        public_url: Some("wss://peer.example/fips".to_string()),
+        ..WebSocketConfig::default()
+    });
+    config.node.discovery.nostr.enabled = true;
+    config.node.discovery.nostr.advertise = true;
+    config.node.discovery.nostr.peerfinding_source = NostrPeerfindingSource::External;
+    config.node.discovery.nostr.advert_relays.clear();
+    config.node.discovery.nostr.stun_servers.clear();
+    let endpoint = endpoint(&Keys::generate(), config).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if endpoint
+                .local_nostr_discovery_advert_event()
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("local announcement ready");
+    let policy = FipsPubsubPolicy::new(
+        Arc::clone(&endpoint),
+        std::iter::empty::<&Event>(),
+        FipsPubsubPolicyOptions::default(),
+    )
+    .expect("pubsub policy");
+    let unavailable = NostrPubsubRouter::new(policy.event_policy()).with_publish_source(
+        RouterPublishSource::new(SourceRoute::relay("failed"), Arc::clone(&failed)),
+    );
+    let router = NostrPubsubRouter::new(policy.event_policy())
+        .with_publish_source(RouterPublishSource::new(
+            SourceRoute::relay("failed"),
+            failed,
+        ))
+        .with_publish_source(RouterPublishSource::new(
+            SourceRoute::relay(url),
+            Arc::clone(&relay),
+        ));
+
+    let mut retry_delay = FIPS_ADVERT_RETRY_INITIAL;
+    for seconds in [1, 2, 4, 8, 16, 32, 60, 60] {
+        assert_eq!(
+            publish_local_fips_advert(&endpoint, &unavailable, &mut retry_delay).await,
+            Duration::from_secs(seconds),
+            "failed publication backs off to a bounded retry interval",
+        );
+    }
+    let refresh = publish_local_fips_advert(&endpoint, &router, &mut retry_delay).await;
+    let event = tokio::time::timeout(Duration::from_secs(2), events_rx.recv())
+        .await
+        .expect("announcement reaches healthy relay")
+        .expect("relay event");
+    assert_eq!(event.kind, Kind::Custom(FIPS_PEER_ADVERT_KIND));
+    assert_eq!(refresh, fips_advert_refresh_delay(&event));
+    assert_eq!(
+        publish_local_fips_advert(&endpoint, &unavailable, &mut retry_delay).await,
+        FIPS_ADVERT_RETRY_INITIAL,
+        "successful publication resets backoff for a later outage",
+    );
+
+    relay.client().shutdown().await;
+    endpoint.shutdown().await.expect("stop endpoint");
+    server.await.expect("stop local relay");
+}
+
 #[test]
 fn standard_fips_pubsub_bounds_retained_replay() {
     let publisher = Keys::generate();
     let update_events = update_events(&publisher, "releases/bounded-fips-replay");
     let options = fips_pubsub_options(CONTROL_PUBSUB_MAX_EVENT_BYTES, 4);
-    let filters = fips_subscription_filters(&update_events);
+    let filters = fips_subscription_filters(&peer_rating_filter(&publisher), &update_events);
 
     assert_eq!(options.max_replay_events, FIPS_REPLAY_LIMIT);
-    assert_eq!(filters.len(), 2);
     assert_eq!(
-        filters[0].kinds.as_ref(),
-        Some(&control_kinds().into_iter().collect())
+        filters.len(),
+        if cfg!(feature = "paid-exit") { 4 } else { 2 }
     );
+    assert_eq!(filters[0].authors, peer_rating_filter(&publisher).authors);
+    assert!(filters.len() <= options.max_filters_per_subscription);
     let update = signed_update_root(&publisher, "releases/bounded-fips-replay", 1, "ab");
     assert!(
-        filters[1].match_event(&update, MatchEventOptions::new()),
+        filters
+            .iter()
+            .any(|filter| filter.match_event(&update, MatchEventOptions::new())),
         "configured hashtree updates must remain in the long-lived FIPS subscription"
     );
     assert!(
@@ -299,7 +437,7 @@ fn standard_fips_pubsub_bounds_retained_replay() {
         .iter()
         .map(|event| event.id)
         .collect::<Vec<_>>();
-    let replay_ids = bounded_fips_replay(stored)
+    let replay_ids = bounded_fips_replay(stored, &peer_rating_filter(&publisher))
         .into_iter()
         .map(|event| event.id)
         .collect::<Vec<_>>();
@@ -308,6 +446,7 @@ fn standard_fips_pubsub_bounds_retained_replay() {
 }
 
 #[test]
+#[cfg(feature = "paid-exit")]
 fn offers_ratings_and_updates_are_carried_p2p_without_relays() {
     run_async_test(
         "relayless-control-events",
@@ -315,6 +454,7 @@ fn offers_ratings_and_updates_are_carried_p2p_without_relays() {
     );
 }
 
+#[cfg(feature = "paid-exit")]
 async fn offers_ratings_and_updates_are_carried_p2p_without_relays_run() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
@@ -378,7 +518,7 @@ async fn offers_ratings_and_updates_are_carried_p2p_without_relays_run() {
         0,
         100,
     );
-    rating.scope = Some("fips.peer".to_string());
+    rating.scope = Some(crate::paid_route_ratings::EXIT_RATING_SCOPE.to_string());
     let rating = rating.to_event(&buyer).expect("signed rating event");
     assert!(
         buyer_pubsub
@@ -404,6 +544,7 @@ async fn offers_ratings_and_updates_are_carried_p2p_without_relays_run() {
 }
 
 #[test]
+#[cfg(feature = "paid-exit")]
 fn retained_paid_exit_offer_replays_to_late_manual_provider_buyer_without_relays() {
     run_async_test(
         "late-manual-paid-provider",
@@ -411,6 +552,7 @@ fn retained_paid_exit_offer_replays_to_late_manual_provider_buyer_without_relays
     );
 }
 
+#[cfg(feature = "paid-exit")]
 async fn retained_paid_exit_offer_replays_to_late_buyer_run() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
@@ -485,6 +627,54 @@ fn existing_subscription_ignores_peer_arrival_and_link_churn() {
     assert!(should_create_fips_subscription(false, 11));
     assert!(!should_create_fips_subscription(true, 1));
     assert!(!should_create_fips_subscription(true, 11));
+}
+
+#[test]
+fn ended_fips_subscription_disables_notifications_until_maintenance() {
+    run_async_test("ended-fips-subscription", || async {
+        let keys = Keys::generate();
+        let endpoint = endpoint(&keys, endpoint_config(available_udp_ports()[0], &[])).await;
+        let client =
+            FipsPubsubClient::start(Arc::clone(&endpoint), FipsPubsubClientOptions::default())
+                .await
+                .unwrap();
+        let mut state = FipsSubscriptionState {
+            subscription: Some(
+                client
+                    .subscribe(vec![Filter::new().kind(Kind::TextNote)])
+                    .await
+                    .unwrap(),
+            ),
+            owner_subscription: Some(
+                client
+                    .subscribe(vec![exit_graph_filter(keys.public_key())])
+                    .await
+                    .unwrap(),
+            ),
+        };
+        client.shutdown_shared().await;
+        assert!(state.recv().await.is_none());
+        assert!(
+            state.subscription.is_some() || state.owner_subscription.is_some(),
+            "one EOF must preserve the other stream's admitted records"
+        );
+        assert!(state.recv().await.is_none());
+        assert!(
+            state.subscription.is_none() && state.owner_subscription.is_none(),
+            "each terminal handle is released after its own EOF"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), state.recv())
+                .await
+                .is_err(),
+            "missing subscriptions must not keep the select branch ready"
+        );
+        assert!(should_create_fips_subscription(
+            state.subscription.is_some(),
+            1
+        ));
+        endpoint.shutdown().await.unwrap();
+    });
 }
 
 #[test]
@@ -798,185 +988,4 @@ async fn control_pubsub_preserves_56k_event_limit_over_real_udp_fips_run() {
     bob_endpoint.shutdown().await.expect("shutdown Bob");
 }
 
-struct RejectAllPeers;
-
-impl MeshPeerPolicy for RejectAllPeers {
-    fn select_mesh_peer(&self, _peer_id: &str) -> nostr_pubsub::Result<Option<MeshPeer>> {
-        Ok(None)
-    }
-}
-
-#[test]
-fn peer_policy_rejects_events_from_authenticated_udp_fips_peer() {
-    run_async_test(
-        "policy-fips-pubsub",
-        peer_policy_rejects_events_from_authenticated_udp_fips_peer_run,
-    );
-}
-
-async fn peer_policy_rejects_events_from_authenticated_udp_fips_peer_run() {
-    let alice = Keys::generate();
-    let bob = Keys::generate();
-    let publisher = Keys::generate();
-    let alice_npub = alice.public_key().to_bech32().expect("Alice npub");
-    let bob_npub = bob.public_key().to_bech32().expect("Bob npub");
-    let [alice_port, bob_port, _] = available_udp_ports();
-    let alice_endpoint = endpoint(
-        &alice,
-        endpoint_config(alice_port, &[(&bob_npub, bob_port)]),
-    )
-    .await;
-    let bob_endpoint = endpoint(
-        &bob,
-        endpoint_config(bob_port, &[(&alice_npub, alice_port)]),
-    )
-    .await;
-    wait_connected(&alice_endpoint, &bob_npub).await;
-    wait_connected(&bob_endpoint, &alice_npub).await;
-
-    let tree_name = "releases/policy-test";
-    let update_events = update_events(&publisher, tree_name);
-    let alice_pubsub = start_pubsub(Arc::clone(&alice_endpoint), update_events.clone()).await;
-    let bob_pubsub = ControlPubsubFipsRuntime::start_inner(
-        Arc::clone(&bob_endpoint),
-        NostrPubsubConfig {
-            mode: NostrPubsubMode::Client,
-            fanout: 8,
-            max_hops: 4,
-            max_event_bytes: CONTROL_PUBSUB_MAX_EVENT_BYTES,
-        },
-        Vec::new(),
-        None,
-        Some(Arc::new(RejectAllPeers)),
-        Some(update_events),
-        &[],
-    )
-    .await
-    .expect("start policy-bound FIPS pubsub")
-    .expect("FIPS pubsub enabled");
-    wait_pubsub_transport_connected(&alice_pubsub).await;
-    let root = signed_update_root(&publisher, tree_name, 1, "66");
-    assert!(
-        alice_pubsub
-            .publish(root.clone())
-            .await
-            .expect("publish policy test event")
-    );
-    tokio::time::sleep(Duration::from_millis(750)).await;
-    assert!(
-        !bob_pubsub
-            .events()
-            .await
-            .iter()
-            .any(|event| event.id == root.id),
-        "peer policy must reject stream records after FIPS authentication"
-    );
-
-    alice_pubsub.stop().await;
-    bob_pubsub.stop().await;
-    alice_endpoint.shutdown().await.expect("shutdown Alice");
-    bob_endpoint.shutdown().await.expect("shutdown Bob");
-}
-
-#[test]
-fn restarted_pubsub_resubscribes_after_tcp_fips_connection_loss() {
-    run_async_test(
-        "restarted-fips-pubsub",
-        restarted_pubsub_resubscribes_after_connection_loss_run,
-    );
-}
-
-async fn restarted_pubsub_resubscribes_after_connection_loss_run() {
-    let alice = Keys::generate();
-    let bob = Keys::generate();
-    let publisher = Keys::generate();
-    let alice_npub = alice.public_key().to_bech32().expect("Alice npub");
-    let bob_npub = bob.public_key().to_bech32().expect("Bob npub");
-    let [alice_port, bob_port, _] = available_udp_ports();
-    let alice_config = endpoint_config(alice_port, &[(&bob_npub, bob_port)]);
-    let alice_endpoint = endpoint(&alice, alice_config.clone()).await;
-    let bob_endpoint = endpoint(
-        &bob,
-        endpoint_config(bob_port, &[(&alice_npub, alice_port)]),
-    )
-    .await;
-    wait_connected(&alice_endpoint, &bob_npub).await;
-    wait_connected(&bob_endpoint, &alice_npub).await;
-
-    let tree_name = "releases/reconnect-test";
-    let update_events = update_events(&publisher, tree_name);
-    let alice_pubsub = start_pubsub(Arc::clone(&alice_endpoint), update_events.clone()).await;
-    let bob_pubsub = start_pubsub(Arc::clone(&bob_endpoint), update_events.clone()).await;
-    wait_pubsub_connected(&bob_pubsub).await;
-    let first = signed_update_root(&publisher, tree_name, 1, "11");
-    assert!(
-        bob_pubsub
-            .publish(first.clone())
-            .await
-            .expect("publish first update root")
-    );
-    wait_for_event(&alice_pubsub, first.id).await;
-
-    alice_pubsub.stop().await;
-    alice_endpoint
-        .shutdown()
-        .await
-        .expect("stop Alice endpoint");
-    drop(alice_endpoint);
-    let restarted_alice_endpoint = endpoint(&alice, alice_config).await;
-    wait_connected(&restarted_alice_endpoint, &bob_npub).await;
-    wait_connected(&bob_endpoint, &alice_npub).await;
-    let restarted_alice = start_pubsub(Arc::clone(&restarted_alice_endpoint), update_events).await;
-    wait_pubsub_connected(&restarted_alice).await;
-    let second = signed_update_root(&publisher, tree_name, 2, "22");
-    assert!(
-        bob_pubsub
-            .publish(second.clone())
-            .await
-            .expect("publish across stale TCP/FIPS session")
-    );
-    wait_for_event(&restarted_alice, second.id).await;
-
-    bob_pubsub.stop().await;
-    restarted_alice.stop().await;
-    restarted_alice_endpoint
-        .shutdown()
-        .await
-        .expect("shutdown restarted Alice");
-    bob_endpoint.shutdown().await.expect("shutdown Bob");
-}
-
-fn signed_update_root(
-    publisher: &Keys,
-    tree_name: &str,
-    created_at: u64,
-    hash_byte: &str,
-) -> Event {
-    EventBuilder::new(Kind::Custom(30_064), "")
-        .tags([
-            Tag::identifier(tree_name),
-            Tag::custom(TagKind::Custom("l".into()), ["hashtree"]),
-            Tag::custom(TagKind::Custom("hash".into()), [hash_byte.repeat(32)]),
-        ])
-        .custom_created_at(Timestamp::from(created_at))
-        .sign_with_keys(publisher)
-        .expect("signed update root")
-}
-
-fn signed_update_root_with_content(
-    publisher: &Keys,
-    tree_name: &str,
-    created_at: u64,
-    hash_byte: &str,
-    content_bytes: usize,
-) -> Event {
-    EventBuilder::new(Kind::Custom(30_064), "x".repeat(content_bytes))
-        .tags([
-            Tag::identifier(tree_name),
-            Tag::custom(TagKind::Custom("l".into()), ["hashtree"]),
-            Tag::custom(TagKind::Custom("hash".into()), [hash_byte.repeat(32)]),
-        ])
-        .custom_created_at(Timestamp::from(created_at))
-        .sign_with_keys(publisher)
-        .expect("signed update root")
-}
+include!("tests_peer_policy.rs");

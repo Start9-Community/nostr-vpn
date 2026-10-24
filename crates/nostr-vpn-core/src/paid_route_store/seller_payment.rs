@@ -191,30 +191,66 @@ impl PaidRouteStore {
             now_unix: request.now_unix,
         };
 
-        let already_applied = self.channels.get(&channel_id).is_some_and(|channel| {
-            channel.offer_id == service_id
-                && normalize_paid_route_npub(&channel.counterparty_npub, "buyer")
-                    .is_ok_and(|counterparty| counterparty == buyer_npub)
-                && match &envelope.payload {
-                    StreamingRoutePaymentPayload::ChannelOpen(open) => {
-                        channel.payment.paid_msat == open.paid_msat
-                            && channel.payment.cashu_spilman_payment.as_ref() == Some(&open.payment)
+        let already_applied =
+            self.channels.get(&channel_id).is_some_and(|channel| {
+                channel.offer_id == service_id
+                    && normalize_paid_route_npub(&channel.counterparty_npub, "buyer")
+                        .is_ok_and(|counterparty| counterparty == buyer_npub)
+                    && match &envelope.payload {
+                        StreamingRoutePaymentPayload::ChannelOpen(open) => {
+                            channel.payment.paid_msat >= open.paid_msat
+                                && channel
+                                    .payment
+                                    .cashu_spilman_payment
+                                    .as_ref()
+                                    .is_some_and(|payment| payment.balance >= open.payment.balance)
+                        }
+                        StreamingRoutePaymentPayload::BalanceUpdate(update) => {
+                            channel.payment.paid_msat >= update.paid_msat
+                                && channel.payment.cashu_spilman_payment.as_ref().is_some_and(
+                                    |payment| payment.balance >= update.payment.balance,
+                                )
+                        }
+                        StreamingRoutePaymentPayload::CooperativeClose(close) => {
+                            channel.status == PaidRouteLifecycleStatus::Closing
+                                && channel.payment.paid_msat == close.final_paid_msat
+                                && channel.payment.cashu_spilman_payment.as_ref()
+                                    == Some(&close.payment)
+                        }
+                        StreamingRoutePaymentPayload::CashuTokenLease(_)
+                        | StreamingRoutePaymentPayload::CooperativeCloseAck(_) => false,
                     }
-                    StreamingRoutePaymentPayload::BalanceUpdate(update) => {
-                        channel.payment.paid_msat == update.paid_msat
-                            && channel.payment.cashu_spilman_payment.as_ref()
-                                == Some(&update.payment)
-                    }
-                    StreamingRoutePaymentPayload::CooperativeClose(close) => {
-                        channel.status == PaidRouteLifecycleStatus::Closing
-                            && channel.payment.paid_msat == close.final_paid_msat
-                            && channel.payment.cashu_spilman_payment.as_ref()
-                                == Some(&close.payment)
-                    }
-                    StreamingRoutePaymentPayload::CashuTokenLease(_)
-                    | StreamingRoutePaymentPayload::CooperativeCloseAck(_) => false,
+            });
+
+        if already_applied {
+            self.ensure_seller_lease_slot_available(
+                &service_id,
+                &lease_id,
+                &channel_id,
+                &buyer_npub,
+            )?;
+            // Lost ACKs and reordered cumulative payments must drain even after
+            // settlement. Validate the claim, but retain the stronger persisted
+            // payment and lifecycle; this never grants credit or reopens a route.
+            match &envelope.payload {
+                StreamingRoutePaymentPayload::ChannelOpen(open) => {
+                    validate_seller_open_payment(&config, &seller_pubkey_hex, &channel_id, open)?;
                 }
-        });
+                StreamingRoutePaymentPayload::BalanceUpdate(update) => {
+                    let channel = &self.channels[&channel_id];
+                    validate_streaming_route_cashu_payment_claim(
+                        &update.payment,
+                        &channel_id,
+                        &paid_route_payment_cashu_unit(&channel.payment),
+                        update.paid_msat,
+                        channel.payment.capacity_sat,
+                        false,
+                    )
+                    .map_err(|error| anyhow!("{error}"))?;
+                }
+                _ => {}
+            }
+        }
 
         if !already_applied {
             match &envelope.payload {
@@ -261,7 +297,7 @@ impl PaidRouteStore {
             .leases
             .get(&lease_id)
             .ok_or_else(|| anyhow!("paid route lease {lease_id} was not created"))?;
-        let expires_at_unix = channel.expires_at_unix.min(lease.lease.expires_at_unix);
+        let expires_at_unix = channel.routing_expires_at_unix(lease.lease.expires_at_unix);
         let lifecycle_allows = paid_route_lifecycle_allows_routing(channel.status)
             && paid_route_lifecycle_allows_routing(lease.status);
         let allow_routing =

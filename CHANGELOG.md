@@ -2,6 +2,112 @@
 
 All notable changes to this project are documented in this file.
 
+## 4.1.18 - 2026-10-19
+
+### Release notes
+
+This release improves peer discovery, network joining, and paid Internet
+connections. It also fixes signed update discovery and preserves existing
+settings and identities. iOS does not support paid exits.
+
+### Improved
+
+- Share peer and Internet-sharing discovery across desktop and mobile.
+- Discover signed updates through peers and nearby applications, retaining
+  verified release information between checks.
+- Explain paid-exit failures and switch to providers the wallet can pay.
+- Publish desktop and command-line packages through Haps.
+
+### Fixed
+
+- Let state-control transport sleep until incoming work or its next TCP deadline,
+  avoiding periodic idle polling while preserving delivery and connection timeouts.
+- Scope relay discovery queries to the configured application identifier.
+- Update Rustls to 0.23.46 to include the latest TLS security fixes.
+- Update Negentropy to reject malformed reconciliation messages before allocating memory.
+- Correct FIPS TCP transport handling for reliable peer connections.
+- Recover from transient network refresh failures without terminating the daemon,
+  preserving successful carrier rebinds and keeping status and control work available.
+- Recover through an authenticated fallback when the initial UDP handshake reply
+  is lost, then return to UDP when it becomes available.
+- Recover when the first WebRTC connection offer or reply is lost without
+  extending the original connection deadline.
+- Skip exhausted-hop events during peer replay so valid cached announcements
+  remain available without triggering malformed-frame cooldowns.
+- Keep joining devices pending until their signed network roster arrives,
+  and preserve accepted membership after relaunch.
+- Return to the device list after approving a device on Linux while its
+  confirmation is pending.
+- Keep the Linux window responsive while the backend starts or handles slow commands.
+- Remember Linux update downloads across restarts, select packages for the host
+  distribution and architecture, and open download folders only on request.
+- Show accepted payment mints on Linux and Android with explicit trust actions, and allow
+  free offers without a trusted mint.
+- Open pasted paid-exit provider links immediately on macOS.
+- Persist custom seller offer IDs and withdraw superseded listings.
+- Choose providers from live signed offers so stale listings do not create false
+  ambiguity.
+- Let provider links for sellers accepting several mints use the buyer's trusted mint.
+- Mark whether command-line seller offers are live and distinguish public server
+  connections from private peers.
+- Collect seller channels promptly after an accepted close request and before
+  buyer refund eligibility, retaining settlement retries.
+- Keep shared peer discovery available on iOS without including desktop
+  self-update code.
+- Batch received discovery-cache writes and reuse unchanged event encodings
+  to reduce background disk and CPU activity.
+- Keep networking responsive during durable discovery-cache writes.
+- Reuse verified relay events to avoid repeated cryptographic work.
+- Reuse successful discovery signature checks while rechecking event contents,
+  reducing repeated cryptographic work in the tunnel.
+- Reduce repeated discovery scans, reuse cryptographic contexts and packet
+  storage, and batch iOS UDP reads and writes to reduce per-packet work.
+- Avoid repeated processing when incoming packets are waiting for an outgoing
+  send, and preserve received packets whether that send succeeds or fails.
+- Preserve already-received packets when older queued traffic fills a processing
+  turn, preventing packet loss during reconnects.
+- Keep WebSocket control traffic moving when native packet traffic continuously
+  refills the receive queue.
+- Avoid timer wakeups while discovery is waiting for new events.
+- Reduce iOS tunnel wakeups with lightweight link and session reports and one async I/O
+  worker, retaining the separate cryptographic worker pool.
+- Keep iPhones reachable without forwarding unrelated mesh traffic when their
+  connected peers support client-only routing; preserve compatibility with older peers.
+- Show whether the iPhone is using client-only routing or compatibility with
+  older peers in Diagnostics.
+- Keep the iPhone VPN stopped after switching it off, including when iOS is
+  recovering from a tunnel failure.
+- Wake for new join approvals on Apple devices instead of repeatedly scanning
+  an unchanged directory.
+- Schedule TCP work at its actual deadlines and finish selected receive batches
+  before handling another command or timer.
+- Request machine ratings only from the local reputation authority while
+  preserving paid-exit feedback and signed contact/mute recovery.
+- Bound mint polling and share request cooldowns across wallet and channel work.
+- Preserve malformed legacy refunds without counting them as spendable funds.
+- Keep independently selected paid Internet, secure DNS, and connection protection
+  available while private-network membership is pending.
+- Preserve private DNS settings while sharing Internet access through a private exit.
+- Preserve the saved connection-protection choice when reselecting or rating
+  an Internet provider, and keep newer settings when pausing or resuming the VPN.
+- Prevent old payment retries from blocking newer Internet purchases, and
+  acknowledge payments already covered by the seller's saved balance.
+- Recover unspent funds from expired payment channels and resume refunds safely
+  after interrupted mint responses or wallet imports.
+- Bind paid-exit measurements to the selected tunnel and reject results when
+  the active exit changes during a probe.
+- Stop retrying payments for unfunded sessions and retire expired free trials
+  without contacting the mint.
+- Use a maintained YAML parser for mesh and payment-host configuration.
+- Update the QUIC dependency to fix peer-triggered crashes and unbounded memory use.
+- Avoid redundant iOS tunnel resets when network-path notifications are unchanged.
+- Protect macOS background-service PID and runtime-state files against unsafe
+  paths and permissions.
+- Keep Linux connection protection active during tunnel loss, service restarts,
+  and pause transitions, including traffic from Internet-sharing clients.
+- Keep mesh transport and discovery connections working when VPN routes and
+  connection protection are active.
+
 ## 4.1.17 - 2026-09-27
 
 ### Release notes

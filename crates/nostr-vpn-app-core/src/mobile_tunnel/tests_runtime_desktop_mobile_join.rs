@@ -192,11 +192,22 @@
                 .enable_all()
                 .build()
                 .expect("mobile/desktop join runtime")
-                .block_on(mobile_admin_to_desktop_joiner(false));
+                .block_on(mobile_admin_to_desktop_joiner(false, false));
         });
     }
 
-    async fn mobile_admin_to_desktop_joiner(routed: bool) {
+    #[test]
+    fn desktop_mobile_manual_join_mobile_admin_publishes_after_tunnel_start() {
+        run_desktop_mobile_join_test("mobile-admin-late-approval", || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("mobile/desktop join runtime")
+                .block_on(mobile_admin_to_desktop_joiner(false, true));
+        });
+    }
+
+    async fn mobile_admin_to_desktop_joiner(routed: bool, publish_after_start: bool) {
         let dir = desktop_mobile_join_test_dir("mobile-admin-desktop-joiner");
         let mobile_config_path = dir.join("mobile-config.toml");
         let desktop_config_path = dir.join("desktop-config.toml");
@@ -207,12 +218,13 @@
             .save(&desktop_config_path)
             .expect("save desktop joiner config");
         let joiner_pubkey = joiner_app.own_nostr_pubkey_hex().expect("desktop pubkey");
-        let outbox_path = nostr_vpn_core::join_delivery::queue_join_roster(
+        let publish = || nostr_vpn_core::join_delivery::queue_join_roster(
             &mobile_config_path,
             &joiner_pubkey,
             &queued.join_roster,
         )
         .expect("queue mobile admin join roster");
+        let mut outbox_path = (!publish_after_start).then(publish);
         let mut mobile_config =
             MobileTunnelConfig::from_app_with_config_path(&admin_app, &mobile_config_path)
                 .expect("mobile admin tunnel config");
@@ -235,6 +247,14 @@
         ))
         .await
         .expect("start mobile admin");
+
+        if publish_after_start {
+            // Let the empty startup scan finish before publishing to the
+            // already running tunnel's shared on-disk outbox.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            outbox_path = Some(publish());
+        }
+        let outbox_path = outbox_path.expect("published mobile admin roster");
 
         let received = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -373,7 +393,7 @@
                 .enable_all()
                 .build()
                 .expect("routed mobile/desktop runtime")
-                .block_on(mobile_admin_to_desktop_joiner(true));
+                .block_on(mobile_admin_to_desktop_joiner(true, false));
         });
     }
 

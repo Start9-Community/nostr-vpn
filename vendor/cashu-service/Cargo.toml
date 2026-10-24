@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "nvpn-cashu-service"
-version = "0.4.8"
+version = "0.4.9"
 authors = ["Martti Malmi"]
 build = false
 autolib = false
@@ -67,6 +67,7 @@ spilman-configurable-host = [
 spilman-configurable-host-reqwest = [
     "spilman-configurable-host",
     "cdk-spilman/configurable-host-reqwest",
+    "dep:reqwest",
 ]
 spilman-wallet = [
     "spilman",
@@ -78,7 +79,7 @@ spilman-wallet-http = [
     "spilman-wallet",
     "dep:cashu",
     "dep:reqwest",
-    "dep:httpdate",
+    "cdk-spilman/mint-http",
 ]
 wallet = [
     "dep:cdk",
@@ -89,6 +90,7 @@ wallet = [
     "dep:hex",
     "dep:uuid",
 ]
+wallet-proxy = ["wallet", "dep:cdk-http-client"]
 
 [lib]
 name = "cashu_service"
@@ -138,6 +140,13 @@ optional = true
 default-features = false
 package = "cdk"
 
+# Opt into CDK's SOCKS-capable backend for explicit wallet control connections.
+[dependencies.cdk-http-client]
+version = "=0.18.0"
+features = ["reqwest"]
+optional = true
+default-features = false
+
 [dependencies.cdk-axum]
 version = "=0.18.0"
 optional = true
@@ -152,7 +161,7 @@ package = "cdk-common"
 
 [dependencies.cdk-spilman]
 package = "nvpn-cdk-spilman"
-version = "=0.17.6"
+version = "=0.17.7"
 path = "../cdk-spilman"
 optional = true
 default-features = false
@@ -189,6 +198,7 @@ version = "0.12"
 features = [
     "rustls-tls",
     "json",
+    "socks",
 ]
 optional = true
 default-features = false
@@ -253,7 +263,7 @@ path = "tests/spilman_receiver_safety.rs"
 name = "spilman_channel_capacity"
 path = "tests/spilman_channel_capacity.rs"
 
-
-[dependencies.httpdate]
-version = "1"
-optional = true
+[[test]]
+name = "mint_request_budget"
+path = "tests/mint_request_budget.rs"
+required-features = ["wallet"]

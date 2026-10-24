@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
-use super::{ensure_sat_wallet, normalize_mint_url, CashuWalletService};
+use super::{ensure_sat_wallet, hold_legacy_refunds, normalize_mint_url, CashuWalletService};
 
 const K_WALLET_NAMESPACE: &str = "iris_wallet";
 const K_CROSS_MINT_TRANSFER_NAMESPACE: &str = "cross_mint_transfer";
@@ -242,6 +242,8 @@ async fn transfer_between_wallets_with_start(
         .recover_incomplete_sagas()
         .await
         .context("Failed to recover destination mint wallet state")?;
+    hold_legacy_refunds(source_wallet).await?;
+    hold_legacy_refunds(destination_wallet).await?;
 
     let mut saga = match load_cross_mint_transfer_saga(source_wallet, &request.transfer_id).await? {
         Some(saga) => {

@@ -195,6 +195,15 @@ fn fips_endpoint_config_for_platform(
     platform: RuntimePlatform,
 ) -> FipsConfig {
     let mut config = FipsConfig::new();
+    if platform == RuntimePlatform::Ios {
+        // Supporting neighbors keep the phone reachable without using it for
+        // unrelated mesh transit. FIPS preserves routing with older neighbors.
+        config.node.leaf_only = true;
+        // Receiver reports retain link and session health with less idle
+        // reporting work on a phone.
+        config.node.mmp.mode = fips_core::mmp::MmpMode::Lightweight;
+        config.node.session_mmp.mode = fips_core::mmp::MmpMode::Lightweight;
+    }
     // A first-adjacency seed may authenticate before its tree/bloom adverts
     // have converged. Reply-learned discovery can ask that live adjacency for
     // an addressless roster peer immediately instead of recording a bloom
@@ -234,6 +243,8 @@ fn fips_endpoint_config_for_platform(
         || !mobile.bootstrap_peers.is_empty();
     let nostr_enabled = mobile_nostr_enabled(mobile);
     config.node.discovery.nostr.enabled = nostr_enabled;
+    config.node.discovery.nostr.peerfinding_source = fips_endpoint::NostrPeerfindingSource::External;
+    config.node.discovery.nostr.advert_relays.clear();
     // Publish only the generic `udp:nat` overlay advert so roster peers can
     // bootstrap encrypted traversal offers to mobile nodes. LAN addresses are
     // not placed in that public advert; when enabled, they are carried inside
@@ -258,27 +269,22 @@ fn fips_endpoint_config_for_platform(
     config.node.discovery.nostr.failure_streak_threshold = MOBILE_NOSTR_FAILURE_STREAK_THRESHOLD;
     config.node.discovery.nostr.startup_sweep_max_age_secs = FIPS_NOSTR_STARTUP_SWEEP_MAX_AGE_SECS;
     config.node.discovery.nostr.share_local_candidates = mobile.share_local_candidates;
-    // iOS requires Apple's managed multicast entitlement for raw mDNS. Our
-    // packet-tunnel profiles do not carry it, so keep LAN candidates available
-    // to encrypted Nostr traversal while leaving the multicast daemon closed.
-    // Packet-tunnel extensions may still use ordinary local unicast traffic.
+    // iOS supplies Bonjour candidates through its native DNS-SD adapter;
+    // raw multicast requires a separate managed entitlement there.
     config.node.discovery.lan.enabled = mobile.share_local_candidates
         && nostr_enabled
         && platform != RuntimePlatform::Ios;
+    // Joining devices do not know the private network ID yet. Discovery is
+    // application-scoped; roster admission and Noise still authenticate peers.
+    config.node.discovery.lan.scope = Some(
+        nostr_vpn_core::fips_discovery::FIPS_LAN_DISCOVERY_SCOPE_PREFIX.to_string(),
+    );
     // Leave the relay-side `app` at fips-core's default ("fips-overlay-v1");
     // see fips_private_mesh::fips_endpoint_config for the rationale (the relay
     // `protocol` tag is publicly visible, so per-network apps would let any
     // observer count members of each private network). The mesh id is still
     // used as the LAN `discovery_scope` and inside FIPS handshake payloads.
     let _ = scope;
-    if !mobile.nostr_relays.is_empty() {
-        config
-            .node
-            .discovery
-            .nostr
-            .advert_relays
-            .clone_from(&mobile.nostr_relays);
-    }
     if !mobile.stun_servers.is_empty() {
         config
             .node
@@ -689,6 +695,9 @@ mod endpoint_config_tests {
         let config =
             fips_endpoint_config_for_platform("nostr-vpn:test", &mobile, RuntimePlatform::Ios);
 
+        assert_eq!(config.node.mmp.mode, fips_core::mmp::MmpMode::Lightweight);
+        assert_eq!(config.node.session_mmp.mode, fips_core::mmp::MmpMode::Lightweight);
+        assert!(config.node.leaf_only);
         assert!(config.node.discovery.nostr.enabled);
         assert!(
             config.node.discovery.nostr.share_local_candidates,

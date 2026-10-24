@@ -52,7 +52,9 @@ sync_repo() {
     sync_commit="$(make_sync_commit "$local_repo")"
   fi
   GIT_SSH_COMMAND="ssh -o BatchMode=yes" \
-    git -C "$local_repo" push --force \
+    git -C "$local_repo" \
+      -c pack.threads=1 -c pack.windowMemory=32m -c pack.deltaCacheSize=32m \
+      push --force \
       --receive-pack=/usr/bin/git-receive-pack \
       "$SSH_HOST:$guest_bare" "$sync_commit:$REMOTE_REF"
   ssh -o BatchMode=yes "$SSH_HOST" "

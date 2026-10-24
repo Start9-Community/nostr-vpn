@@ -1,4 +1,5 @@
     include!("tests_network/exit_state.rs");
+    include!("tests_network/join_confirmation.rs");
 
     #[test]
     fn native_state_reports_routed_fips_peer_latency() {
@@ -259,7 +260,7 @@
             admin.config.own_nostr_pubkey_hex().unwrap()
         );
         assert!(admin.config.networks[0].devices.contains(&joiner_pubkey));
-        assert!(admin.config.networks[0].inbound_join_requests.is_empty());
+        assert_eq!(admin.config.networks[0].inbound_join_requests, [] as [nostr_vpn_core::config::PendingInboundJoinRequest; 0]);
         assert_eq!(
             admin.config.peer_alias(&joiner_pubkey).as_deref(),
             Some("pixel-phone")
@@ -270,7 +271,7 @@
             .into_iter()
             .find(|network| network.id == admin_network_id)
             .expect("admin network");
-        assert!(imported.inbound_join_requests.is_empty());
+        assert_eq!(imported.inbound_join_requests, [] as [crate::native_state::NativeInboundJoinRequestState; 0]);
         assert!(imported
             .join_request_qr_code_or_link
             .starts_with("nvpn://join-request/"));
@@ -371,7 +372,7 @@
         assert_eq!(network.devices, vec![admin_hex.clone()]);
         assert_eq!(network.admins, vec![admin_hex.clone()]);
         assert_eq!(network.join_request_admin, admin_hex);
-        assert!(!network.join_secret.is_empty());
+        assert_ne!(network.join_secret, "");
         assert!(network.outbound_join_request.is_none());
         assert!(runtime.vpn_enabled);
         let state = runtime.state();
@@ -598,7 +599,7 @@ exit 0
             admin.last_error
         );
         assert!(!admin.config.networks[0].devices.contains(&joiner_pubkey));
-        assert!(admin.queued_join_rosters.is_empty());
+        assert_eq!(admin.queued_join_rosters, [] as [nostr_vpn_core::fips_control::JoinRosterControl; 0]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -665,6 +666,7 @@ exit 0
         runtime.mobile_runtime = true;
         runtime.config_path = dir.join("config.toml");
         create_test_network(&mut runtime, "Home");
+        create_test_network(&mut runtime, "Work");
         runtime
             .config
             .save(&runtime.config_path)
@@ -672,9 +674,24 @@ exit 0
 
         let state = runtime.state();
         assert!(state.join_request_qr_code_or_link.starts_with("nvpn://join-request/"));
-        assert!(state.networks[0]
-            .join_request_qr_code_or_link
-            .starts_with("nvpn://join-request/"));
+        assert_eq!(state.networks.len(), 2);
+        assert!(state.networks.iter().all(|network| {
+            network.join_request_qr_code_or_link == state.join_request_qr_code_or_link
+        }));
+
+        runtime.config.clear_pending_nostr_join_request();
+        runtime.config.ensure_pending_nostr_join_request(unix_timestamp()).unwrap();
+        let rotated = runtime.state();
+        assert_ne!(rotated.join_request_qr_code_or_link, state.join_request_qr_code_or_link);
+        assert!(rotated.networks.iter().all(|network| {
+            network.join_request_qr_code_or_link == rotated.join_request_qr_code_or_link
+        }));
+
+        runtime.config.pending_nostr_join_request.as_mut().unwrap().request_private_key =
+            Keys::generate().secret_key().to_secret_hex();
+        let invalid = runtime.state();
+        assert!(invalid.join_request_qr_code_or_link.is_empty());
+        assert!(invalid.networks.iter().all(|network| network.join_request_qr_code_or_link.is_empty()));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -809,7 +826,7 @@ exit 0
         assert_eq!(request.requester_npub, requester_npub);
         assert_eq!(request.requester_pubkey_hex, requester_hex);
         assert_eq!(request.requester_node_name, "iPhone");
-        assert!(!request.requested_at_text.trim().is_empty());
+        assert_ne!(request.requested_at_text.trim(), "");
 
         let json = serde_json::to_value(&state).expect("serialize native state");
         assert_eq!(

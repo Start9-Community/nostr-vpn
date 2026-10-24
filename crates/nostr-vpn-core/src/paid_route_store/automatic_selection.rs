@@ -16,6 +16,7 @@ struct Candidate {
     mint_url: String,
     capacity_sat: u64,
     funded: bool,
+    payment_available: bool,
     local_probe: Option<LocalProbeRank>,
     local_probe_count: u32,
     previously_verified: bool,
@@ -99,9 +100,12 @@ impl PaidRouteStore {
         let (local_probe, local_probe_count) = self.local_probe_history(&offer, now_unix);
         Some(Candidate {
             offer_key: key.to_string(),
-            mint_url,
             capacity_sat,
             funded,
+            payment_available: funded
+                || (self.buyer_mint_failure_retry_at(&mint_url) <= now_unix
+                    && !self.buyer_mint_needs_funds(&mint_url, capacity_sat)),
+            mint_url,
             local_probe,
             local_probe_count,
             previously_verified,
@@ -129,7 +133,7 @@ impl PaidRouteStore {
                     && channel.offer_id == offer.offer_id
                     && channel.counterparty_npub == offer.seller_npub
                     && accepted.iter().any(|url| url == mint)
-                    && lease.lease.expires_at_unix.min(channel.expires_at_unix) > now_unix
+                    && channel.routing_expires_at_unix(lease.lease.expires_at_unix) > now_unix
                     && paid_route_lifecycle_allows_routing(lease.status)
                     && paid_route_lifecycle_allows_routing(channel.status)
                     && self
@@ -239,8 +243,9 @@ fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
             .local_probe
             .map_or(1, |probe| if probe.usable { 2 } else { 0 })
     };
-    health(left)
-        .cmp(&health(right))
+    left.payment_available
+        .cmp(&right.payment_available)
+        .then_with(|| health(left).cmp(&health(right)))
         .then_with(|| left.personal_rating.cmp(&right.personal_rating))
         .then_with(|| left.local_probe.cmp(&right.local_probe))
         .then_with(|| left.rating_score.cmp(&right.rating_score))
@@ -267,7 +272,10 @@ fn probe_rank(quality: &PaidRouteQualityMetrics) -> Option<LocalProbeRank> {
     })
 }
 
-fn recommended_capacity_sat(offer: &PaidRouteOffer, balance_msat: Option<u64>) -> Option<u64> {
+pub(super) fn recommended_capacity_sat(
+    offer: &PaidRouteOffer,
+    balance_msat: Option<u64>,
+) -> Option<u64> {
     let traffic_msat = u64::try_from(
         u128::from(offer.pricing.price_msat_per_gb)
             .saturating_mul(u128::from(CHANNEL_TARGET_BYTES))

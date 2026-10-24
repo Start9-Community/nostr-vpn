@@ -224,6 +224,28 @@ def probe(command, timeout=15):
     return completed.returncode == 0, completed.stdout.strip()
 
 
+def ios_device_record(entry):
+    if not isinstance(entry, dict):
+        raise ValueError("invalid iOS device record")
+    properties = entry.get("properties", {})
+    hardware = properties.get("hardware", entry.get("hardwareProperties", {}))
+    connection = properties.get("connection", entry.get("connectionProperties", {}))
+    device_state = properties.get("state", entry.get("deviceProperties", {}))
+    if hardware.get("reality") != "physical" or hardware.get("platform") != "iOS":
+        return None
+    state = connection.get("state", connection.get("tunnelState", ""))
+    return {
+        "name": device_state.get("name", entry.get("deviceProperties", {}).get("name", "")),
+        "identifier": hardware.get("udid") or entry["identifier"],
+        "core_device_id": entry["identifier"],
+        "state": state,
+        "dormant_usb": state == "disconnected"
+        and connection.get("pairingState") == "paired"
+        and connection.get("transportType") == "wired"
+        and device_state.get("bootState") == "booted",
+    }
+
+
 def check_health(spec):
     kind, separator, value = spec.partition(":")
     if not separator or not value:
@@ -296,19 +318,38 @@ def check_health(spec):
     if kind == "ios-device":
         if platform.system() != "Darwin" or not shutil.which("xcrun"):
             return {"spec": spec, "available": False, "detail": "devicectl requires macOS"}
-        ok, output = probe(["xcrun", "devicectl", "list", "devices"], timeout=20)
+        ok, output = probe(
+            ["xcrun", "devicectl", "list", "devices", "--quiet", "--json-output", "-"],
+            timeout=20,
+        )
         if not ok:
             return {"spec": spec, "available": False, "detail": output}
-        devices = []
-        for row in output.splitlines()[2:]:
-            columns = [column.strip() for column in row.split("  ") if column.strip()]
-            if len(columns) >= 4 and columns[3].startswith(("available", "connected")):
-                devices.append({"name": columns[0], "identifier": columns[2]})
-        matches = (
-            devices
-            if value == "auto"
-            else [item for item in devices if value in (item["name"], item["identifier"])]
-        )
+        try:
+            entries = json.loads(output)["result"]["devices"]
+            devices = [record for entry in entries if (record := ios_device_record(entry))]
+            selected = [device for device in devices if value == "auto" or value in (
+                device["name"], device["identifier"], device["core_device_id"]
+            )]
+            matches = [device for device in selected if device["state"] in {"available", "connected"}]
+            dormant = [device for device in selected if device["dormant_usb"]]
+            if not matches and len(dormant) == 1:
+                # The inventory can retain a disconnected CoreDevice tunnel
+                # for a paired USB phone. One bounded, read-only details query
+                # reconnects it; never accept the stale inventory as readiness.
+                candidate = dormant[0]
+                ok, refreshed_output = probe([
+                    "xcrun", "devicectl", "--timeout", "5", "device", "info", "details",
+                    "--device", candidate["identifier"], "--quiet", "--json-output", "-",
+                ], timeout=8)
+                if ok:
+                    refreshed = ios_device_record(json.loads(refreshed_output)["result"])
+                    if (refreshed
+                            and refreshed["identifier"] == candidate["identifier"]
+                            and refreshed["core_device_id"] == candidate["core_device_id"]
+                            and refreshed["state"] in {"available", "connected"}):
+                        matches = [refreshed]
+        except (KeyError, TypeError, ValueError) as error:
+            return {"spec": spec, "available": False, "detail": f"invalid devicectl response: {error}"}
         return {
             "spec": spec,
             "available": bool(matches),
@@ -1217,7 +1258,10 @@ def run_managed(args):
                 )
                 return INFRASTRUCTURE_UNAVAILABLE
             if outcome is None:
-                resources = sorted({item for check in checks if (item := health_resource(check))})
+                resources = sorted({
+                    item for check in checks
+                    if (item := health_resource(check)) and item != args.resource
+                })
                 for resource in resources:
                     lock, owner = acquire(resource, args.stale_after, owner_context)
                     if deferred.received is not None:

@@ -8,11 +8,26 @@ fn refresh_header(app: &AppRef, state: &NativeAppState) {
         )
     };
 
-    label.set_text(&tray::vpn_status_text(state));
+    let model = app.borrow();
+    let ready = model.core_ready;
+    let busy = !model.pending_actions.is_empty();
+    drop(model);
+    let status = tray::vpn_status_text(state);
+    label.set_text(if !ready {
+        if state.error.is_empty() {
+            "Starting…"
+        } else {
+            "Unavailable"
+        }
+    } else if busy {
+        "Working…"
+    } else {
+        &status
+    });
 
     let dot_visible =
         state.exit_node_blocked || state.exit_node_active || state.vpn_active || state.vpn_enabled;
-    dot.set_visible(dot_visible);
+    dot.set_visible(ready && dot_visible);
     for class in ["ok", "warn", "bad"] {
         dot.remove_css_class(class);
     }
@@ -24,7 +39,9 @@ fn refresh_header(app: &AppRef, state: &NativeAppState) {
         dot.add_css_class("warn");
     }
 
-    switch.set_sensitive(state.vpn_control_supported && active_network(state).is_some());
+    switch.set_sensitive(
+        ready && !busy && state.vpn_control_supported && active_network(state).is_some(),
+    );
     if switch.is_active() != state.vpn_enabled {
         switch.set_active(state.vpn_enabled);
     }
@@ -59,6 +76,26 @@ fn render(app: &AppRef) {
     clear_box(&sidebar);
     clear_box(&update_bar);
     clear_box(&content);
+    if !app.borrow().core_ready {
+        let loading = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        loading.set_halign(gtk::Align::Center);
+        loading.set_valign(gtk::Align::Center);
+        loading.set_hexpand(true);
+        loading.set_vexpand(true);
+        let message = if state.error.is_empty() {
+            let spinner = gtk::Spinner::new();
+            spinner.start();
+            loading.append(&spinner);
+            "Starting Nostr VPN…"
+        } else {
+            &state.error
+        };
+        let label = gtk::Label::new(Some(message));
+        label.set_wrap(true);
+        loading.append(&label);
+        content.append(&loading);
+        return;
+    }
     build_sidebar(app, &sidebar, &state, page);
     build_update_stripe(app, &update_bar, &state);
 
@@ -75,6 +112,7 @@ fn render(app: &AppRef) {
     page_box.set_hexpand(true);
     page_box.set_valign(gtk::Align::Start);
     page_box.set_size_request(560, -1);
+    page_box.set_sensitive(app.borrow().pending_actions.is_empty());
 
     match page {
         Page::Devices => build_devices_page(app, &page_box, &state),
@@ -110,38 +148,34 @@ fn build_update_stripe(app: &AppRef, parent: &gtk::Box, state: &NativeAppState) 
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
     row.append(&title);
 
-    let auto_install = gtk::CheckButton::with_label("Install automatically");
-    auto_install.set_active(update.auto_install);
+    let auto_download = gtk::CheckButton::with_label("Download automatically");
+    auto_download.set_active(update.auto_download);
     {
         let app = app.clone();
-        auto_install.connect_toggled(move |button| {
+        auto_download.connect_toggled(move |button| {
             let enabled = button.is_active();
             {
                 let mut model = app.borrow_mut();
-                model.update.auto_install = enabled;
+                model.update.auto_download = enabled;
+                save_update_preferences(&mut model.update);
             }
-            save_auto_install_updates(enabled);
-            if enabled {
+            let should_download = app.borrow().update.should_auto_download();
+            if should_download {
                 download_update(&app);
+            } else {
+                render(&app);
             }
         });
     }
-    row.append(&auto_install);
+    row.append(&auto_download);
 
-    let install = icon_text_button(
-        if update.downloading {
-            "Downloading"
-        } else {
-            "Install"
-        },
-        "folder-download-symbolic",
-    );
+    let install = icon_text_button(update.download_action_label(), "folder-download-symbolic");
     install.set_sensitive(
         update.available && update.asset.is_some() && !update.checking && !update.downloading,
     );
     {
         let app = app.clone();
-        install.connect_clicked(move |_| download_update(&app));
+        install.connect_clicked(move |_| show_or_download_update(&app));
     }
     row.append(&install);
 

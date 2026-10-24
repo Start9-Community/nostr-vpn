@@ -180,4 +180,45 @@ printf 'fail:37\n' >"$REMOTE_DIR/underlay.status"
 [[ "$(poll_remote_underlay_status)" == fail:37 ]]
 BASH
 
+DNS_DEFINITIONS="$TMP_ROOT/direct-dns-definitions.sh"
+for function in direct_split_dns_owned resolver_files_absent; do
+  sed -n "/^$function() {$/,/^}$/p" "$GUEST" >>"$DNS_DEFINITIONS"
+done
+bash -s -- "$DNS_DEFINITIONS" "$TMP_ROOT" <<'BASH'
+set -euo pipefail
+source "$1"
+SECURE_RESOLVER="$2/nvpn-secure-dns"
+MAGIC_RESOLVER="$2/nvpn"
+store_absent=1
+secure_dns_store_absent() { [[ "$store_absent" == 1 ]]; }
+reject_split_dns() {
+  if direct_split_dns_owned; then
+    echo "Direct accepted an invalid or globally overriding resolver" >&2
+    exit 1
+  fi
+}
+printf '# Managed by nvpn MagicDNS\nnameserver 127.0.0.1\nport 1053\noptions timeout:1 attempts:1\n' >"$MAGIC_RESOLVER"
+cp "$MAGIC_RESOLVER" "$2/fips"
+direct_split_dns_owned
+if resolver_files_absent; then
+  echo "Stopped daemon accepted retained mesh resolvers" >&2
+  exit 1
+fi
+store_absent=0
+reject_split_dns
+store_absent=1
+touch "$SECURE_RESOLVER"
+reject_split_dns
+rm "$SECURE_RESOLVER" "$2/fips"
+reject_split_dns
+cp "$MAGIC_RESOLVER" "$2/fips"
+printf 'domain .\n' >>"$2/fips"
+reject_split_dns
+rm "$2/fips"
+ln -s "$MAGIC_RESOLVER" "$2/fips"
+reject_split_dns
+rm "$2/fips" "$MAGIC_RESOLVER"
+resolver_files_absent
+BASH
+
 echo "MACOS_RELEASE_LOCAL_WIREGUARD_HARNESS_OK"

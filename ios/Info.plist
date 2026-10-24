@@ -43,6 +43,12 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan Nostr VPN join request QR codes.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Find and connect to your VPN devices on the local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_fips._udp</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

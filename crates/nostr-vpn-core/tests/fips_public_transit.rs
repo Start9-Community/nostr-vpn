@@ -28,9 +28,27 @@ const LOCAL_BUSY_SEED_CLIENTS: usize = 24;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires the deployed public FIPS transit service"]
 async fn public_transit_routes_fips_control_by_npub_without_direct_peer_config() {
-    tokio::time::timeout(PUBLIC_END_TO_END_TIMEOUT, public_transit_round())
+    tokio::time::timeout(PUBLIC_END_TO_END_TIMEOUT, public_transit_round(0, 1))
         .await
         .expect("public cross-seed FIPS-TCP gate exceeded 100 seconds");
+}
+
+/// Isolate each seed's forwarding from the inter-seed route. Both clients
+/// have independent identities and only the same pinned public WSS seed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the deployed public FIPS transit service"]
+async fn public_single_seed_zero_routes_fips_control() {
+    tokio::time::timeout(PUBLIC_END_TO_END_TIMEOUT, public_transit_round(0, 0))
+        .await
+        .expect("public single-seed FIPS-TCP gate exceeded 100 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the deployed public FIPS transit service"]
+async fn public_single_seed_one_routes_fips_control() {
+    tokio::time::timeout(PUBLIC_END_TO_END_TIMEOUT, public_transit_round(1, 1))
+        .await
+        .expect("public single-seed FIPS-TCP gate exceeded 100 seconds");
 }
 
 /// Live regression for the native-client mixed-transport bootstrap. Each
@@ -241,14 +259,17 @@ async fn public_mixed_transit_round() {
         .expect("shutdown first mixed-transport endpoint");
 }
 
-async fn public_transit_round() {
+async fn public_transit_round(first_seed: usize, second_seed: usize) {
     assert!(
         DEFAULT_FIPS_WEBSOCKET_SEEDS.len() >= 2,
         "the cross-transit release probe requires two public seeds"
     );
-    let (first, second) = tokio::join!(public_transit_endpoint(0), public_transit_endpoint(1));
+    let (first, second) = tokio::join!(
+        public_transit_endpoint(first_seed),
+        public_transit_endpoint(second_seed)
+    );
     eprintln!(
-        "public transit clients: first={} second={}",
+        "public transit clients: first={} seed={first_seed} second={} seed={second_seed}",
         first.npub(),
         second.npub()
     );

@@ -43,6 +43,22 @@ import subprocess
 import sys
 import tempfile
 
+# Xcode's devicectl launcher installs pending components before dispatching
+# even read-only queries. A blocked Mac authorization prompt is not evidence
+# that the phone needs unlocking or reconnecting.
+try:
+    setup = subprocess.run(
+        ["xcodebuild", "-checkFirstLaunchStatus"],
+        capture_output=True, timeout=8,
+    )
+except (OSError, subprocess.SubprocessError):
+    raise SystemExit("Xcode setup status unavailable on this Mac; no device query or UI automation session started.") from None
+if setup.returncode != 0:
+    raise SystemExit(
+        f"Xcode setup check failed (exit {setup.returncode}); finish or repair Xcode setup on this Mac before testing. "
+        "No device query or UI automation session started."
+    )
+
 try:
     with tempfile.TemporaryDirectory(prefix="nvpn-ios-lock-") as directory:
         output = Path(directory) / "state.json"
@@ -323,10 +339,30 @@ temporary.replace(path)
 PY
 }
 
+ios_release_network_reused_app_sha() {
+  local receipt="$1" candidate_tree
+  candidate_tree="$(git -C "$ROOT" rev-parse "${NVPN_EXPECTED_APP_GIT_SHA}^{tree}")" || return
+  assert_release_checkout_state \
+    "$ROOT" "$NVPN_EXPECTED_APP_GIT_SHA" "$candidate_tree" \
+    "iOS retained network artifact" || return
+  node --input-type=module - \
+    "$ROOT" "$receipt" "$NVPN_EXPECTED_APP_GIT_SHA" "$candidate_tree" <<'JS'
+import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+const [root, path, commit, tree] = process.argv.slice(2)
+const { requireReceiptSource } = await import(pathToFileURL(`${root}/scripts/release-artifact-provenance-lib.mjs`))
+const receipt = JSON.parse(readFileSync(path, 'utf8'))
+requireReceiptSource(receipt, {
+  commit, tree, candidateRoot: root, platform: 'ios', label: 'Retained iOS network artifact',
+})
+console.log(receipt.appGitSha)
+JS
+}
+
 ios_release_network_prepare_reuse() {
   local device="$1" app derived xctestrun receipt runner_receipt runner
   local app_tree runner_tree xctestrun_sha test_products_tree
-  local device_udid device_sha values install_mode runner_install_receipt
+  local device_udid device_sha values install_mode runner_install_receipt artifact_app_sha
   app="${NVPN_MOBILE_IOS_RELEASE_APP_PATH:-}"
   derived="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-}"
   xctestrun="${NVPN_MOBILE_IOS_RELEASE_XCTESTRUN:-}"
@@ -341,6 +377,9 @@ ios_release_network_prepare_reuse() {
     echo "Exact iOS reuse requires pinned app, runner, xctestrun, and receipts" >&2
     return 1
   }
+  # Keep the signed app's original identity after a harness-only correction.
+  # Prove unchanged product inputs before even resolving the physical device.
+  artifact_app_sha="$(ios_release_network_reused_app_sha "$receipt")" || return
   app_tree="$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$app")" \
     || return 1
   runner_tree="$(python3 "$ROOT/scripts/mobile_release_artifact_receipt.py" tree-sha "$runner")" \
@@ -361,7 +400,7 @@ ios_release_network_prepare_reuse() {
     "$receipt" "$runner_receipt" "$IOS_RELEASE_NETWORK_DEVICE_RECEIPT" \
     "$app_tree" "$runner_tree" "$xctestrun_sha" "$test_products_tree" \
     "$device_sha" \
-    "$NVPN_EXPECTED_APP_GIT_SHA" "$NVPN_EXPECTED_FIPS_GIT_SHA" \
+    "$artifact_app_sha" "$NVPN_EXPECTED_FIPS_GIT_SHA" \
     "$NVPN_MOBILE_IOS_RELEASE_RUNNER_TREE_SHA256" "$IOS_BUNDLE_ID" <<'PY'
 import json, sys
 (receipt_path, runner_path, device_path, app_tree, runner_tree, xctest_sha,
@@ -410,7 +449,7 @@ PY
   IFS=$'\t' read -r IOS_RELEASE_NETWORK_APP_TREE \
     IOS_RELEASE_NETWORK_FIPS_TREE NVPN_EXPECTED_FIPS_VERSION \
     IOS_RELEASE_NETWORK_BASE_CDHASH <<<"$values"
-  IOS_RELEASE_NETWORK_APP_HEAD="$NVPN_EXPECTED_APP_GIT_SHA"
+  IOS_RELEASE_NETWORK_APP_HEAD="$artifact_app_sha"
   IOS_RELEASE_NETWORK_BASE_TREE_SHA="$app_tree"
   IOS_RELEASE_NETWORK_BASE_TEST_PRODUCTS_TREE_SHA="$test_products_tree"
   IOS_RELEASE_NETWORK_DERIVED_DATA="$derived"
@@ -1597,6 +1636,17 @@ ios_release_network_validate_markers() {
     }
   fi
   if bool_is_true "$lifecycle"; then
+    python3 - "$ROOT/scripts/release-network-evidence.py" "$markers" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("evidence", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.validate_ios_connected_use(Path(sys.argv[2]).read_text().splitlines())
+PY
+    [[ "$?" -eq 0 ]] || return 1
     local cycle
     for cycle in $(seq 1 "${NVPN_IOS_ACTIVE_TUNNEL_LIFECYCLE_CYCLES:-3}"); do
       grep -Fq "NVPN_IOS_RELEASE_BACKGROUND_${cycle}_REQUESTED_MS=" "$markers" \

@@ -113,7 +113,7 @@ fn run_update_e2e(install: bool) -> Result<serde_json::Value, String> {
             .asset
             .as_ref()
             .ok_or_else(|| "no Linux update asset selected".to_string())?;
-        let path = updater::download_blocking(asset, &config_path)?;
+        let path = updater::download_blocking(asset, &config_path)?.path;
         executable = std::fs::metadata(&path).ok().map(|metadata| {
             #[cfg(unix)]
             {
@@ -170,9 +170,7 @@ fn build_ui(app: &adw::Application, runtime: &AppRuntime, present: bool) {
     let header_vpn_switch = gtk::Switch::new();
     header_vpn_switch.set_valign(gtk::Align::Center);
     header_vpn_switch.set_tooltip_text(Some("Toggle VPN"));
-    header_vpn_switch.update_property(&[gtk::accessible::Property::Label(
-        "nvpn-service-toggle",
-    )]);
+    header_vpn_switch.update_property(&[gtk::accessible::Property::Label("nvpn-service-toggle")]);
     header.pack_end(&header_vpn_switch);
 
     let header_status_dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -234,8 +232,6 @@ fn build_ui(app: &adw::Application, runtime: &AppRuntime, present: bool) {
     if model.borrow().tray_available {
         update_tray_application_hold(true, window.application());
     }
-    sync_launch_on_startup_setting(&model);
-
     {
         let model = model.clone();
         header_vpn_switch.connect_active_notify(move |sw| {
@@ -281,7 +277,10 @@ fn build_ui(app: &adw::Application, runtime: &AppRuntime, present: bool) {
     }
     {
         let model = model.clone();
+        let runtime = runtime.clone();
         glib::timeout_add_local(Duration::from_millis(250), move || {
+            drain_core_results(&model);
+            drain_pending_urls(&runtime);
             drain_tray_commands(&model);
             drain_update_events(&model);
             glib::ControlFlow::Continue

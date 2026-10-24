@@ -26,6 +26,14 @@ const fipsPackageNames = [
   'nvpn-fips-endpoint',
   'nvpn-fips-identity',
 ]
+const fipsPatchedPackageNames = [
+  ...fipsPackageNames,
+  'nvpn-mdns-sd',
+  'nvpn-turn',
+  'nvpn-webrtc',
+  'nvpn-webrtc-ice',
+  'nvpn-webrtc-util',
+]
 const cratesIoSource = 'registry+https://github.com/rust-lang/crates.io-index'
 
 function requireRegularFile(path, label) {
@@ -531,18 +539,18 @@ export function exactFipsPublicationCandidate({
   const lock = readFileSync(rootCargoLockPath, 'utf8')
   cargoLockRegistryPackage(lock, 'nvpn-fips-core', expectedFipsVersion)
   cargoLockRegistryPackage(lock, 'nvpn-fips-endpoint', expectedFipsVersion)
-  const identity = cargoLockUniqueRegistryPackage(lock, 'nvpn-fips-identity')
-  const packageVersions = {
-    'nvpn-fips-core': expectedFipsVersion,
-    'nvpn-fips-endpoint': expectedFipsVersion,
-    'nvpn-fips-identity': identity.version,
-  }
+  const packageVersions = Object.fromEntries(
+    fipsPatchedPackageNames.map((name) => [
+      name,
+      cargoLockUniqueRegistryPackage(lock, name).version,
+    ]),
+  )
 
   return {
     fipsGitSha: expectedFipsGitSha,
     fipsGitTree: expectedFipsGitTree,
     fipsVersion: expectedFipsVersion,
-    fipsSpecifications: fipsPackageNames.map(
+    fipsSpecifications: fipsPatchedPackageNames.map(
       (name) => `${name}=${packageVersions[name]}`,
     ),
     fipsPatchedLockPackages: packageVersions,
@@ -805,8 +813,8 @@ export function linuxPublicationVerificationPlan({
     !receiptFipsPackages ||
     typeof receiptFipsPackages !== 'object' ||
     Array.isArray(receiptFipsPackages) ||
-    Object.keys(receiptFipsPackages).length !== fipsPackageNames.length ||
-    fipsPackageNames.some(
+    Object.keys(receiptFipsPackages).length !== fipsPatchedPackageNames.length ||
+    fipsPatchedPackageNames.some(
       (name) =>
         receiptFipsPackages[name] !== fips.fipsPatchedLockPackages[name],
     )

@@ -277,12 +277,16 @@ fn wallet_token_row(app: &AppRef, parent: &gtk::Box) {
 }
 
 fn preview_and_confirm_wallet_token(app: &AppRef, token: String) {
-    let state = dispatch(
+    dispatch_with_completion(
         app,
         NativeAppAction::PreviewPaidRouteWalletToken {
             token: token.clone(),
         },
+        move |app, state| show_wallet_token_confirmation(app, token, state),
     );
+}
+
+fn show_wallet_token_confirmation(app: &AppRef, token: String, state: &NativeAppState) {
     if !state.error.is_empty() {
         return;
     }
@@ -306,22 +310,24 @@ fn preview_and_confirm_wallet_token(app: &AppRef, token: String) {
         dialog.set_default_response(Some("redeem"));
         let app = app.clone();
         dialog.connect_response(Some("redeem"), move |_, _| {
-            let state = dispatch(
+            dispatch_with_completion(
                 &app,
                 NativeAppAction::ReceivePaidRouteWalletToken {
                     token: token.clone(),
                 },
+                |app, state| {
+                    if !state.error.is_empty() {
+                        let error = adw::AlertDialog::new(
+                            Some("Could not redeem token"),
+                            Some(&state.error),
+                        );
+                        error.add_response("done", "Done");
+                        error.set_close_response("done");
+                        let window = app.borrow().window.clone();
+                        error.present(Some(&window));
+                    }
+                },
             );
-            if !state.error.is_empty() {
-                let error = adw::AlertDialog::new(
-                    Some("Could not redeem token"),
-                    Some(&state.error),
-                );
-                error.add_response("done", "Done");
-                error.set_close_response("done");
-                let window = app.borrow().window.clone();
-                error.present(Some(&window));
-            }
         });
     } else {
         dialog.add_response("done", "Done");
