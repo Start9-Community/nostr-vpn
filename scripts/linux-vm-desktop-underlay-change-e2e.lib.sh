@@ -77,35 +77,22 @@ primary_ssh_command() {
   LINUX_PRIMARY_SSH+=("$LINUX_SSH")
 }
 
-secondary_ssh_command() {
-  LINUX_SECONDARY_SSH=(
-    ssh
-    "${SSH_LIVENESS_OPTIONS[@]}"
-    -o "ProxyCommand=$SECONDARY_PROXY"
-    "$LINUX_SSH"
-  )
-}
-
 run_primary() {
   primary_ssh_command
   "${LINUX_PRIMARY_SSH[@]}" "$@"
 }
 
-run_secondary() {
-  secondary_ssh_command
-  "${LINUX_SECONDARY_SSH[@]}" "$@"
-}
-
-run_secondary_bounded() {
+run_guest_control() {
   local timeout_secs="$1"
   shift
-  secondary_ssh_command
-  perl -e '
-    my $seconds = shift @ARGV;
-    alarm $seconds;
-    exec @ARGV;
-    die "exec failed: $!\n";
-  ' "$timeout_secs" "${LINUX_SECONDARY_SSH[@]}" "$@"
+  local -a command=(python3 "$ROOT/scripts/libvirt-guest-command.py"
+    --hypervisor "$HYPERVISOR_SSH" --vm "$VM_NAME"
+    --timeout "$timeout_secs")
+  if [[ "${1:-}" == --stdin ]]; then
+    command+=(--stdin)
+    shift
+  fi
+  "${command[@]}" -- "$@"
 }
 
 linux_guest_env() {
@@ -126,23 +113,21 @@ linux_guest_env() {
   )
 }
 
-run_guest_primary() {
+run_guest_action() {
   local action="$1"
   shift
   linux_guest_env
-  primary_ssh_command
-  "${LINUX_PRIMARY_SSH[@]}" sudo -n env "${LINUX_GUEST_ENV[@]}" \
+  run_guest_control 600 env "${LINUX_GUEST_ENV[@]}" \
     "$@" "$GUEST_RUNNER" "$action"
 }
 
-start_guest_secondary_unit() {
+start_guest_unit() {
   local action="$1"
   shift
   [[ -n "$LINUX_RUN_UNIT" && "$GUEST_REPO" == /* ]] \
     || fail "Linux detached guest runner is not initialized"
   linux_guest_env
-  secondary_ssh_command
-  "${LINUX_SECONDARY_SSH[@]}" sudo -n systemd-run \
+  run_guest_control 15 systemd-run \
     "--unit=$LINUX_RUN_UNIT" --collect --quiet \
     --property=Type=exec --property=RemainAfterExit=yes \
     --property=RuntimeMaxSec=600 --property=TimeoutStopSec=15 \
@@ -160,7 +145,7 @@ wait_for_guest_runner_success() {
   local deadline="$((SECONDS + 60))"
   local state
   while ((SECONDS < deadline)); do
-    state="$(run_primary sudo -n systemctl show "$LINUX_RUN_UNIT" \
+    state="$(run_guest_control 8 systemctl show "$LINUX_RUN_UNIT" \
       --property=ActiveState --property=SubState \
       --property=Result --property=ExecMainStatus 2>/dev/null)" || {
       sleep 0.1
@@ -183,13 +168,12 @@ wait_for_guest_runner_success() {
 
 stop_guest_runner_unit() {
   [[ -n "$LINUX_RUN_UNIT" ]] || return 0
-  run_primary sudo -n systemctl stop "$LINUX_RUN_UNIT"
+  run_guest_control 30 systemctl stop "$LINUX_RUN_UNIT"
   LINUX_RUN_UNIT=""
 }
 
 guest_marker_exists() {
-  run_secondary_bounded 8 \
-    sudo -n test -e "$GUEST_STATE_DIR/$1" >/dev/null 2>&1
+  run_guest_control 8 test -e "$GUEST_STATE_DIR/$1" >/dev/null 2>&1
 }
 
 wait_for_guest_marker() {
@@ -201,7 +185,7 @@ wait_for_guest_marker() {
     if guest_marker_exists "$name"; then
       return 0
     fi
-    state="$(run_secondary_bounded 8 sudo -n systemctl show "$LINUX_RUN_UNIT" \
+    state="$(run_guest_control 8 systemctl show "$LINUX_RUN_UNIT" \
       --property=ActiveState --value 2>/dev/null)" || state=""
     [[ -z "$state" || "$state" == "active" ]] \
       || fail "Linux guest runner exited before $name"
@@ -211,7 +195,7 @@ wait_for_guest_marker() {
 }
 
 signal_guest() {
-  run_secondary sudo -n touch "$GUEST_STATE_DIR/$1"
+  run_guest_control 8 touch "$GUEST_STATE_DIR/$1"
 }
 
 peer_command() {

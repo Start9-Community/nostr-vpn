@@ -33,7 +33,11 @@ impl MobileTunnel {
             config
         };
         mobile_debug_log("MobileTunnel::start building tokio runtime");
-        let runtime = RuntimeBuilder::new_multi_thread()
+        let mut runtime = RuntimeBuilder::new_multi_thread();
+        // Keep iOS async I/O on one worker; FIPS crypto has its own worker pool.
+        #[cfg(target_os = "ios")]
+        runtime.worker_threads(1);
+        let runtime = runtime
             .enable_all()
             .thread_name("nvpn-mobile-fips")
             .thread_stack_size(MOBILE_TUNNEL_WORKER_STACK_SIZE)
@@ -56,9 +60,11 @@ impl MobileTunnel {
             runtime,
             endpoint: Some(started.endpoint),
             state_control: started.state_control,
+            control_pubsub: started.control_pubsub,
             mesh: started.mesh,
             presence: started.presence,
             config: started.config,
+            peer_hints: started.peer_hints,
             app_config: started.app_config,
             app_config_dirty: started.app_config_dirty,
             pending_join_roster_receipts: started.pending_join_roster_receipts,
@@ -101,6 +107,11 @@ impl MobileTunnel {
         let initial_peers = config.peers.clone();
         let config_path = non_empty_path(&config.config_path);
         let private_state_config_path = private_state_config_path.or_else(|| config_path.clone());
+        let join_roster_watch = private_state_config_path
+            .as_deref()
+            .map(join_roster_watch::JoinRosterWatch::new)
+            .transpose()
+            .context("failed to watch mobile join approvals")?;
         let runtime_state_path = private_state_config_path
             .as_deref()
             .and_then(mobile_runtime_state_path);
@@ -111,8 +122,10 @@ impl MobileTunnel {
             initial_peers.len(),
             local_capability_hints.len()
         ));
+        let endpoint_config = fips_endpoint_config(&scope, &config);
+        let nostr_advert_app = endpoint_config.node.discovery.nostr.app.clone();
         let endpoint = FipsEndpoint::builder()
-            .config(fips_endpoint_config(&scope, &config))
+            .config(endpoint_config)
             .identity_nsec(config.identity_nsec.clone())
             .discovery_scope(scope)
             .without_system_tun()
@@ -121,6 +134,22 @@ impl MobileTunnel {
             .context("failed to bind mobile FIPS endpoint")?;
         mobile_debug_log("MobileTunnel::start_async FIPS endpoint bound");
         let endpoint = Arc::new(endpoint);
+        let control_pubsub = ControlPubsubFipsRuntime::start_for_peers_with_advert_app(
+            Arc::clone(&endpoint),
+            &nostr_advert_app,
+            app_config.nostr.pubsub.clone(),
+            config.nostr_relays.clone(),
+            private_state_config_path
+                .as_deref()
+                .map(nostr_vpn_core::control_pubsub::control_pubsub_store_path),
+            &initial_peers
+                .iter()
+                .map(|peer| peer.participant_pubkey.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .context("failed to start mobile Nostr pubsub")?;
+
         let mut state_control = FipsControlTcpRuntime::start(Arc::clone(&endpoint))
             .await
             .context("failed to start mobile FIPS-TCP state-control service")?;
@@ -164,7 +193,8 @@ impl MobileTunnel {
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
         #[cfg(feature = "paid-exit")]
-        if let Some(store_path) = private_state_config_path
+        if let Some(pubsub) = control_pubsub.as_ref()
+            && let Some(store_path) = private_state_config_path
             .as_deref()
             .map(nostr_vpn_core::paid_route_store::paid_route_store_file_path)
         {
@@ -173,10 +203,10 @@ impl MobileTunnel {
                 .map_err(|_| anyhow!("mobile app config lock poisoned"))?
                 .clone();
             if pubsub_app.nostr.pubsub.enabled() {
-                let endpoint = Arc::clone(&endpoint);
+                let client = pubsub.client.clone();
                 tasks.push(tokio::spawn(async move {
                     if let Err(error) =
-                        run_mobile_paid_exit_pubsub(endpoint, pubsub_app, store_path).await
+                        run_mobile_paid_exit_pubsub(client, pubsub_app, store_path).await
                     {
                         tracing::warn!(?error, "mobile: paid exit pubsub stopped");
                     }
@@ -354,6 +384,7 @@ impl MobileTunnel {
                 state_control_sender.clone(),
                 private_state_config_path.clone(),
                 queued_join_rosters,
+                join_roster_watch,
             )));
         }
 
@@ -389,6 +420,7 @@ impl MobileTunnel {
         }
 
         if let Some(status_path) = runtime_state_path.clone() {
+            let pubsub = control_pubsub.as_ref().map(|runtime| runtime.client.clone());
             let endpoint = Arc::clone(&endpoint);
             let mesh = Arc::clone(&mesh);
             let presence = Arc::clone(&presence);
@@ -408,6 +440,7 @@ impl MobileTunnel {
                         &status_config,
                         &status_tun_counters,
                         MobileRuntimeDiagnostics {
+                            pubsub: pubsub.as_ref(),
                             secure_dns: status_secure_dns.as_ref(),
                             wireguard_handshake: status_wireguard_handshake.as_ref(),
                         },
@@ -572,9 +605,11 @@ impl MobileTunnel {
         Ok(MobileTunnelStarted {
             endpoint,
             state_control: state_control_sender,
+            control_pubsub,
             mesh,
             presence,
             config: config_state,
+            peer_hints,
             app_config,
             app_config_dirty,
             pending_join_roster_receipts,
@@ -736,15 +771,16 @@ impl MobileTunnel {
             .read()
             .map_err(|_| anyhow!("mobile FIPS config lock poisoned"))?
             .clone();
+        let pubsub = self.control_pubsub.as_ref();
         self.runtime.block_on(async move {
             let endpoint_peers = endpoint
                 .peers()
                 .await
                 .context("mobile FIPS peer snapshot")?;
-            let relay_statuses = endpoint
-                .relay_statuses()
-                .await
-                .context("mobile FIPS relay snapshot")?;
+            let relay_statuses = match pubsub {
+                Some(pubsub) => pubsub.relay_statuses().await,
+                None => Vec::new(),
+            };
             let mut state = {
                 let mesh = mobile_mesh_snapshot(&mesh)?;
                 let presence = presence
@@ -766,6 +802,12 @@ impl MobileTunnel {
                 state.secure_dns_failures = counters.failures;
             }
             state.wireguard_exit_ready = wireguard_exit_ready;
+            state.fips_routing = Some(
+                endpoint
+                    .routing_status()
+                    .await
+                    .context("mobile FIPS routing status")?,
+            );
             serde_json::to_string(&state).context("serialize mobile runtime state")
         })
     }

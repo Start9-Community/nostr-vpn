@@ -218,16 +218,30 @@ extension NostrVpnReleaseNetworkUITests {
             throw gateError("Settings did not foreground for the Wi-Fi radio change")
         }
         let toggle = try openWiFiSettings(settings)
-        if toggleIsOn(toggle) != enabled {
-            toggle.tap()
+        guard let initial = binaryControlState(toggle) else {
+            throw gateError("Settings Wi-Fi switch did not expose a binary value")
+        }
+        emit("NVPN_IOS_WIFI_INITIAL_STATE=\(initial ? 1 : 0)")
+        if initial != enabled {
+            // Settings exposes the whole row as the switch on newer iOS.
+            // Its center can hit the label; target the trailing switch thumb.
+            emit("NVPN_IOS_WIFI_SWITCH_FRAME=\(toggle.frame)")
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5))
+                .withOffset(CGVector(dx: -20, dy: 0)).tap()
         }
         let deadline = ProcessInfo.processInfo.systemUptime + 5
         repeat {
-            if toggleIsOn(toggle) == enabled {
+            if binaryControlState(toggle) == enabled {
+                emit("NVPN_IOS_WIFI_CONFIRMED_STATE=\(enabled ? 1 : 0)")
                 return
             }
             Thread.sleep(forTimeInterval: 0.05)
         } while ProcessInfo.processInfo.systemUptime < deadline
+        let screenshot = XCTAttachment(screenshot: settings.screenshot())
+        screenshot.name = "Settings Wi-Fi radio control failure"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        emit("NVPN_IOS_WIFI_FINAL_VALUE=\(String(describing: toggle.value))")
         throw gateError("Settings Wi-Fi switch did not reach the requested state")
     }
 
@@ -271,19 +285,16 @@ extension NostrVpnReleaseNetworkUITests {
                 Thread.sleep(forTimeInterval: 0.05)
                 continue
             }
+            let wifiSwitches = settings.switches.matching(identifier: "Wi-Fi")
+                .allElementsBoundByIndex
+                .filter { $0.exists && $0.isHittable && binaryControlState($0) != nil }
+            if wifiSwitches.count == 1 {
+                return wifiSwitches[0]
+            }
             let nativeSwitches = settings.switches.allElementsBoundByIndex
                 .filter { $0.exists && $0.isHittable }
             if nativeSwitches.count == 1 {
                 return nativeSwitches[0]
-            }
-            let binaryControls = settings.descendants(matching: .any)
-                .allElementsBoundByIndex
-                .filter { element in
-                    element.exists && element.isHittable
-                        && binaryControlState(element) != nil
-                }
-            if binaryControls.count == 1 {
-                return binaryControls[0]
             }
             Thread.sleep(forTimeInterval: 0.05)
         } while ProcessInfo.processInfo.systemUptime < deadline

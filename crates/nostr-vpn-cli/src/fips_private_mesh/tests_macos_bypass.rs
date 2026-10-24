@@ -14,6 +14,8 @@ fn macos_endpoint_bypass_keeps_connected_peers_on_link() {
         interface: lan.name.clone(),
     };
     let hosts = [
+        "127.0.0.1",
+        "127.42.0.1",
         "192.0.2.20",
         "192.0.2.200",
         "192.0.2.1",
@@ -49,7 +51,7 @@ fn macos_endpoint_bypass_keeps_connected_peers_on_link() {
             ("192.0.2.200/32".to_string(), underlay.gateway.clone()),
             ("198.51.100.8/32".to_string(), underlay.gateway.clone()),
         ],
-        "connected peers must retain their on-link path, including non-RFC1918 LANs"
+        "loopback rendezvous and connected peers must retain their local paths"
     );
 }
 

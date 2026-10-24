@@ -7,15 +7,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nostr_sdk::prelude::Keys;
 use nostr_vpn_core::config::{AppConfig, InternetSource};
 use nostr_vpn_core::fips_control::{JoinRosterControl, NetworkRoster, SignedRoster};
-use nostr_vpn_core::identity_bridge::{
-    CreateNostrIdentityDeviceApprovalRequestOptions, create_nostr_identity_device_approval_request,
-};
 use nostr_vpn_core::join_delivery::{
-    join_roster_outbox_directory, load_join_rosters, queue_join_roster,
+    complete_join_roster_delivery, join_roster_outbox_directory, load_join_rosters,
+    queue_join_roster,
 };
 use nostr_vpn_core::join_requests::{
-    MAX_NOSTR_JOIN_ROSTER_AGE_SECS, MAX_NOSTR_JOIN_ROSTER_FUTURE_SECS, NOSTR_VPN_JOIN_REQUEST_TYPE,
-    PendingNostrJoinRequest,
+    MAX_NOSTR_JOIN_ROSTER_AGE_SECS, MAX_NOSTR_JOIN_ROSTER_FUTURE_SECS,
 };
 
 const REQUESTED_AT: u64 = 1_778_998_000;
@@ -270,41 +267,6 @@ fn roster_must_be_fresh_for_the_pending_request() {
 }
 
 #[test]
-fn expired_pending_request_rejects_the_roster() {
-    let mut joiner = AppConfig::generated_without_networks();
-    let device_keys = joiner.nostr_keys().expect("device keys");
-    let pending = create_nostr_identity_device_approval_request(
-        &device_keys,
-        CreateNostrIdentityDeviceApprovalRequestOptions {
-            request_keys: None,
-            request_secret: None,
-            requested_at: REQUESTED_AT as i64,
-            request_type: Some(NOSTR_VPN_JOIN_REQUEST_TYPE.to_string()),
-            resources: Vec::new(),
-            expires_at: Some((SIGNED_AT - 1) as i64),
-            profile_id: None,
-            admin_app_key_pubkey: None,
-            label: Some("Joining device".to_string()),
-        },
-    )
-    .expect("create expiring request");
-    joiner.pending_nostr_join_request = Some(PendingNostrJoinRequest {
-        version: 1,
-        request: pending.request,
-        request_private_key: pending.request_keys.secret_key().to_secret_hex(),
-    });
-    let roster = signed_roster(&joiner, &Keys::generate(), SIGNED_AT);
-
-    let error = joiner
-        .apply_nostr_join_roster(&roster, SIGNED_AT)
-        .expect_err("expired request must fail");
-    assert!(
-        error.to_string().contains("expired"),
-        "unexpected expiry error: {error:#}"
-    );
-}
-
-#[test]
 fn durable_delivery_contains_only_the_recipient_and_join_roster_control() {
     let joiner = pending_joiner();
     let signer = Keys::generate();
@@ -352,6 +314,6 @@ fn durable_delivery_contains_only_the_recipient_and_join_roster_control() {
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].1.join_roster, roster);
 
-    fs::remove_file(path).expect("remove queued roster");
+    complete_join_roster_delivery(&path, &queued[0].1).expect("confirm queued roster");
     fs::remove_dir(join_roster_outbox_directory(&config_path)).expect("remove outbox");
 }

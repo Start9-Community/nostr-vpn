@@ -96,6 +96,112 @@ fn record_buyer_usage_updates_session_for_exit_seller() {
 }
 
 #[test]
+fn buyer_payment_updates_due_requires_funding_across_restart_and_recovery() {
+    let seller = Keys::generate();
+    let buyer = Keys::generate();
+    let buyer_npub = buyer.public_key().to_bech32().unwrap();
+    let mut config = sample_config();
+    config.pricing.price_msat_per_gb = 10_000_000_000;
+    config.channel.free_probe_units = 1;
+    config.channel.grace_units = 0;
+    let (mut store, session_id, channel_id) = buyer_store_with_session(&seller, &buyer, &config);
+    store
+        .record_buyer_usage(RecordPaidRouteBuyerUsageRequest {
+            seller_pubkey: seller.public_key().to_hex(),
+            usage_delta: PaidRouteUsage {
+                billable_bytes: 110,
+                ..Default::default()
+            },
+            now_unix: 130,
+        })
+        .unwrap()
+        .unwrap();
+    let lease_id = store.sessions[&session_id].session.lease_id.clone();
+    for status in [
+        PaidRouteLifecycleStatus::Opening,
+        PaidRouteLifecycleStatus::Probing,
+        PaidRouteLifecycleStatus::Active,
+    ] {
+        store.channels.get_mut(&channel_id).unwrap().status = status;
+        store.leases.get_mut(&lease_id).unwrap().status = status;
+        let loaded: PaidRouteStore =
+            serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        for now_unix in [131, 132, 200] {
+            assert!(
+                loaded
+                    .buyer_payment_updates_due(PaidRouteBuyerPaymentUpdatesDueRequest {
+                        now_unix,
+                        min_increment_msat: 1,
+                    })
+                    .is_empty(),
+                "an unfunded {status:?} session must not reach the signer"
+            );
+        }
+    }
+
+    // The same retained usage becomes payable as soon as funding succeeds.
+    store
+        .attach_buyer_spilman_channel(AttachPaidRouteBuyerSpilmanChannelRequest {
+            session_id: session_id.clone(),
+            channel_id: "recovered-funded-channel".into(),
+            cashu_unit: "sat".into(),
+            capacity_sat: 10,
+            paid_msat: Some(0),
+            payment: sample_spilman_payment("recovered-funded-channel", 0),
+            now_unix: 201,
+        })
+        .unwrap();
+    let due = store.buyer_payment_updates_due(PaidRouteBuyerPaymentUpdatesDueRequest {
+        now_unix: 202,
+        min_increment_msat: 1,
+    });
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].channel_id, "recovered-funded-channel");
+    // Persistence may retain funding on either copy after a compact balance update.
+    for keep_on_session in [false, true] {
+        let mut partial = store.clone();
+        if keep_on_session {
+            partial
+                .channels
+                .get_mut("recovered-funded-channel")
+                .unwrap()
+                .payment
+                .cashu_spilman_payment = None;
+        } else {
+            partial
+                .sessions
+                .get_mut(&session_id)
+                .unwrap()
+                .session
+                .payment
+                .cashu_spilman_payment = None;
+        }
+        assert_eq!(
+            partial
+                .buyer_payment_updates_due(PaidRouteBuyerPaymentUpdatesDueRequest {
+                    now_unix: 202,
+                    min_increment_msat: 1,
+                })
+                .len(),
+            1
+        );
+    }
+    let signed = store
+        .build_buyer_signed_payment_envelope_for_due(&FakePaymentSigner, &buyer_npub, &due[0], 202)
+        .unwrap();
+    assert!(signed.payment.paid_msat > 0);
+    assert!(
+        signed
+            .store
+            .buyer_payment_updates_due(PaidRouteBuyerPaymentUpdatesDueRequest {
+                now_unix: 203,
+                min_increment_msat: 1,
+            })
+            .is_empty()
+    );
+}
+
+#[test]
 fn buyer_payment_updates_due_reports_signable_balance_updates() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
@@ -186,6 +292,17 @@ fn buyer_payment_updates_due_caps_at_channel_capacity() {
         .unwrap()
         .payment
         .capacity_sat = 1;
+    store
+        .build_buyer_payment_envelope(BuildPaidRouteBuyerPaymentEnvelopeRequest {
+            session_id: session_id.clone(),
+            buyer_npub: buyer.public_key().to_bech32().unwrap(),
+            kind: BuildPaidRouteBuyerPaymentEnvelopeKind::ChannelOpen,
+            payment: sample_spilman_payment(&channel_id, 0),
+            delivered_units: Some(0),
+            paid_msat: Some(0),
+            now_unix: 130,
+        })
+        .expect("fund the channel before scheduling streamed payments");
     store.sessions.get_mut(&session_id).unwrap().session.usage = PaidRouteUsage {
         rx_bytes: 250,
         billable_bytes: 250,

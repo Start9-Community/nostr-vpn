@@ -28,13 +28,33 @@ impl FipsPrivateTunnelRuntime {
     pub(crate) fn iface(&self) -> &str {
         &self.iface
     }
+    pub(crate) fn probe_route_changes(&self, config: &FipsPrivateTunnelConfig) -> bool {
+        self.config.network_id != config.network_id
+            || self.config.local_address != config.local_address
+            || self.config.peers != config.peers
+            || self.config.route_targets != config.route_targets
+            || self.config.client_dataplane_enabled != config.client_dataplane_enabled
+            || self.config.wireguard_exit.enabled != config.wireguard_exit.enabled
+            || self.config.public_paid_exit_waiting_for_admission
+                != config.public_paid_exit_waiting_for_admission
+    }
+    pub(crate) fn exit_route_peer(&self) -> Option<&str> {
+        if !self.config.client_dataplane_enabled
+            || self.config.wireguard_exit.enabled
+            || self.config.public_paid_exit_waiting_for_admission
+        {
+            return None;
+        }
+        self.config
+            .peers
+            .iter()
+            .find(|peer| peer.advertises_default_route())
+            .map(|peer| peer.participant_pubkey.as_str())
+    }
     pub(crate) fn active_listen_port(&self) -> Option<u16> {
         self.active_listen_port
     }
-    #[cfg(all(
-        feature = "paid-exit",
-        any(target_os = "linux", target_os = "macos")
-    ))]
+    #[cfg(all(feature = "paid-exit", any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn paid_exit_seller_ready(&self) -> bool {
         self.active_listen_port.is_some() && self.local_exit_seller_egress_ready
     }
@@ -50,7 +70,20 @@ impl FipsPrivateTunnelRuntime {
         fn drain_paid_route_usage(participant: &str) -> Result<PaidRouteUsage>
     );
     mesh_delegate!(fn stale_participants_needing_path_refresh(now: u64) -> Vec<String>);
-    mesh_delegate!(async fn relay_statuses() -> Result<Vec<FipsRelayStatus>>);
+    pub(crate) async fn relay_statuses(&self) -> Result<Vec<FipsRelayStatus>> {
+        Ok(match &self.control_pubsub {
+            Some(pubsub) => pubsub
+                .relay_statuses()
+                .await
+                .into_iter()
+                .map(|relay| FipsRelayStatus {
+                    url: relay.url,
+                    status: relay.status,
+                })
+                .collect(),
+            None => Vec::new(),
+        })
+    }
     mesh_delegate!(async fn local_advertised_endpoints() -> Result<Vec<OverlayEndpointAdvert>>);
     mesh_delegate!(fn peer_pubkeys() -> Vec<String>);
     mesh_delegate!(async fn authenticated_endpoint_peers() -> Result<Vec<FipsEndpointPeer>>);
@@ -75,8 +108,12 @@ impl FipsPrivateTunnelRuntime {
         requested_at: u64,
         request: MeshJoinRequest,
     ) -> Result<()> {
-        self.mesh
-            .enqueue_join_request(&self.state_control.sender(), participant, requested_at, request)
+        self.mesh.enqueue_join_request(
+            &self.state_control.sender(),
+            participant,
+            requested_at,
+            request,
+        )
     }
     pub(crate) fn enqueue_roster(
         &self,
@@ -91,11 +128,8 @@ impl FipsPrivateTunnelRuntime {
         participant: String,
         join_roster: JoinRosterControl,
     ) -> Result<FipsJoinRosterDelivery> {
-        self.mesh.join_roster_delivery(
-            self.state_control.sender(),
-            participant,
-            join_roster,
-        )
+        self.mesh
+            .join_roster_delivery(self.state_control.sender(), participant, join_roster)
     }
     pub(crate) async fn send_join_roster_ack(
         &self,

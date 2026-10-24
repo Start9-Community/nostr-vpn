@@ -47,6 +47,26 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
         PhysicalGateMarker.reset()
     }
 
+    func testPhysicalWiFiRadioControl() throws {
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.launch()
+        let toggle = try openWiFiSettings(settings)
+        guard let original = binaryControlState(toggle) else {
+            throw gateError("Settings Wi-Fi switch did not expose its initial state")
+        }
+        let screenshot = XCTAttachment(screenshot: settings.screenshot())
+        screenshot.name = "Settings Wi-Fi before radio change"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        addTeardownBlock { [weak self] in
+            guard let self else { return }
+            try self.setWiFiEnabled(original)
+            self.app.activate()
+        }
+        try setWiFiEnabled(!original)
+        try setWiFiEnabled(original)
+    }
+
     func testReleaseNetworkLifecycle() throws {
         let spec = try releaseSpec()
         try validate(spec)
@@ -536,6 +556,9 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
                 )
             }
             Thread.sleep(forTimeInterval: 16)
+            if cycle == 1 {
+                try proveConnectedBackgroundMinute(spec)
+            }
             try NostrVpnReleaseNetworkProbe.requireSourceIP(
                 spec.sourceIpUrl,
                 expected: spec.expectedExitSourceIp
@@ -564,6 +587,23 @@ final class NostrVpnReleaseNetworkUITests: XCTestCase {
             try proveExit(spec, label: "foreground-\(cycle)")
             emit("NVPN_IOS_RELEASE_FOREGROUND_\(cycle)_VERIFIED_MS=\(millisecondsSinceEpoch())")
         }
+    }
+
+    private func proveConnectedBackgroundMinute(_ spec: Spec) throws {
+        // Keep the shipping app suspended while an independent process sends
+        // fresh DNS, UDP, and HTTPS traffic through its real packet tunnel.
+        let start = ProcessInfo.processInfo.systemUptime
+        emit("NVPN_IOS_RELEASE_CONNECTED_USE_BEGIN_MS=\(millisecondsSinceEpoch())")
+        repeat {
+            let sampleStart = ProcessInfo.processInfo.systemUptime
+            try proveExit(spec, label: "background-minute")
+            emit("NVPN_IOS_RELEASE_CONNECTED_USE_SAMPLE_MS=\(millisecondsSinceEpoch())")
+            if ProcessInfo.processInfo.systemUptime - start >= 60 { break }
+            Thread.sleep(forTimeInterval: max(
+                0, 5 - (ProcessInfo.processInfo.systemUptime - sampleStart)
+            ))
+        } while true
+        emit("NVPN_IOS_RELEASE_CONNECTED_USE_END_MS=\(millisecondsSinceEpoch())")
     }
 
     private func pressHomeAndWaitForSpringBoard(

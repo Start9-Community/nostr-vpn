@@ -19,7 +19,6 @@ use crate::identity_bridge::{
 // delivery budget so approval timing cannot add a full ten-second blind spot.
 pub const FIPS_JOIN_REQUEST_RETRY_SECS: u64 = 3;
 pub const NOSTR_VPN_JOIN_REQUEST_TYPE: &str = "nostr-vpn.join-request";
-pub const NOSTR_JOIN_REQUEST_TTL_SECS: u64 = 15 * 60;
 pub const MAX_NOSTR_JOIN_ROSTER_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 pub const MAX_NOSTR_JOIN_ROSTER_FUTURE_SECS: u64 = 10 * 60;
 pub(crate) const PENDING_NOSTR_JOIN_REQUEST_VERSION: u8 = 1;
@@ -149,24 +148,13 @@ impl AppConfig {
         let device_keys = self.nostr_keys()?;
         let device_pubkey = device_keys.public_key().to_hex();
         if let Some(pending) = &self.pending_nostr_join_request {
-            let not_expired = pending
-                .request
-                .expires_at
-                .and_then(|expires_at| u64::try_from(expires_at).ok())
-                .is_some_and(|expires_at| requested_at < expires_at);
-            if not_expired && pending.validate_for_device(&device_pubkey).is_ok() {
+            if pending.validate_for_device(&device_pubkey).is_ok() {
                 return Ok(false);
             }
             self.pending_nostr_join_request = None;
         }
         let requested_at =
             i64::try_from(requested_at).context("pending join request timestamp overflows i64")?;
-        let expires_at = requested_at
-            .checked_add(
-                i64::try_from(NOSTR_JOIN_REQUEST_TTL_SECS)
-                    .context("pending join request TTL overflows i64")?,
-            )
-            .context("pending join request expiry overflows i64")?;
         let node_name = bounded_device_approval_label(&self.node_name);
         let local = create_nostr_identity_device_approval_request(
             &device_keys,
@@ -176,7 +164,9 @@ impl AppConfig {
                 requested_at,
                 request_type: Some(NOSTR_VPN_JOIN_REQUEST_TYPE.to_string()),
                 resources: Vec::new(),
-                expires_at: Some(expires_at),
+                // The QR remains usable until a successful join consumes it.
+                // Wall-clock rotation can desynchronize the app and tunnel.
+                expires_at: None,
                 profile_id: self.nostr.identity_profile_id,
                 admin_app_key_pubkey: None,
                 label: node_name,
@@ -440,13 +430,8 @@ fn validate_join_roster_freshness(
     if now > signed_at.saturating_add(MAX_NOSTR_JOIN_ROSTER_AGE_SECS) {
         return Err(anyhow!("signed join roster is stale"));
     }
-    if let Some(expires_at) = pending.request.expires_at {
-        let expires_at =
-            u64::try_from(expires_at).context("pending Nostr join request expiry is negative")?;
-        if signed_at > expires_at || now > expires_at {
-            return Err(anyhow!("pending Nostr join request has expired"));
-        }
-    }
+    // Legacy requests may contain an expiry. Keep their existing QR stable
+    // too; the one-time secret is revoked when the signed roster is applied.
     Ok(())
 }
 
@@ -489,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_join_request_rotates_at_fifteen_minute_expiry() {
+    fn pending_join_request_remains_stable_until_consumed() {
         let requested_at = 1_778_998_000;
         let mut app = AppConfig::generated_without_networks();
         assert!(
@@ -501,22 +486,15 @@ mod tests {
             .as_ref()
             .expect("pending request")
             .clone();
+        assert_eq!(first.request.expires_at, None);
+        assert!(
+            !app.ensure_pending_nostr_join_request(requested_at + 30 * 24 * 60 * 60)
+                .expect("reuse pending request after a month")
+        );
         assert_eq!(
-            first.request.expires_at,
-            Some(i64::try_from(requested_at + NOSTR_JOIN_REQUEST_TTL_SECS).expect("expiry"))
-        );
-        assert!(
-            !app.ensure_pending_nostr_join_request(requested_at + NOSTR_JOIN_REQUEST_TTL_SECS - 1)
-                .expect("reuse unexpired request")
-        );
-        assert!(
-            app.ensure_pending_nostr_join_request(requested_at + NOSTR_JOIN_REQUEST_TTL_SECS)
-                .expect("rotate expired request")
-        );
-        assert_ne!(
             app.pending_nostr_join_request
                 .as_ref()
-                .expect("replacement request")
+                .expect("same request")
                 .request
                 .request_pubkey,
             first.request.request_pubkey

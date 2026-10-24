@@ -707,7 +707,7 @@ prepare_host_sources() {
   mkdir -p "$HOST_BUILD_ROOT"
   git -C "$ROOT" archive --format=tar "$APP_GIT_SHA" \
     | tar -x -C "$HOST_BUILD_ROOT"
-  git clone --quiet --no-checkout --no-hardlinks \
+  git clone --quiet --no-checkout --no-local --depth=1 --no-tags \
     "$NVPN_FIPS_REPO_PATH" "$HOST_FIPS_ROOT"
   git -C "$HOST_FIPS_ROOT" checkout --quiet --detach "$RELEASE_JOIN_FIPS_SHA"
   [[ "$(git -C "$HOST_FIPS_ROOT" rev-parse HEAD)" == "$RELEASE_JOIN_FIPS_SHA" \

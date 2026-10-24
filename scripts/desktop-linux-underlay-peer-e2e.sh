@@ -264,6 +264,7 @@ cleanup() {
   stop_pid_file "$STATE_DIR/ping.pid"
   stop_pid_file "$STATE_DIR/tcpdump.pid"
   stop_pid_file "$STATE_DIR/wg-tcpdump.pid"
+  stop_pid_file "$STATE_DIR/doh-tcpdump.pid"
   stop_pid_file "$STATE_DIR/dnsmasq.pid"
   if [[ -x "$BINARY" && -f "$CONFIG" ]]; then
     "$BINARY" stop --config "$CONFIG" --timeout-secs 5 --force >/dev/null 2>&1 || true
@@ -405,11 +406,19 @@ start_services() {
     >"$STATE_DIR/wireguard-underlay.pcap.txt" 2>"$STATE_DIR/wg-tcpdump.log" &
   echo "$!" >"$STATE_DIR/wg-tcpdump.pid"
 
+  # Retain header summaries only, so a resolver switch failure distinguishes
+  # fresh requests from delayed ACK/FIN/RST traffic on an earlier connection.
+  tcpdump -n -tt -l -s 96 -i "$WG_IFACE" \
+    'tcp port 443 and (host 1.1.1.1 or host 1.0.0.1 or host 9.9.9.9 or host 149.112.112.112 or host 8.8.8.8 or host 8.8.4.4)' \
+    >"$STATE_DIR/doh-traffic.pcap.txt" 2>"$STATE_DIR/doh-tcpdump.log" &
+  echo "$!" >"$STATE_DIR/doh-tcpdump.pid"
+
   for _ in $(seq 1 100); do
     if pid_alive "$STATE_DIR/dnsmasq.pid" \
       && pid_alive "$STATE_DIR/ping.pid" \
       && pid_alive "$STATE_DIR/tcpdump.pid" \
-      && pid_alive "$STATE_DIR/wg-tcpdump.pid"; then
+      && pid_alive "$STATE_DIR/wg-tcpdump.pid" \
+      && pid_alive "$STATE_DIR/doh-tcpdump.pid"; then
       return 0
     fi
     sleep 0.1

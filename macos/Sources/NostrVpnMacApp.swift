@@ -30,6 +30,7 @@ struct NostrVpnMacApp: App {
                 }
                 .onOpenURL { url in
                     manager.handle(url: url)
+                    appDelegate.showMainWindow()
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {

@@ -17,6 +17,10 @@ impl HttpSpilmanClientNetworking {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn with_client(client: reqwest::Client) -> Self {
+        Self { client }
+    }
 }
 
 #[cfg(feature = "spilman-wallet-http")]
@@ -28,14 +32,14 @@ impl cdk_spilman::SpilmanClientAsyncNetworking for HttpSpilmanClientNetworking {
         swap_request_json: &str,
     ) -> Result<String, String> {
         let url = format!("{}/v1/swap", mint_url.trim_end_matches('/'));
-        let response = self
-            .client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .body(swap_request_json.to_string())
-            .send()
-            .await
-            .map_err(|error| format!("Cashu mint swap request failed: {error}"))?;
+        let response = crate::send_mint_request(
+            self.client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .body(swap_request_json.to_string()),
+        )
+        .await
+        .map_err(|error| format!("Cashu mint swap request failed: {error}"))?;
         let status = response.status();
         let body = response
             .text()
@@ -50,14 +54,24 @@ impl cdk_spilman::SpilmanClientAsyncNetworking for HttpSpilmanClientNetworking {
 
 #[cfg(feature = "spilman-wallet-http")]
 pub async fn fetch_spilman_keyset_ids(mint_url: &str, unit: &str) -> anyhow::Result<Vec<String>> {
+    fetch_spilman_keyset_ids_with_client(&reqwest::Client::new(), mint_url, unit).await
+}
+
+#[cfg(feature = "spilman-wallet-http")]
+pub async fn fetch_spilman_keyset_ids_with_client(
+    client: &reqwest::Client,
+    mint_url: &str,
+    unit: &str,
+) -> anyhow::Result<Vec<String>> {
     let mint_url = mint_url.trim_end_matches('/');
     let response: serde_json::Value = crate::check_mint_response(
-        reqwest::Client::new()
-            .get(format!("{mint_url}/v1/keysets"))
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to fetch Cashu mint keysets: {error}"))?,
+        crate::send_mint_request(
+            client
+                .get(format!("{mint_url}/v1/keysets"))
+                .timeout(std::time::Duration::from_secs(10)),
+        )
+        .await
+        .map_err(|error| error.context("failed to fetch Cashu mint keysets"))?,
     )?
     .json()
     .await
@@ -88,16 +102,27 @@ pub async fn fetch_spilman_keyset_info_json(
     unit: &str,
     keyset_id: Option<&str>,
 ) -> anyhow::Result<String> {
+    fetch_spilman_keyset_info_json_with_client(&reqwest::Client::new(), mint_url, unit, keyset_id)
+        .await
+}
+
+#[cfg(feature = "spilman-wallet-http")]
+pub async fn fetch_spilman_keyset_info_json_with_client(
+    client: &reqwest::Client,
+    mint_url: &str,
+    unit: &str,
+    keyset_id: Option<&str>,
+) -> anyhow::Result<String> {
     let mint_url = mint_url.trim_end_matches('/');
-    let client = reqwest::Client::new();
     let keysets_url = format!("{mint_url}/v1/keysets");
     let keysets_response: serde_json::Value = crate::check_mint_response(
-        client
-            .get(keysets_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to fetch Cashu mint keysets: {error}"))?,
+        crate::send_mint_request(
+            client
+                .get(keysets_url)
+                .timeout(std::time::Duration::from_secs(10)),
+        )
+        .await
+        .map_err(|error| error.context("failed to fetch Cashu mint keysets"))?,
     )?
     .json()
     .await
@@ -126,12 +151,13 @@ pub async fn fetch_spilman_keyset_info_json(
         .and_then(|value| value.as_u64());
     let keys_url = format!("{mint_url}/v1/keys/{selected_id}");
     let keys_response: serde_json::Value = crate::check_mint_response(
-        client
-            .get(keys_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to fetch Cashu mint keys: {error}"))?,
+        crate::send_mint_request(
+            client
+                .get(keys_url)
+                .timeout(std::time::Duration::from_secs(10)),
+        )
+        .await
+        .map_err(|error| error.context("failed to fetch Cashu mint keys"))?,
     )?
     .json()
     .await
@@ -334,7 +360,8 @@ impl crate::wallet::CashuWalletService {
             .map_err(|error| anyhow::anyhow!(error))?;
         let keyset_info_json = match request.keyset_info_json {
             Some(json) => json,
-            None => fetch_spilman_keyset_info_json(
+            None => fetch_spilman_keyset_info_json_with_client(
+                &self.http_client,
                 &request.mint_url,
                 unit.as_str(),
                 request.keyset_id.as_deref(),
@@ -358,7 +385,7 @@ impl crate::wallet::CashuWalletService {
                 funding_keyset_id,
             )
             .await?;
-        let networking = HttpSpilmanClientNetworking::new();
+        let networking = HttpSpilmanClientNetworking::with_client(self.http_client.clone());
         let channel =
             open_streaming_route_cashu_spilman_channel_from_token_with_networking_and_storage(
                 self.data_dir(),

@@ -17,7 +17,7 @@ use fips_endpoint::{
 use nostr_sdk::prelude::{PublicKey, ToBech32};
 use nostr_vpn_core::config::{
     AppConfig, DEFAULT_FIPS_BOOTSTRAP_PEERS, ExitDnsConfig, ExitDnsResolverConfig, InternetSource,
-    PaidExitSellerEgress, WireGuardExitConfig, derive_mesh_tunnel_ip, effective_fips_nostr_relays,
+    PaidExitSellerEgress, WireGuardExitConfig, derive_mesh_tunnel_ip, effective_nostr_relays,
     normalize_nostr_pubkey, split_peer_transport_addr,
 };
 use nostr_vpn_core::data_plane::MeshPeerStatus;
@@ -91,9 +91,10 @@ const FIPS_NOSTR_PAID_EXIT_OPEN_DISCOVERY_MAX_PENDING: usize = 64;
 // Public WebSocket listeners are explicit FIPS bootstrap routers. Keep their
 // unaffiliated authenticated-adjacency budget bounded, but large enough that
 // the established public client population cannot deny all fresh clients.
-// Reserve one quarter of the listener's inbound socket budget for configured
-// peers and in-flight transports.
-const FIPS_WEBSOCKET_LISTENER_OPEN_DISCOVERY_MAX_PENDING: usize = 384;
+// UDP adjacencies share this budget without consuming WebSocket sockets.
+// Keep 32 inbound socket slots and 160 total slots outside open admission for
+// configured peers and in-flight transports.
+const FIPS_WEBSOCKET_LISTENER_OPEN_DISCOVERY_MAX_PENDING: usize = 480;
 // Public bootstrap routers need more physical sockets than an ordinary client
 // listener. Keep spare total slots for their configured upstream seeds, and
 // evict peers that do not answer transport pings before they consume the
@@ -233,6 +234,7 @@ use crate::fips_host_tunnel::FipsHostTunnelConfig;
 
 pub(crate) struct FipsPrivateMeshRuntime {
     endpoint: Arc<FipsEndpoint>,
+    nostr_advert_app: String,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     direct_endpoint_rx: FipsEndpointDirectReceiver,
     #[cfg(any(target_os = "linux", target_os = "macos"))]

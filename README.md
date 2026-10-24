@@ -11,7 +11,7 @@ Nostr identities and signed rosters control enrollment; peers connect directly w
 The fork is optimized for high-rate VPN traffic. In comparable direct-path benchmarks it delivers roughly three times the original implementation's throughput by keeping packet ownership, buffers, and session state together, batching I/O and cryptography, reusing packet storage, and avoiding packet-by-packet queue hops, allocations, copies, and repeated lookups. It preserves the FIPS protocol surface.
 
 <p align="center">
-  <img src="docs/images/desktop-gui-overview.png" alt="Nostr VPN desktop app showing a connected Home Mesh network, device status badges, and join request controls." width="900">
+  <img src="docs/images/desktop-gui-overview.png" alt="Nostr VPN macOS app in dark mode showing the Home Mesh demo network with five online devices and internet-sharing controls." width="900">
 </p>
 
 ## Install
@@ -57,9 +57,13 @@ nvpn stop
 
 For startup at boot, run `sudo nvpn service install`; on Windows, run `nvpn service install` from an elevated shell. Check it with `nvpn service status`.
 
+Linux update checks select packages for your distribution and architecture. Automatic downloads stay in the background and are remembered across app restarts. Choose **Show download** to open the folder and install the package; the app never opens an installer or browser automatically.
+
 ## Paid Exits
 
 Buy or sell VPN bandwidth for Bitcoin. Providers can sell their own internet connection or a WireGuard VPN uplink. Providers advertise per-byte prices over Nostr; buyers fund Cashu Spilman channels and sign payment updates as they use bandwidth. Uploads count as sent; UDP replies and acknowledged TCP downloads count too, without double-billing TCP retransmissions. Choose a provider manually or automatically using connection quality, trusted ratings, and price.
+
+By default, channels renew before a 12-hour service cutoff, when providers begin automatic collection. Buyers can reclaim uncollected funds after 24 hours, leaving a 12-hour window for collection retries. Existing funded refund deadlines are preserved.
 
 DNS is encrypted by default, but exits still see destination IPs and unencrypted traffic. Use HTTPS for sensitive data. See [payment and privacy details](docs/protocol.md#paid-exits).
 

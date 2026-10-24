@@ -3,8 +3,6 @@ impl NativeAppRuntime {
         update_paid_route_store(&self.paid_route_store_path(), |store| {
             store.request_exit_reselection(&self.config, unix_timestamp())
         })?;
-        // Keep the current route until the daemon can safely replace it.
-        self.config.exit_node_leak_protection = true;
         self.save_reload_and_refresh()?;
         if self.mobile_runtime {
             self.select_mobile_automatic_paid_exit()?;

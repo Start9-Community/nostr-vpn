@@ -530,6 +530,10 @@ fn manual_paid_exit_provider_parses_npub_and_roundtrips_link() {
     let parsed = ManualPaidExitProvider::parse(&link).expect("roundtrip link");
 
     assert_eq!(parsed, provider);
+    assert_eq!(
+        ManualPaidExitProvider::parse(&link.replace("paid-exit/npub", "paid-exit/@npub")).unwrap(),
+        provider
+    );
     assert!(link.contains("maxMsatPerGb=2500000"));
     assert!(link.contains("mint=https%3A%2F%2Fmint.example%2Fpath"));
 }

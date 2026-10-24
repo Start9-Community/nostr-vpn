@@ -29,9 +29,17 @@ pub(crate) struct LinuxWireGuardExitRuntime {
     handshake_completed: bool,
     endpoint_routes: Vec<LinuxRouteRestore>,
     previous_main_default_routes: Vec<String>,
+    // Legacy cleanup journals replaced the main defaults. New policy routing
+    // leaves those routes with the network manager.
+    #[serde(default = "legacy_main_defaults_owned")]
+    main_defaults_owned: bool,
     previous_table_routes: Vec<String>,
     policy_rule_owned: bool,
     interface_restore: LinuxInterfaceRestore,
+}
+
+fn legacy_main_defaults_owned() -> bool {
+    true
 }
 
 impl LinuxWireGuardExitRuntime {
@@ -53,37 +61,6 @@ impl LinuxWireGuardExitRuntime {
                 Err(error)
             }
         }
-    }
-
-    pub(crate) fn refresh_underlay_default_route(&mut self, route: String) {
-        self.previous_default_route = Some(upsert_runtime_underlay_route(
-            &mut self.previous_main_default_routes,
-            &route,
-        ));
-    }
-
-    pub(crate) fn underlay_default_route_hints(&self) -> &[String] {
-        self.underlay_default_route_hints_with(&mut SystemLinuxCommandRunner)
-    }
-
-    fn underlay_default_route_hints_with(&self, runner: &mut impl LinuxCommandRunner) -> &[String] {
-        if let Some(route) = self.previous_default_route.as_ref()
-            && crate::linux_default_route_spec_from_line(route)
-                .is_some_and(|route| runner.ipv4_default_route_is_usable(&route))
-        {
-            return self.previous_default_route.as_slice();
-        }
-        &self.previous_main_default_routes
-    }
-
-    pub(crate) fn underlay_default_route_for_interface(
-        &self,
-        interface: &str,
-    ) -> Option<crate::LinuxDefaultRouteSpec> {
-        crate::linux_default_route_from_lines_for_interface(
-            &self.previous_main_default_routes,
-            interface,
-        )
     }
 }
 
@@ -236,15 +213,8 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
         current_default_route.as_deref(),
         &iface,
     );
-    let initial_endpoint_specs = vec![
-        linux_wireguard_exit_endpoint_spec(
-            runner,
-            resolved_endpoint,
-            &iface,
-            previous_default_route.as_deref(),
-        )
-        .map_err(apply_failure)?,
-    ];
+    // SO_MARK selects the native underlay. No application-wide endpoint /32.
+    let initial_endpoint_specs = Vec::new();
     let kernel_config = linux_wireguard_kernel_config(config, resolved_endpoint);
 
     let created_interface = !linux_wireguard_link_exists(runner, &iface).map_err(apply_failure)?;
@@ -377,8 +347,6 @@ fn apply_linux_wireguard_exit_upstream_with_journal(
         previous_runtime,
         &mut snapshot,
         &mut progress,
-        created_interface,
-        &mut persist_cleanup_intent,
     ) {
         let mut obligation = LinuxWireGuardExitCleanupObligation::ApplyRollback(Box::new(
             LinuxWireGuardExitRollbackObligation {
@@ -443,7 +411,7 @@ fn conservative_apply_progress(
         link_started: true,
         table_started: true,
         policy_rule_added: !snapshot.policy_rule_existed,
-        main_default_started: true,
+        main_default_started: false,
     }
 }
 
@@ -524,6 +492,7 @@ fn build_runtime(
         handshake_completed: false,
         endpoint_routes,
         previous_main_default_routes,
+        main_defaults_owned: false,
         previous_table_routes: previous_runtime.map_or_else(
             || snapshot.table_routes.clone(),
             |runtime| runtime.previous_table_routes.clone(),
@@ -710,8 +679,6 @@ fn apply_snapshot_mutations(
     previous_runtime: Option<&LinuxWireGuardExitRuntime>,
     snapshot: &mut ApplySnapshot,
     progress: &mut ApplyProgress,
-    created_interface: bool,
-    persist_cleanup_intent: &mut impl FnMut(&LinuxWireGuardExitCleanupObligation) -> Result<()>,
 ) -> Result<()> {
     progress.address_started = true;
     replace_linux_address(runner, iface, config.address.trim())?;
@@ -746,30 +713,6 @@ fn apply_snapshot_mutations(
         add_linux_wireguard_exit_policy_rule(runner, source_cidr)?;
     }
 
-    progress.main_default_started = true;
-    let captured_default_routes = snapshot.main_default_routes.clone();
-    apply_linux_wireguard_exit_default_route(
-        runner,
-        iface,
-        config.address.trim(),
-        &captured_default_routes,
-        |discovered| {
-            for route in discovered {
-                if !snapshot.main_default_routes.contains(route) {
-                    snapshot.main_default_routes.push(route.clone());
-                }
-            }
-            persist_cleanup_intent(&LinuxWireGuardExitCleanupObligation::ApplyRollback(
-                Box::new(LinuxWireGuardExitRollbackObligation {
-                    interface: iface.to_string(),
-                    source_cidr: source_cidr.to_string(),
-                    snapshot: snapshot.clone(),
-                    progress: progress.clone(),
-                    created_interface,
-                }),
-            ))
-        },
-    )?;
     flush_linux_route_cache(runner)
 }
 
@@ -944,15 +887,17 @@ fn cleanup_linux_wireguard_exit_upstream_with(
         "policy table",
         restore_linux_table_snapshot(runner, runtime.table, &runtime.previous_table_routes),
     );
-    record_cleanup_failure(
-        &mut failures,
-        "main default routes",
-        restore_linux_main_default_snapshot(
-            runner,
-            &runtime.interface,
-            &runtime.previous_main_default_routes,
-        ),
-    );
+    if runtime.main_defaults_owned {
+        record_cleanup_failure(
+            &mut failures,
+            "main default routes",
+            restore_linux_main_default_snapshot(
+                runner,
+                &runtime.interface,
+                &runtime.previous_main_default_routes,
+            ),
+        );
+    }
     if runtime.created_interface {
         record_cleanup_failure(
             &mut failures,

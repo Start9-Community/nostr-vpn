@@ -306,7 +306,7 @@ impl NativeAppRuntime {
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
-            let _ = args;
+            let _ = (self, args);
             Err(anyhow!(
                 "background service installation is unsupported on this platform"
             ))

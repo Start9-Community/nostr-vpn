@@ -162,6 +162,7 @@ pub fn deliver_queued_join_rosters(config_path: &Path, timeout: Duration) -> Res
             .as_secs();
         record_join_roster_attempt(&path, &mut delivery, attempted_at)?;
         if result.is_ok() {
+            nostr_vpn_core::join_delivery::complete_join_roster_delivery(&path, &delivery)?;
             delivered += 1;
         }
         result?;

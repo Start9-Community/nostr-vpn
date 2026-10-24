@@ -26,7 +26,7 @@ use nostr_vpn_core::paid_routes::{
 };
 
 #[test]
-fn manual_unacknowledged_session_fails_and_falls_back_to_direct() {
+fn manual_failures_preserve_explicit_exit_selection() {
     let seller = Keys::generate();
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
     let mint = "https://mint.example";
@@ -106,13 +106,13 @@ fn manual_unacknowledged_session_fails_and_falls_back_to_direct() {
     assert_eq!(timed_out.selected_session_id, session.session_id);
     assert_eq!(
         app.internet_source,
-        nostr_vpn_core::config::InternetSource::Direct
+        nostr_vpn_core::config::InternetSource::PaidManual
     );
     assert_eq!(
         AppConfig::load(&config_path)
-            .expect("saved direct fallback")
+            .expect("preserved manual selection")
             .internet_source,
-        nostr_vpn_core::config::InternetSource::Direct
+        nostr_vpn_core::config::InternetSource::PaidManual
     );
     let store = load_paid_route_store(&store_path).expect("reloaded failed session");
     assert_eq!(
@@ -124,6 +124,18 @@ fn manual_unacknowledged_session_fails_and_falls_back_to_direct() {
             .error
             .contains("acknowledge")
     );
+
+    let saved_selection = std::fs::read(&config_path).unwrap();
+    let mut manual = PaidExitManualBuyer::default();
+    assert!(
+        fail_manual_paid_exit(&mut manual, &config_path, "Seller transport failed", 131,)
+            .expect("record manual health failure")
+    );
+    assert_eq!(
+        app.internet_source,
+        nostr_vpn_core::config::InternetSource::PaidManual
+    );
+    assert_eq!(std::fs::read(&config_path).unwrap(), saved_selection);
 
     let _ = std::fs::remove_dir_all(directory);
 }

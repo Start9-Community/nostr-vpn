@@ -452,6 +452,9 @@ pub(crate) fn build_daemon_runtime_state(input: DaemonRuntimeStateInput<'_>) -> 
         listen_port,
         paid_exit_seller_ready: tunnel_runtime.paid_exit_seller_ready,
         wireguard_exit_ready: tunnel_runtime.wireguard_exit_ready,
+        tunnel_interface: tunnel_runtime.iface.clone(),
+        tunnel_exit_peer: tunnel_runtime.tunnel_exit_peer.clone(),
+        probe_route_generation: tunnel_runtime.probe_route_generation.clone(),
         vpn_enabled,
         vpn_active,
         vpn_status: vpn_status.to_string(),
@@ -473,7 +476,7 @@ pub(crate) fn persist_daemon_runtime_state(
     path: &Path,
     input: DaemonRuntimeStateInput<'_>,
 ) -> Result<()> {
-    write_daemon_state(path, &build_daemon_runtime_state(input))
+    write_current_daemon_probe_state(path, &build_daemon_runtime_state(input))
 }
 
 pub(crate) fn persist_daemon_runtime_and_cleanup_state(
@@ -562,6 +565,9 @@ pub(crate) fn disconnected_daemon_runtime_state(
         listen_port: 0,
         paid_exit_seller_ready: false,
         wireguard_exit_ready: false,
+        tunnel_interface: String::new(),
+        tunnel_exit_peer: None,
+        probe_route_generation: current_daemon_probe_route_generation(),
         vpn_enabled: false,
         vpn_active: false,
         vpn_status: "Disconnected".to_string(),
@@ -599,7 +605,7 @@ pub(crate) fn cleanup_failed_daemon_runtime_state(
 }
 
 pub(crate) fn transition_daemon_state_after_network_repair(config_path: &Path) -> Result<()> {
-    let state_file = daemon_state_file_path(config_path);
+    let state_file = daemon_state_file_path(config_path)?;
     let previous = read_daemon_state(&state_file)?;
     let expected_peers = previous
         .as_ref()

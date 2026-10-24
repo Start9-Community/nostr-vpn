@@ -1,5 +1,3 @@
-const PAID_EXIT_PAYMENT_OUTBOX_BATCH: usize = 16;
-
 struct QueuedPaidExitPayment {
     id: String,
     envelope: StreamingRoutePaymentEnvelope,
@@ -47,9 +45,9 @@ fn repair_paid_exit_outbox_handle(
 
 #[cfg(unix)]
 fn prepare_paid_exit_payment_outbox(config_path: &Path) -> Result<PathBuf> {
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     #[cfg(not(target_os = "macos"))]
     use std::os::unix::fs::DirBuilderExt as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
     let directory = paid_exit_payment_outbox_directory(config_path);
     let owner = |path: &Path| {
@@ -120,15 +118,15 @@ fn queue_paid_exit_payment(
 ) -> Result<bool> {
     use sha2::{Digest, Sha256};
 
-    let buyer = normalize_nostr_pubkey(&envelope.buyer)
-        .context("invalid paid route payment buyer")?;
+    let buyer =
+        normalize_nostr_pubkey(&envelope.buyer).context("invalid paid route payment buyer")?;
     if buyer != app.nostr_keys()?.public_key().to_hex() {
         return Err(anyhow!(
             "paid route payment buyer does not match local FIPS identity"
         ));
     }
-    let seller = normalize_nostr_pubkey(&envelope.seller)
-        .context("invalid paid route payment seller")?;
+    let seller =
+        normalize_nostr_pubkey(&envelope.seller).context("invalid paid route payment seller")?;
     let closes_historical_channel = matches!(
         &envelope.payload,
         StreamingRoutePaymentPayload::CooperativeClose(_)
@@ -140,8 +138,8 @@ fn queue_paid_exit_payment(
             "paid route payment seller is not the selected public exit"
         ));
     }
-    let bytes = serde_json::to_vec(envelope)
-        .context("failed to encode paid route payment envelope")?;
+    let bytes =
+        serde_json::to_vec(envelope).context("failed to encode paid route payment envelope")?;
     let id = hex::encode(Sha256::digest(&bytes));
     let frame = nostr_vpn_core::fips_control::FipsControlFrame::PaidRoutePayment {
         id: id.clone(),
@@ -171,37 +169,103 @@ fn load_paid_exit_payment_outbox(config_path: &Path) -> Vec<QueuedPaidExitPaymen
             return Vec::new();
         }
     };
-    let mut paths = entries
+    let paths = entries
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .collect::<Vec<_>>();
-    paths.sort();
-    paths.truncate(PAID_EXIT_PAYMENT_OUTBOX_BATCH);
-    paths
+    let mut pending: Vec<QueuedPaidExitPayment> = paths
         .into_iter()
-        .filter_map(|path| match fs::read(&path)
-            .with_context(|| format!("failed to read {}", path.display()))
-            .and_then(|bytes| {
-                serde_json::from_slice(&bytes)
-                    .with_context(|| format!("failed to decode {}", path.display()))
-            }) {
-            Ok(envelope) => {
-                let id = path.file_stem()?.to_str()?.to_string();
-                if !valid_paid_exit_payment_id(&id) {
-                    let _ = fs::remove_file(path);
-                    return None;
+        .filter_map(|path| {
+            match fs::read(&path)
+                .with_context(|| format!("failed to read {}", path.display()))
+                .and_then(|bytes| {
+                    serde_json::from_slice(&bytes)
+                        .with_context(|| format!("failed to decode {}", path.display()))
+                }) {
+                Ok(envelope) => {
+                    let id = path.file_stem()?.to_str()?.to_string();
+                    if !valid_paid_exit_payment_id(&id)
+                        || nostr_vpn_core::paid_route_store::paid_route_payment_id(&envelope)
+                            .is_ok_and(|expected| expected != id)
+                    {
+                        let _ = fs::remove_file(path);
+                        return None;
+                    }
+                    Some(QueuedPaidExitPayment { id, envelope })
                 }
-                Some(QueuedPaidExitPayment { id, envelope })
-            }
-            Err(error) => {
-                eprintln!("paid-exit: discarding invalid payment outbox entry: {error}");
-                let _ = fs::remove_file(path);
-                None
+                Err(error) => {
+                    eprintln!("paid-exit: discarding invalid payment outbox entry: {error}");
+                    let _ = fs::remove_file(path);
+                    None
+                }
             }
         })
-        .collect()
+        .collect();
+    // A balance update is cumulative. Recover legacy backlogs as well as new
+    // queues, retaining the strongest durable update for each exact binding.
+    // Funding and cooperative close records must remain until acknowledged.
+    let binding = |envelope: &StreamingRoutePaymentEnvelope| {
+        (
+            envelope.version,
+            envelope.service_id.clone(),
+            envelope.lease_id.clone(),
+            envelope.buyer.clone(),
+            envelope.seller.clone(),
+            envelope.channel_id().to_owned(),
+        )
+    };
+    let mut newest = std::collections::HashMap::new();
+    let mut strongest = std::collections::HashMap::new();
+    for queued in &pending {
+        let key = binding(&queued.envelope);
+        let sent_at = newest.entry(key.clone()).or_insert(0);
+        *sent_at = (*sent_at).max(queued.envelope.sent_at_unix);
+        let StreamingRoutePaymentPayload::BalanceUpdate(update) = &queued.envelope.payload else {
+            continue;
+        };
+        let candidate = (update.paid_msat, update.payment.balance, queued.id.clone());
+        let current = strongest.entry(key).or_insert_with(|| candidate.clone());
+        if candidate > *current {
+            *current = candidate;
+        }
+    }
+    pending.retain(|queued| {
+        let StreamingRoutePaymentPayload::BalanceUpdate(update) = &queued.envelope.payload else {
+            return true;
+        };
+        let key = binding(&queued.envelope);
+        let (paid_msat, balance, id) = &strongest[&key];
+        if id != &queued.id && *paid_msat >= update.paid_msat && *balance >= update.payment.balance
+        {
+            let path = directory.join(format!("{}.json", queued.id));
+            if let Err(error) = fs::remove_file(path) {
+                eprintln!("paid-exit: failed to remove superseded payment: {error}");
+            }
+            return false;
+        }
+        true
+    });
+    // The transport owns its bounded queue. Never hide fresh channels behind
+    // a fixed prefix of old hashes when it applies backpressure.
+    let phase = |envelope: &StreamingRoutePaymentEnvelope| match &envelope.payload {
+        StreamingRoutePaymentPayload::ChannelOpen(_) => 0,
+        StreamingRoutePaymentPayload::BalanceUpdate(_) => 1,
+        _ => 2,
+    };
+    pending.sort_by_key(|queued| {
+        (
+            std::cmp::Reverse(newest[&binding(&queued.envelope)]),
+            binding(&queued.envelope),
+            phase(&queued.envelope),
+            queued.id.clone(),
+        )
+    });
+    pending
 }
 
 #[derive(Default)]
@@ -217,9 +281,7 @@ async fn flush_paid_exit_payment_outbox(
     let mut result = PaidExitPaymentOutboxFlushResult::default();
     for queued in load_paid_exit_payment_outbox(config_path) {
         let seller = queued.envelope.seller.clone();
-        match runtime
-            .enqueue_paid_route_payment(&seller, queued.id, queued.envelope)
-        {
+        match runtime.enqueue_paid_route_payment(&seller, queued.id, queued.envelope) {
             Ok(()) => result.queued += 1,
             Err(error) => {
                 result.errors += 1;
@@ -235,29 +297,13 @@ fn acknowledge_paid_exit_payment(
     seller_pubkey: &str,
     id: &str,
 ) -> Result<bool> {
-    if !valid_paid_exit_payment_id(id) {
-        return Err(anyhow!("invalid paid route payment acknowledgment id"));
-    }
-    let path = paid_exit_payment_outbox_directory(config_path).join(format!("{id}.json"));
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", path.display()));
-        }
-    };
-    let envelope: StreamingRoutePaymentEnvelope = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to decode {}", path.display()))?;
-    if normalize_nostr_pubkey(&envelope.seller).ok().as_deref() != Some(seller_pubkey) {
-        return Err(anyhow!(
-            "paid route payment acknowledgment source does not match seller"
-        ));
-    }
-    // A payment acknowledgment proves only that the seller persisted the
-    // payment. Routing is admitted separately by PaidRouteSessionOpenAck after
-    // the seller has authenticated and bound the buyer's tunnel IP.
-    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
-    Ok(true)
+    // Payment ACKs cover a persisted cumulative balance. Routing admission
+    // still requires a separate, authenticated session-open acknowledgment.
+    nostr_vpn_core::paid_route_store::acknowledge_paid_route_payment_outbox(
+        config_path,
+        seller_pubkey,
+        id,
+    )
 }
 
 fn valid_paid_exit_payment_id(id: &str) -> bool {
@@ -284,12 +330,7 @@ mod payment_outbox_owner_tests {
             Some((501, 20))
         );
         assert_eq!(
-            preferred_paid_exit_outbox_owner(
-                Some((502, 20)),
-                Some((501, 20)),
-                Some((0, 0)),
-                None
-            ),
+            preferred_paid_exit_outbox_owner(Some((502, 20)), Some((501, 20)), Some((0, 0)), None),
             Some((502, 20))
         );
     }
@@ -313,14 +354,23 @@ mod payment_outbox_owner_tests {
         let expected = fs::metadata(&store).expect("store metadata");
         for (path, mode) in [(&directory, 0o700), (&entry, 0o600)] {
             let metadata = fs::metadata(path).expect("outbox metadata");
-            assert_eq!((metadata.uid(), metadata.gid()), (expected.uid(), expected.gid()));
+            assert_eq!(
+                (metadata.uid(), metadata.gid()),
+                (expected.uid(), expected.gid())
+            );
             assert_eq!(metadata.permissions().mode() & 0o777, mode);
         }
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).expect("weaken dir");
         fs::set_permissions(&entry, fs::Permissions::from_mode(0o666)).expect("weaken entry");
         assert!(!queue_paid_exit_payment_bytes(&config, &id, b"{}").expect("repair"));
-        assert_eq!(fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700);
-        assert_eq!(fs::metadata(&entry).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&entry).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         fs::remove_dir_all(&directory).expect("remove outbox");
         let redirect = root.join("redirect");
@@ -331,3 +381,7 @@ mod payment_outbox_owner_tests {
         fs::remove_dir_all(root).expect("remove root");
     }
 }
+
+#[cfg(test)]
+#[path = "payment_outbox_tests.rs"]
+mod payment_outbox_tests;

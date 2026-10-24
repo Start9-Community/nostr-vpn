@@ -39,7 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func configure(manager: AppManager) {
         self.manager = manager
-        startsHidden = manager.launchedHidden && !Self.launchArgumentsContainDeepLink
+        startsHidden = manager.launchedHidden && !Self.launchArgumentsContainDeepLink && pendingUrls.isEmpty
         observeWindows()
         if trayController == nil {
             trayController = TrayController(manager: manager) { [weak self] in
@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func showMainWindow() {
+        startsHidden = false
         manager?.refresh()
         NSApp.unhide(nil)
         NSApp.activate()
@@ -132,7 +133,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func hideMainWindowSoon() {
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard self?.startsHidden == true else { return }
             NSApp.windows.first(where: { $0.title == "Nostr VPN" })?.orderOut(nil)
         }
     }

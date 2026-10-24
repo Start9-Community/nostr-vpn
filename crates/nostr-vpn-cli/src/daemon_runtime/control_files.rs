@@ -1,8 +1,13 @@
-pub(crate) fn daemon_pid_file_path(config_path: &Path) -> PathBuf {
-    let parent = config_path
+// macOS snapshots share the protected log/cleanup directory. Never import old
+// user-directory PID/state files: these are disposable, untrusted snapshots.
+pub(crate) fn daemon_pid_file_path(config_path: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return Ok(crate::macos_privileged_files::runtime_directory(config_path)?.join("daemon.pid"));
+    #[cfg(not(target_os = "macos"))]
+    Ok(config_path
         .parent()
-        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
-    parent.join("daemon.pid")
+        .unwrap_or_else(|| Path::new("."))
+        .join("daemon.pid"))
 }
 
 #[cfg(unix)]
@@ -325,7 +330,7 @@ pub(crate) fn daemon_log_file_path(config_path: &Path) -> Result<PathBuf> {
     Ok(config_path.parent().unwrap_or_else(|| Path::new(".")).join("daemon.log"))
 }
 
-fn runtime_open_options_no_follow() -> OpenOptions {
+pub(crate) fn runtime_open_options_no_follow() -> OpenOptions {
     #[cfg(unix)]
     let mut options = OpenOptions::new();
     #[cfg(not(unix))]
@@ -485,11 +490,14 @@ pub(crate) fn compact_log_file_if_needed(
     Ok(true)
 }
 
-pub(crate) fn daemon_state_file_path(config_path: &Path) -> PathBuf {
-    let parent = config_path
+pub(crate) fn daemon_state_file_path(config_path: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return Ok(crate::macos_privileged_files::runtime_directory(config_path)?.join("daemon.state.json"));
+    #[cfg(not(target_os = "macos"))]
+    Ok(config_path
         .parent()
-        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
-    parent.join("daemon.state.json")
+        .unwrap_or_else(|| Path::new("."))
+        .join("daemon.state.json"))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -578,6 +586,7 @@ pub(crate) fn write_daemon_control_request(
             error
         );
     }
+    #[cfg(not(target_os = "macos"))]
     project_daemon_vpn_enabled_request(config_path, request);
     Ok(())
 }
@@ -601,7 +610,12 @@ pub(crate) fn persist_desired_daemon_vpn_enabled(
     vpn_enabled: bool,
 ) -> Result<bool> {
     let mut app = load_or_default_config(config_path)?;
-    persist_desired_daemon_vpn_enabled_in_config(&mut app, config_path, vpn_enabled)
+    if app.autoconnect == vpn_enabled {
+        return Ok(false);
+    }
+    app.autoconnect = vpn_enabled;
+    app.save(config_path)?;
+    Ok(true)
 }
 
 pub(crate) fn persist_desired_daemon_vpn_enabled_in_config(
@@ -609,17 +623,14 @@ pub(crate) fn persist_desired_daemon_vpn_enabled_in_config(
     config_path: &Path,
     vpn_enabled: bool,
 ) -> Result<bool> {
-    if app.autoconnect == vpn_enabled {
-        return Ok(false);
-    }
-
+    // The CLI or app may have saved newer settings since the daemon loaded
+    // its runtime config. Persist only the requested switch on that version.
+    let changed = persist_desired_daemon_vpn_enabled(config_path, vpn_enabled)?;
     app.autoconnect = vpn_enabled;
-    app.ensure_defaults();
-    maybe_autoconfigure_node(app);
-    app.save(config_path)?;
-    Ok(true)
+    Ok(changed)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn project_daemon_vpn_enabled_request(config_path: &Path, request: DaemonControlRequest) {
     let Some(vpn_enabled) = (match request {
         DaemonControlRequest::Pause => Some(false),
@@ -629,7 +640,9 @@ fn project_daemon_vpn_enabled_request(config_path: &Path, request: DaemonControl
         return;
     };
 
-    let state_file = daemon_state_file_path(config_path);
+    let Ok(state_file) = daemon_state_file_path(config_path) else {
+        return;
+    };
     let Ok(Some(mut state)) = read_daemon_state(&state_file) else {
         return;
     };
@@ -777,82 +790,7 @@ pub(crate) fn wait_for_daemon_control_result(
     ))
 }
 
-pub(crate) fn stage_daemon_config_apply(config_path: &Path, source_path: &Path) -> Result<()> {
-    let staged_path = daemon_staged_config_file_path(config_path);
-    if let Some(parent) = staged_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let mut config = AppConfig::load(source_path)
-        .with_context(|| format!("failed to load source config {}", source_path.display()))?;
-    config.ensure_defaults();
-    maybe_autoconfigure_node(&mut config);
-    config
-        .save(&staged_path)
-        .with_context(|| format!("failed to stage config {}", staged_path.display()))?;
-    #[cfg(not(target_os = "macos"))]
-    set_private_cache_file_permissions(&staged_path)?;
-    Ok(())
-}
-
-pub(crate) fn update_daemon_config_from_staged_request(config_path: &Path) -> Result<bool> {
-    let staged_path = daemon_staged_config_file_path(config_path);
-    if !staged_path.exists() {
-        return Ok(false);
-    }
-
-    let result = apply_config_file(&staged_path, config_path);
-    let _ = fs::remove_file(&staged_path);
-    let _ = AppConfig::delete_persisted_secrets_for_path(&staged_path);
-    result?;
-    Ok(true)
-}
-
-pub(crate) fn request_daemon_stop(config_path: &Path) -> Result<()> {
-    write_daemon_control_request(config_path, DaemonControlRequest::Stop)
-}
-
-pub(crate) fn request_daemon_reload(config_path: &Path) -> Result<()> {
-    write_daemon_control_request(config_path, DaemonControlRequest::Reload)
-}
-
-pub(crate) fn apply_config_via_running_daemon(
-    source_path: &Path,
-    config_path: &Path,
-) -> Result<()> {
-    let status = daemon_status(config_path)?;
-    if !status.running {
-        #[cfg(target_os = "windows")]
-        {
-            let service_status = service_management::windows_query_service_status(false)?;
-            if windows_should_apply_config_via_service(&service_status) {
-                apply_config_file(source_path, config_path)?;
-                service_management::windows_start_service_and_wait(true, Duration::from_secs(10))?;
-                return Ok(());
-            }
-        }
-
-        return Err(anyhow!("daemon: not running"));
-    }
-    // A service process is visible to launchd/process scans before its config,
-    // tunnel, and control loop are initialized. Waiting for this pid-specific
-    // marker prevents a startup request from being mistaken for stale state
-    // and deleted by daemon initialization.
-    crate::wait_for_running_daemon_control_ready(config_path, &status)?;
-
-    clear_daemon_control_result(config_path);
-    stage_daemon_config_apply(config_path, source_path)?;
-    request_daemon_reload(config_path)?;
-    wait_for_daemon_control_ack(
-        config_path,
-        crate::daemon_control_ack_timeout(DaemonControlRequest::Reload),
-    )?;
-    wait_for_daemon_control_result(
-        config_path,
-        DaemonControlRequest::Reload,
-        crate::daemon_control_result_timeout(DaemonControlRequest::Reload),
-    )
-}
+include!("control_files/config_apply.rs");
 
 pub(crate) fn wait_for_daemon_control_ack(config_path: &Path, timeout: Duration) -> Result<()> {
     let control_file = daemon_control_file_path(config_path);
@@ -921,35 +859,25 @@ pub(crate) fn take_daemon_control_request(config_path: &Path) -> Option<DaemonCo
 }
 
 pub(crate) fn read_daemon_pid_record(path: &Path) -> Result<Option<DaemonPidRecord>> {
-    if !path.exists() {
+    let Some(raw) = read_daemon_status_file(path)? else {
         return Ok(None);
-    }
-
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read daemon pid file {}", path.display()))?;
-    let parsed = serde_json::from_str::<DaemonPidRecord>(&raw)
+    };
+    let parsed = serde_json::from_slice::<DaemonPidRecord>(&raw)
         .with_context(|| format!("failed to parse daemon pid file {}", path.display()))?;
     Ok(Some(parsed))
 }
 
 pub(crate) fn write_daemon_pid_record(path: &Path, record: &DaemonPidRecord) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
     let raw = serde_json::to_string_pretty(record)?;
-    write_runtime_file_atomically(path, raw.as_bytes())
+    write_daemon_status_file(path, raw.as_bytes())
         .with_context(|| format!("failed to write daemon pid file {}", path.display()))?;
     Ok(())
 }
 
 pub(crate) fn read_daemon_state(path: &Path) -> Result<Option<DaemonRuntimeState>> {
-    if !path.exists() {
+    let Some(raw) = read_daemon_status_file(path)? else {
         return Ok(None);
-    }
-
-    let raw = fs::read(path)
-        .with_context(|| format!("failed to read daemon state file {}", path.display()))?;
+    };
     match serde_json::from_slice::<DaemonRuntimeState>(&raw) {
         Ok(parsed) => Ok(Some(parsed)),
         Err(parse_error) => {
@@ -958,7 +886,9 @@ pub(crate) fn read_daemon_state(path: &Path) -> Result<Option<DaemonRuntimeState
                 && !trimmed.is_empty()
                 && let Ok(parsed) = serde_json::from_slice::<DaemonRuntimeState>(trimmed)
             {
-                if let Err(error) = write_runtime_file_atomically(path, trimmed) {
+                if daemon_status_writable()
+                    && let Err(error) = write_daemon_status_file(path, trimmed)
+                {
                     eprintln!(
                         "daemon: parsed padded state file {} but failed to rewrite clean copy: {}",
                         path.display(),
@@ -968,19 +898,48 @@ pub(crate) fn read_daemon_state(path: &Path) -> Result<Option<DaemonRuntimeState
                 return Ok(Some(parsed));
             }
 
-            quarantine_corrupt_runtime_file(path, "daemon state", &parse_error);
+            if daemon_status_writable() {
+                quarantine_corrupt_runtime_file(path, "daemon state", &parse_error);
+            }
             Ok(None)
         }
     }
 }
 
 pub(crate) fn write_daemon_state(path: &Path, state: &DaemonRuntimeState) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
     let raw = serde_json::to_string_pretty(state)?;
-    write_runtime_file_atomically(path, raw.as_bytes())
+    write_daemon_status_file(path, raw.as_bytes())
         .with_context(|| format!("failed to write daemon state file {}", path.display()))?;
     Ok(())
+}
+
+fn daemon_status_writable() -> bool {
+    #[cfg(target_os = "macos")]
+    return unsafe { libc::geteuid() } == 0;
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+fn read_daemon_status_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    #[cfg(target_os = "macos")]
+    return crate::macos_privileged_files::read_runtime_state(path);
+    #[cfg(not(target_os = "macos"))]
+    match fs::read(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read daemon status {}", path.display())),
+    }
+}
+
+fn write_daemon_status_file(path: &Path, contents: &[u8]) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    return crate::macos_privileged_files::write_runtime_state(path, contents);
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        write_runtime_file_atomically(path, contents)
+    }
 }

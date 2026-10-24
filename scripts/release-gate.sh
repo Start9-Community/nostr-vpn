@@ -402,6 +402,9 @@ run_release_gate_candidate_preflight() {
   # Release harness defects are cheap to catch and catastrophically expensive
   # after an exact-candidate VM build or physical-device run has started.
   ./scripts/test-release-gate-orchestration.sh
+  if bool_is_true "${NVPN_RELEASE_GATE_REQUIRE_COMPLETE:-0}"; then
+    verify_production_ios_idle_cpu
+  fi
   # Fail on cheap source-quality errors before any remote platform starts an
   # expensive exact-candidate build. These use the locked release graph and
   # are not repeated by the later full host validation lane.
@@ -417,7 +420,7 @@ run_release_gate_source_quality() {
   cargo check --locked -p nostr-vpn-app-core --no-default-features --lib
   # Keep the application lint scope: vendored dependencies are now workspace
   # members for Cargo packaging, with their existing upstream test lint policy.
-  cargo clippy --locked --workspace --exclude nvpn-cashu-service --exclude nvpn-cdk-spilman --all-targets -- -D warnings
+  cargo clippy --locked --workspace --exclude nvpn-cashu-service --exclude nvpn-cdk-spilman --all-targets --no-deps -- -D warnings
 }
 
 run_linux_arm64_cli_gate() {
@@ -1068,6 +1071,47 @@ linux_platform_lane_requested() {
     || ! release_gate_mode_disabled "${NVPN_RELEASE_GATE_LINUX_SERVICE_TOGGLE_E2E:-required}"
 }
 
+verify_retained_host_linux_vm_bundle() {
+  node --input-type=module - "$ROOT_DIR" "$1" <<'JS'
+import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+const [root, bundle] = process.argv.slice(2)
+const { requireReceiptSource } = await import(pathToFileURL(`${root}/scripts/release-artifact-provenance-lib.mjs`))
+const { readWorkspaceVersionTag, semverFromTag } = await import(pathToFileURL(`${root}/scripts/local-release-lib.mjs`))
+const receipt = JSON.parse(readFileSync(`${bundle}/receipt.json`, 'utf8'))
+const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
+const hash = path => createHash('sha256').update(readFileSync(`${root}/${path}`)).digest('hex')
+requireReceiptSource(receipt, { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}'),
+  candidateRoot: root, platform: 'linux', label: 'Retained Linux release bundle' })
+const expected = {
+  appVersion: semverFromTag(readWorkspaceVersionTag(readFileSync(`${root}/Cargo.toml`, 'utf8'))),
+  fipsGitSha: process.env.NVPN_EXPECTED_FIPS_GIT_SHA,
+  fipsGitTree: process.env.NVPN_EXPECTED_FIPS_GIT_TREE,
+  fipsVersion: process.env.NVPN_EXPECTED_FIPS_VERSION,
+  builderMode: process.env.NVPN_HOST_LINUX_VM_BUILDER_MODE,
+  sourceDateEpoch: Number(git('log', '-1', '--format=%ct', receipt.appGitSha)),
+}
+for (const [key, value] of Object.entries(expected)) {
+  if (value === undefined || receipt[key] !== value) throw new Error(`Retained Linux bundle differs: ${key}`)
+}
+const lockTool = `${root}/scripts/verify-cargo-path-patch-lock.py`
+const python = (...args) => execFileSync('python3', args, { cwd: root, encoding: 'utf8' }).trim()
+const specs = python(lockTool, '--manifest-specs', process.env.NVPN_FIPS_REPO_PATH).split('\n')
+if (specs.length !== 8) throw new Error('Retained Linux bundle lacks eight exact FIPS source packages')
+const rustToolchain = process.env.NVPN_HOST_LINUX_VM_RUST_TOOLCHAIN || '1.95.0'
+execFileSync('python3', [`${root}/scripts/verify-host-linux-vm-bundle.py`, bundle, `${bundle}/receipt.json`,
+  receipt.appGitSha, receipt.appGitTree, expected.appVersion,
+  expected.fipsGitSha, expected.fipsGitTree, expected.fipsVersion,
+  hash('Cargo.lock'), python(lockTool, '--expected-sha256', `${root}/Cargo.lock`, ...specs),
+  hash('linux/Cargo.lock'), python(lockTool, '--expected-sha256', `${root}/linux/Cargo.lock`, ...specs),
+  'x86_64-unknown-linux-gnu', expected.builderMode, rustToolchain,
+  hash('Dockerfile.linux-vm-gate'), hash('scripts/build-host-linux-vm-bundle-in-container.sh'), ...specs],
+  { cwd: root, stdio: 'inherit' })
+JS
+}
+
 prepare_host_linux_vm_bundle_and_record() {
   local bundle receipt temporary
   if [[ -z "${NVPN_HOST_LINUX_VM_BUILDER_MODE:-}" \
@@ -1083,7 +1127,12 @@ prepare_host_linux_vm_bundle_and_record() {
       export NVPN_HOST_LINUX_VM_NATIVE_BUILDER_JUMP="${NVPN_HOST_LINUX_VM_NATIVE_BUILDER_JUMP:-${NVPN_UBUNTU_SSH_JUMP:-}}"
     fi
   fi
-  bundle="$(./scripts/prepare-host-linux-vm-bundle.sh)"
+  if [[ -n "${NVPN_HOST_LINUX_VM_BUNDLE_DIR:-}" ]]; then
+    bundle="$NVPN_HOST_LINUX_VM_BUNDLE_DIR"
+    verify_retained_host_linux_vm_bundle "$bundle" >&2
+  else
+    bundle="$(./scripts/prepare-host-linux-vm-bundle.sh)"
+  fi
   [[ "$bundle" == /* && -d "$bundle" && ! -L "$bundle" ]] \
     || { echo "Host Linux VM bundle builder returned an invalid path." >&2; return 1; }
   NVPN_HOST_LINUX_VM_BUNDLE_DIR="$bundle"
@@ -1551,7 +1600,43 @@ raise SystemExit(
 '
 }
 
+verify_production_ios_idle_cpu() {
+    local artifact_app_sha
+    # A harness-only correction must not rebuild or relabel the signed app.
+    # Prove its product inputs are unchanged, then validate CPU evidence
+    # against the original artifact source and all original measurement bytes.
+    artifact_app_sha="$(node --input-type=module - \
+      "$ROOT_DIR" "${NVPN_MOBILE_IOS_REUSE_RECEIPT:?Missing production artifact receipt}" \
+      "$NVPN_EXPECTED_APP_GIT_SHA" <<'JS'
+import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+const [root, path, commit] = process.argv.slice(2)
+const { requireReceiptSource } = await import(pathToFileURL(`${root}/scripts/release-artifact-provenance-lib.mjs`))
+const receipt = JSON.parse(readFileSync(path, 'utf8'))
+const tree = execFileSync('git', ['rev-parse', `${commit}^{tree}`], { cwd: root, encoding: 'utf8' }).trim()
+requireReceiptSource(receipt, { commit, tree, candidateRoot: root, platform: 'ios', label: 'Production CPU artifact' })
+console.log(receipt.appGitSha)
+JS
+    )" || return
+    python3 "$ROOT_DIR/scripts/verify-ios-release-gate-cpu.py" \
+      --receipt "${NVPN_IOS_PRODUCTION_IDLE_CPU_RECEIPT:?Missing signed production iOS CPU evidence}" \
+      --artifact-receipt "${NVPN_MOBILE_IOS_REUSE_RECEIPT:?Missing production artifact receipt}" \
+      --app "${NVPN_MOBILE_IOS_RELEASE_APP_PATH:?Missing production app}" \
+      --app-git-sha "$artifact_app_sha" \
+      --fips-git-sha "$NVPN_EXPECTED_FIPS_GIT_SHA"
+}
+
 run_mobile_idle_cpu_gates() {
+  if [[ -n "${NVPN_IOS_PRODUCTION_IDLE_CPU_RECEIPT:-}" ]]; then
+    verify_production_ios_idle_cpu || return
+    MOBILE_IOS_APP_READY=1
+    return
+  fi
+  if bool_is_true "${NVPN_RELEASE_GATE_REQUIRE_COMPLETE:-0}"; then
+    echo "Complete release requires signed production iOS CPU evidence." >&2
+    return 1
+  fi
   case "$NVPN_IDLE_CPU_GATE" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off)
       echo "Skipping mobile idle CPU gates because NVPN_IDLE_CPU_GATE=$NVPN_IDLE_CPU_GATE"
@@ -1562,6 +1647,15 @@ run_mobile_idle_cpu_gates() {
   # Android Release idle is sampled after the first real signed-app network
   # cycle. Simulator/debug idle runs belong to development smoke, not release.
   local ios_device="${NVPN_IOS_DEVICE:-${NVPN_IOS_DEVICE_ID:-}}"
+  local ios_sample_seconds="${NVPN_IOS_PACKET_TUNNEL_IDLE_CPU_SAMPLE_SECONDS:-60}"
+  python3 - "$ios_sample_seconds" <<'PY'
+import math
+import sys
+
+seconds = float(sys.argv[1])
+if not math.isfinite(seconds) or not 60 <= seconds <= 120:
+    raise SystemExit("Release connected iOS CPU coverage requires 60–120 seconds")
+PY
   local ios_smoke_command=(./scripts/mobile-ios-smoke.sh device)
   if [[ -n "$ios_device" ]]; then
     ios_smoke_command+=(--device "$ios_device")
@@ -1573,8 +1667,8 @@ run_mobile_idle_cpu_gates() {
         NVPN_IOS_RUST_PROFILE=release \
         NVPN_IOS_IDLE_CPU_MAX_PERCENT="${NVPN_IOS_PACKET_TUNNEL_IDLE_CPU_MAX_PERCENT:-$NVPN_IDLE_CPU_MAX_PERCENT}" \
         NVPN_IOS_IDLE_CPU_SETTLE_SECONDS="${NVPN_IOS_PACKET_TUNNEL_IDLE_CPU_SETTLE_SECONDS:-15}" \
-        NVPN_IOS_IDLE_CPU_SAMPLE_SECONDS="${NVPN_IOS_PACKET_TUNNEL_IDLE_CPU_SAMPLE_SECONDS:-60}" \
-        NVPN_IOS_IDLE_CPU_ISOLATE_NETWORK=1 \
+        NVPN_IOS_IDLE_CPU_SAMPLE_SECONDS="$ios_sample_seconds" \
+        NVPN_IOS_IDLE_CPU_ISOLATE_NETWORK=0 \
         "${ios_smoke_command[@]}"
     MOBILE_IOS_APP_READY=1
   else
@@ -1667,6 +1761,15 @@ run_mobile_wireguard_exit_gates() {
       ./scripts/mobile-wireguard-exit-e2e.sh android
   lanes+=("$RELEASE_GATE_PARALLEL_LAST_INDEX")
 
+  if bool_is_true "${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}"; then
+    # The reuse path verifies these against the installed runner before tests.
+    # Retain them in this gate's evidence directory for subsequent radio tests.
+    cp "${NVPN_MOBILE_IOS_RELEASE_RUNNER_RECEIPT:?Missing retained runner diagnostics}" \
+      "$ios_artifact_dir/mobile-ios-release-runner-diagnostics.json"
+    cp "${NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT:?Missing retained runner install receipt}" \
+      "$ios_artifact_dir/installed-runner-receipt.json"
+  fi
+
   release_gate_parallel_start \
     "iOS physical WireGuard exit and DNS" \
     release_gate_run_with_timeout \
@@ -1682,14 +1785,14 @@ run_mobile_wireguard_exit_gates() {
       NVPN_MOBILE_WG_EXIT_SOURCE_IP_URL=https://api.ipify.org \
       NVPN_MOBILE_WG_EXIT_IMAGE_READY="$image_ready" \
       NVPN_MOBILE_WG_EXIT_IMAGE="$image" \
-      NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD=0 \
+      NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD="${NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD:-0}" \
       NVPN_MOBILE_WG_EXIT_CONTAINER="nostr-vpn-mobile-wg-release-ios-$$" \
       NVPN_MOBILE_WG_EXIT_HOST_PORT="$((port_base + 1))" \
       NVPN_MOBILE_WG_EXIT_SERVER_IP=10.99.78.1 \
       NVPN_MOBILE_WG_EXIT_CLIENT_IP=10.99.78.2 \
       NVPN_MOBILE_WG_EXIT_THROUGH_DNS_IP=10.99.78.53 \
       NVPN_MOBILE_WG_EXIT_HTTP_PROBE_PORT="$((port_base + 1))" \
-      NVPN_MOBILE_WG_EXIT_INSTALL_IOS=1 \
+      NVPN_MOBILE_WG_EXIT_INSTALL_IOS="${NVPN_MOBILE_WG_EXIT_INSTALL_IOS:-1}" \
       NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR="$ios_artifact_dir" \
       NVPN_MOBILE_IOS_NETWORK_EVIDENCE_OUTPUT="$evidence_dir/ios-wireguard-dns.json" \
       ./scripts/mobile-wireguard-exit-e2e.sh ios
@@ -1940,7 +2043,7 @@ run_mobile_join_e2e_gate() {
   esac
 
   local android_result_dir android_receipt android_fips_metadata
-  local ios_result_dir ios_derived_data ios_app ios_xctestrun ios_receipt
+  local ios_result_dir ios_derived_data ios_variant_derived_data ios_app ios_xctestrun ios_receipt
   local ios_production_receipt
   local ios_fips_metadata release_join_result_dir selected_android
   android_result_dir="${NVPN_ANDROID_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-android}"
@@ -1948,8 +2051,9 @@ run_mobile_join_e2e_gate() {
   android_fips_metadata="${NVPN_ANDROID_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-android/fips-linkage.json}"
   ios_result_dir="${NVPN_MOBILE_WG_EXIT_IOS_UI_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-ios}"
   release_join_result_dir="${NVPN_RELEASE_JOIN_RESULT_DIR:-$ROOT_DIR/artifacts/mobile-release-join}"
-  ios_derived_data="${NVPN_RELEASE_JOIN_IOS_VARIANT_DERIVED_DATA:-$release_join_result_dir/ios-derived-data}"
-  ios_app="${NVPN_RELEASE_JOIN_IOS_VARIANT_APP_PATH:-$ios_derived_data/Build/Products/Release-iphoneos/Nostr VPN.app}"
+  ios_variant_derived_data="${NVPN_RELEASE_JOIN_IOS_VARIANT_DERIVED_DATA:-$release_join_result_dir/ios-derived-data}"
+  ios_derived_data="${NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA:-$ios_variant_derived_data}"
+  ios_app="${NVPN_RELEASE_JOIN_IOS_VARIANT_APP_PATH:-$ios_variant_derived_data/Build/Products/Release-iphoneos/Nostr VPN.app}"
   ios_production_receipt="${NVPN_MOBILE_IOS_RELEASE_RECEIPT:-$ios_result_dir/mobile-ios-release-artifact.json}"
   ios_receipt="${NVPN_RELEASE_JOIN_IOS_VARIANT_RECEIPT:-$release_join_result_dir/ios-join-test-variant.json}"
   ios_fips_metadata="${NVPN_IOS_FIPS_METADATA_RECEIPT:-$ROOT_DIR/artifacts/mobile-ios/fips-linkage.json}"

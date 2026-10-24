@@ -8,9 +8,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use super::{
-    append_wallet_activity_entry, ensure_sat_wallet, normalize_mint_url, wallet_activity_id,
-    wallet_activity_now_unix, CashuWalletActivityEntry, CashuWalletActivityKind,
-    CashuWalletActivityStatus, CashuWalletService,
+    append_wallet_activity_entry, ensure_sat_wallet, hold_legacy_refunds, normalize_mint_url,
+    wallet_activity_id, wallet_activity_now_unix, CashuWalletActivityEntry,
+    CashuWalletActivityKind, CashuWalletActivityStatus, CashuWalletService,
 };
 use crate::helper::CashuSentPayment;
 
@@ -85,6 +85,7 @@ impl CashuWalletService {
             .recover_incomplete_sagas()
             .await
             .context("Failed to recover Cashu wallet state before sending payment")?;
+        hold_legacy_refunds(&wallet).await?;
 
         let available_sat = wallet.total_balance().await?.to_u64();
         if available_sat < amount_sat {

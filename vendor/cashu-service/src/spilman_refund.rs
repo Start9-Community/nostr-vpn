@@ -1,4 +1,6 @@
-//! Buyer-side recovery for settled Cashu Spilman channels.
+//! Buyer-side recovery for settled or expired Cashu Spilman channels.
+
+mod expiry;
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -11,7 +13,7 @@ use cdk_spilman::ClientStorage;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    fetch_spilman_keyset_info_json, load_or_create_cashu_spilman_sender_key,
+    fetch_spilman_keyset_info_json_with_client, load_or_create_cashu_spilman_sender_key,
     require_lock_for_data_dir, spilman_client_store_path, FileSpilmanClientStorage,
     SharedSpilmanClientStoreLock,
 };
@@ -23,9 +25,9 @@ struct HttpSpilmanMintConnection {
 }
 
 impl HttpSpilmanMintConnection {
-    fn new(mint_url: &str) -> Self {
+    fn new(mint_url: &str, client: reqwest::Client) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client,
             mint_url: mint_url.trim_end_matches('/').to_string(),
         }
     }
@@ -35,18 +37,17 @@ impl HttpSpilmanMintConnection {
         T: Serialize + ?Sized,
         R: serde::de::DeserializeOwned,
     {
-        let response = self
-            .client
-            .post(format!("{}{path}", self.mint_url))
-            .json(request)
-            .send()
-            .await?;
-        let status = response.status();
-        let body = response.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("Cashu mint request to {path} failed with {status}: {body}");
-        }
-        serde_json::from_str(&body).map_err(Into::into)
+        let response = crate::send_mint_request(
+            self.client
+                .post(format!("{}{path}", self.mint_url))
+                .json(request)
+                .timeout(std::time::Duration::from_secs(10)),
+        )
+        .await?;
+        crate::check_mint_response(response)?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -74,6 +75,17 @@ impl cdk_spilman::MintConnection for HttpSpilmanMintConnection {
             .await
     }
 }
+
+/// Local contention or work deadlines must not mark the mint unavailable.
+#[derive(Debug)]
+pub struct CashuSpilmanRefundDeferred(pub String);
+
+impl std::fmt::Display for CashuSpilmanRefundDeferred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for CashuSpilmanRefundDeferred {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamingRouteRestoreCashuSpilmanRefundResult {
@@ -192,9 +204,31 @@ pub async fn restore_sender_proofs_from_issued_keyset<M>(
 where
     M: cdk_spilman::MintConnection + ?Sized,
 {
+    restore_sender_proofs_from_issued_keyset_with_client(
+        sender,
+        mint,
+        mint_url,
+        unit,
+        requested_keyset,
+        &reqwest::Client::new(),
+    )
+    .await
+}
+
+pub async fn restore_sender_proofs_from_issued_keyset_with_client<M>(
+    sender: &cdk_spilman::SpilmanChannelSender,
+    mint: &M,
+    mint_url: &str,
+    unit: &str,
+    requested_keyset: &cdk_spilman::KeysetInfo,
+    client: &reqwest::Client,
+) -> anyhow::Result<Vec<Proof>>
+where
+    M: cdk_spilman::MintConnection + ?Sized,
+{
     let mint_url = mint_url.to_string();
     let unit = unit.to_string();
-    let fallback_keyset_ids = crate::fetch_spilman_keyset_ids(&mint_url, &unit)
+    let fallback_keyset_ids = crate::fetch_spilman_keyset_ids_with_client(client, &mint_url, &unit)
         .await?
         .into_iter()
         .map(|keyset_id| keyset_id.parse())
@@ -209,9 +243,13 @@ where
             let unit = unit.clone();
             async move {
                 let keyset_id = keyset_id.to_string();
-                let json =
-                    fetch_spilman_keyset_info_json(&mint_url, &unit, Some(keyset_id.as_str()))
-                        .await?;
+                let json = fetch_spilman_keyset_info_json_with_client(
+                    client,
+                    &mint_url,
+                    &unit,
+                    Some(keyset_id.as_str()),
+                )
+                .await?;
                 cdk_spilman::parse_keyset_info_from_json(&json).map_err(anyhow::Error::msg)
             }
         },
@@ -233,12 +271,65 @@ pub async fn restore_streaming_route_cashu_spilman_refund_with_lock(
     channel_id: &str,
     lock: SharedSpilmanClientStoreLock,
 ) -> anyhow::Result<StreamingRouteRestoreCashuSpilmanRefundResult> {
+    restore_streaming_route_cashu_spilman_refund_with_wallet(
+        data_dir,
+        channel_id,
+        lock,
+        &mut false,
+        |mint, unit, proofs| async move {
+            Ok(
+                crate::import_payment_proofs(data_dir, &mint, &unit, &proofs)
+                    .await?
+                    .amount_sat,
+            )
+        },
+    )
+    .await
+}
+
+/// Recover through the existing wallet owner without holding the channel store
+/// across network requests or wallet-queue waits.
+pub async fn restore_streaming_route_cashu_spilman_refund_with_wallet<F, Fut>(
+    data_dir: &Path,
+    channel_id: &str,
+    lock: SharedSpilmanClientStoreLock,
+    contacted_mint: &mut bool,
+    import: F,
+) -> anyhow::Result<StreamingRouteRestoreCashuSpilmanRefundResult>
+where
+    F: FnOnce(String, String, String) -> Fut,
+    Fut: Future<Output = anyhow::Result<u64>>,
+{
+    restore_streaming_route_cashu_spilman_refund_with_wallet_and_client(
+        data_dir,
+        channel_id,
+        lock,
+        contacted_mint,
+        &reqwest::Client::new(),
+        import,
+    )
+    .await
+}
+
+/// Recover using the caller's mint connection for keysets, swaps and restores.
+pub async fn restore_streaming_route_cashu_spilman_refund_with_wallet_and_client<F, Fut>(
+    data_dir: &Path,
+    channel_id: &str,
+    lock: SharedSpilmanClientStoreLock,
+    contacted_mint: &mut bool,
+    client: &reqwest::Client,
+    import: F,
+) -> anyhow::Result<StreamingRouteRestoreCashuSpilmanRefundResult>
+where
+    F: FnOnce(String, String, String) -> Fut,
+    Fut: Future<Output = anyhow::Result<u64>>,
+{
     let channel_id = channel_id.trim();
     if channel_id.is_empty() {
         anyhow::bail!("missing Cashu Spilman channel id");
     }
     let lock = require_lock_for_data_dir(data_dir, lock).map_err(|error| anyhow::anyhow!(error))?;
-    let (mut storage, storage_errors) =
+    let (storage, _) =
         FileSpilmanClientStorage::load_with_lock(lock).map_err(|error| anyhow::anyhow!(error))?;
     let funding = storage
         .get_funding(channel_id)
@@ -254,6 +345,9 @@ pub async fn restore_streaming_route_cashu_spilman_refund_with_lock(
     {
         return Ok(complete_result(channel_id, funding.mint_url, unit, 0, 0, 0));
     }
+
+    let expiry_refund = storage.expiry_refund(channel_id).cloned();
+    drop(storage);
 
     let original_keyset = cdk_spilman::parse_keyset_info_from_json(&funding.keyset_info_json)
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -273,14 +367,45 @@ pub async fn restore_streaming_route_cashu_spilman_refund_with_lock(
         anyhow::bail!("Cashu Spilman channel sender key does not match local wallet key");
     }
     let sender_secret = SecretKey::from_hex(&sender_key.secret_hex)?;
-    let output_keyset_json = fetch_spilman_keyset_info_json(&funding.mint_url, &unit, None)
-        .await
-        .map_err(|error| anyhow::anyhow!(error))?;
-    let output_keyset = cdk_spilman::parse_keyset_info_from_json(&output_keyset_json)
-        .map_err(|error| anyhow::anyhow!(error))?;
-    let mint = HttpSpilmanMintConnection::new(&funding.mint_url);
-    let funding_state = channel.check_funding_token_state(&mint).await?;
-    if funding_state.state != cashu::nuts::State::Spent {
+    *contacted_mint = true;
+    let mint = HttpSpilmanMintConnection::new(&funding.mint_url, client.clone());
+    let state = expiry::funding_state(&channel, &mint).await?;
+    let expired_refund = expiry::recover_expired_funding(
+        data_dir,
+        expiry_refund.clone(),
+        channel_id,
+        &channel,
+        &sender_secret,
+        &mint,
+        client,
+        state,
+    )
+    .await?;
+    let proofs = if let Some(proofs) = expired_refund {
+        proofs
+    } else if state == cashu::nuts::State::Spent {
+        let output_keyset_json =
+            fetch_spilman_keyset_info_json_with_client(client, &funding.mint_url, &unit, None)
+                .await
+                .map_err(anyhow::Error::msg)?;
+        let output_keyset = cdk_spilman::parse_keyset_info_from_json(&output_keyset_json)
+            .map_err(anyhow::Error::msg)?;
+        let sender = cdk_spilman::SpilmanChannelSender::new(sender_secret, channel);
+        let mut proofs = restore_sender_proofs_from_issued_keyset_with_client(
+            &sender,
+            &mint,
+            &funding.mint_url,
+            &unit,
+            &output_keyset,
+            client,
+        )
+        .await?;
+        sign_restored_sender_proofs(&sender.channel.params, &sender.alice_secret, &mut proofs)?;
+        if proofs.is_empty() && expiry_refund.is_some() {
+            anyhow::bail!("expiry refund outcome is not yet confirmed by the mint");
+        }
+        proofs
+    } else {
         return Ok(StreamingRouteRestoreCashuSpilmanRefundResult {
             channel_id: channel_id.to_string(),
             mint_url: funding.mint_url,
@@ -290,18 +415,7 @@ pub async fn restore_streaming_route_cashu_spilman_refund_with_lock(
             imported_amount_sat: 0,
             proof_count: 0,
         });
-    }
-
-    let sender = cdk_spilman::SpilmanChannelSender::new(sender_secret, channel);
-    let mut proofs = restore_sender_proofs_from_issued_keyset(
-        &sender,
-        &mint,
-        &funding.mint_url,
-        &unit,
-        &output_keyset,
-    )
-    .await?;
-    sign_restored_sender_proofs(&sender.channel.params, &sender.alice_secret, &mut proofs)?;
+    };
     let recovered_amount_sat = proofs
         .iter()
         .map(|proof| u64::from(proof.amount))
@@ -311,10 +425,16 @@ pub async fn restore_streaming_route_cashu_spilman_refund_with_lock(
         0
     } else {
         let proofs_json = serde_json::to_string(&proofs)?;
-        crate::import_payment_proofs(data_dir, &funding.mint_url, &unit, &proofs_json)
-            .await?
-            .amount_sat
+        import(funding.mint_url.clone(), unit.clone(), proofs_json).await?
     };
+    let (mut storage, storage_errors) =
+        FileSpilmanClientStorage::try_load(spilman_client_store_path(data_dir))
+            .map_err(anyhow::Error::msg)?
+            .ok_or_else(|| {
+                CashuSpilmanRefundDeferred(
+                    "Cashu refund recovered; waiting to record channel completion".into(),
+                )
+            })?;
     storage.set_closed(channel_id);
     storage.mark_refund_witnesses_persisted(channel_id);
     storage.mark_refund_proofs_validated(channel_id);

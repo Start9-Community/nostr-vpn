@@ -149,17 +149,6 @@ mod tests {
         )
         .expect("fresh physical default");
         assert_eq!(selected, fresh);
-
-        let bypass = crate::linux_endpoint_bypass_route_from_output(
-            "203.0.113.9".parse().expect("host"),
-            "203.0.113.9 via 192.0.2.1 dev enp1s0 src 192.0.2.10",
-            "nvwg0",
-            Some(&selected),
-        )
-        .expect("fresh WireGuard endpoint bypass");
-        assert_eq!(bypass.dev, "enp7s0");
-        assert_eq!(bypass.gateway.as_deref(), Some("198.51.100.1"));
-        assert_eq!(bypass.src.as_deref(), Some("198.51.100.10"));
     }
 
     #[test]

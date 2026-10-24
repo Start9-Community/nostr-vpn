@@ -1138,7 +1138,9 @@ for _ in $(seq 1 80); do
   BOB_COMPACT="$(printf '%s' "$BOB_STATUS" | compact_json)"
   ALICE_TUNNEL_IP="$("${COMPOSE[@]}" exec -T node-a nvpn ip | tr -d '\r')"
   BOB_TUNNEL_IP="$("${COMPOSE[@]}" exec -T node-b nvpn ip | tr -d '\r')"
-  DEFAULT_ROUTE="$("${COMPOSE[@]}" exec -T node-b sh -lc "ip route show default | head -n1 | tr -d '\r'")"
+  # Application defaults live in the egress policy table; main retains the
+  # physical default used by protected carrier sockets.
+  DEFAULT_ROUTE="$("${COMPOSE[@]}" exec -T node-b sh -lc "ip -4 route show table 20054 default | tr -d '\r'")"
   ADVERTISED_EXIT_READY=0
   if truthy "$PAID_EXIT_MODE" \
     || grep -q '"effective_advertised_routes":\[[^]]*"0.0.0.0/0"' <<<"$ALICE_COMPACT"; then
@@ -1195,7 +1197,7 @@ if truthy "$PAID_EXIT_MODE"; then
     }
   fi
   # Automatic selection may replace its first authenticated session while it
-  # persists funding and moves the default route. Do not turn that expected,
+  # persists funding and installs the application default. Do not turn that expected,
   # brief handoff into a silent `set -e` failure after route readiness.
   PAID_STATUS=""
   for _ in $(seq 1 30); do
@@ -1255,7 +1257,7 @@ DEFAULT_ROUTE=""
 PUBLIC_ROUTE=""
 for _ in $(seq 1 30); do
   DEFAULT_ROUTE="$("${COMPOSE[@]}" exec -T node-b sh -lc \
-    "ip route show default | head -n1 | tr -d '\r'" 2>/dev/null || true)"
+    "ip -4 route show table 20054 default | tr -d '\r'" 2>/dev/null || true)"
   PUBLIC_ROUTE="$("${COMPOSE[@]}" exec -T node-b sh -lc \
     "ip route get $PUBLIC_INTERNET_TARGET | tr -d '\r'" 2>/dev/null || true)"
   if grep -q 'dev utun100' <<<"$DEFAULT_ROUTE" \
@@ -1266,7 +1268,7 @@ for _ in $(seq 1 30); do
 done
 
 if ! grep -q 'dev utun100' <<<"$DEFAULT_ROUTE"; then
-  echo "exit-node docker e2e failed: default route did not switch to the tunnel" >&2
+  echo "exit-node docker e2e failed: application policy default does not use the tunnel" >&2
   echo "$DEFAULT_ROUTE"
   exit 1
 fi
@@ -1471,7 +1473,7 @@ if truthy "$PAID_EXIT_MODE" && [[ "$PAID_EXIT_PAYMENT_MODE" == "spilman" ]]; the
   run_spilman_resale_matrix
 fi
 
-echo "--- Default route ---"
+echo "--- Application policy default route ---"
 echo "$DEFAULT_ROUTE"
 echo "--- Public internet route ---"
 echo "$PUBLIC_ROUTE"
@@ -1526,5 +1528,5 @@ if truthy "$PAID_EXIT_MODE"; then
     echo "paid-exit docker e2e passed: token-lease admission allowed paid tunnel traffic, and the public target observed exit IP $NODE_A_PUBLIC_IP"
   fi
 else
-  echo "exit-node docker e2e passed: tunnel traffic reached the selected exit node, the default route switched into the tunnel, and the public target observed exit IP $NODE_A_PUBLIC_IP"
+  echo "exit-node docker e2e passed: tunnel traffic reached the selected exit node, the application policy default uses the tunnel, and the public target observed exit IP $NODE_A_PUBLIC_IP"
 fi

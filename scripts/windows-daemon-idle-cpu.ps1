@@ -112,7 +112,7 @@ try {
   $watch.Stop()
   $daemon.Refresh()
   if ($daemon.HasExited) { throw 'Candidate Windows nvpn daemon exited during idle sample' }
-  $cpuPercent = [Math]::Max(0, $daemon.TotalProcessorTime.TotalSeconds - $startCpu) * 100 / [Math]::Max(0.001, $watch.Elapsed.TotalSeconds)
+  $cpuPercent = [Math]::Max(0.0, $daemon.TotalProcessorTime.TotalSeconds - $startCpu) * 100 / [Math]::Max(0.001, $watch.Elapsed.TotalSeconds)
   $ok = $cpuPercent -le $MaxPercent
   [pscustomobject]@{
     ok = $ok
@@ -133,6 +133,10 @@ try {
   if ($daemon -and !$daemon.HasExited) { Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue }
   if ((Test-Path $Bin) -and (Test-Path $Config)) {
     & $Bin stop --config $Config --force 2>$null | Out-Null
+  }
+  $daemonLog = Join-Path $Fixture 'daemon.log'
+  if (Test-Path -LiteralPath $daemonLog -PathType Leaf) {
+    Copy-Item -LiteralPath $daemonLog -Destination (Join-Path $ArtifactRoot 'daemon.log')
   }
   Remove-Item -Recurse -Force $Fixture -ErrorAction SilentlyContinue
 }

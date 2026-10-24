@@ -176,7 +176,7 @@ fn cleanup_linux_network_state_with_actions(
 #[cfg(target_os = "linux")]
 impl LinuxNetworkCleanupActions for FipsPrivateTunnelRuntime {
     fn cleanup_endpoint_bypass_routes(&mut self) -> anyhow::Result<()> {
-        self.reconcile_linux_endpoint_bypass_routes(&[])
+        cleanup_linux_endpoint_bypass_routes(&mut self.endpoint_bypass_routes)
     }
 
     fn cleanup_forwarding_and_wireguard(&mut self) -> anyhow::Result<()> {
@@ -248,10 +248,10 @@ fn linux_exit_cleanup_state_is_empty(state: &LinuxExitNodeRuntime) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn cleanup_linux_endpoint_bypass_state(state: &mut LinuxNetworkCleanupState) -> Result<()> {
+fn cleanup_linux_endpoint_bypass_routes(routes: &mut Vec<crate::LinuxManagedEndpointBypassRoute>) -> Result<()> {
     let mut remaining = Vec::new();
     let mut failures = Vec::new();
-    for route in std::mem::take(&mut state.endpoint_bypass_routes) {
+    for route in std::mem::take(routes) {
         match crate::restore_linux_managed_endpoint_bypass_route(&route) {
             Ok(()) => {}
             Err(error) => {
@@ -260,7 +260,7 @@ fn cleanup_linux_endpoint_bypass_state(state: &mut LinuxNetworkCleanupState) -> 
             }
         }
     }
-    state.endpoint_bypass_routes = remaining;
+    *routes = remaining;
     if failures.is_empty() {
         Ok(())
     } else {
@@ -576,7 +576,7 @@ pub(super) fn cleanup_linux_exit_node_state(
 #[cfg(target_os = "linux")]
 impl LinuxNetworkCleanupActions for LinuxNetworkCleanupState {
     fn cleanup_endpoint_bypass_routes(&mut self) -> Result<()> {
-        cleanup_linux_endpoint_bypass_state(self)
+        cleanup_linux_endpoint_bypass_routes(&mut self.endpoint_bypass_routes)
     }
 
     fn cleanup_forwarding_and_wireguard(&mut self) -> Result<()> {

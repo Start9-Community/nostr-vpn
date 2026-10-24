@@ -59,17 +59,20 @@ export function parseEnvFile(text) {
     }
 
     let value = line.slice(separator + 1).trim()
+    const doubleQuoted = value.startsWith('"') && value.endsWith('"')
     if (
-      (value.startsWith('"') && value.endsWith('"')) ||
+      doubleQuoted ||
       (value.startsWith("'") && value.endsWith("'"))
     ) {
       value = value.slice(1, -1)
     }
 
-    value = value
-      .replace(/\\n/g, '\n')
-      .replace(/\\r/g, '\r')
-      .replace(/\\t/g, '\t')
+    if (doubleQuoted) {
+      value = value
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\r')
+        .replace(/\\t/g, '\t')
+    }
 
     values[key] = value
   }

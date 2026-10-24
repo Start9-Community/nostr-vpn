@@ -35,9 +35,8 @@ async fn watch_mobile_queued_join_rosters(
     state_control: FipsControlTcpSender,
     config_path: Option<PathBuf>,
     initial: Vec<QueuedJoinRoster>,
+    mut changes: Option<join_roster_watch::JoinRosterWatch>,
 ) {
-    const OUTBOX_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
     let mut started = HashSet::new();
     let mut discovered = initial;
     loop {
@@ -79,10 +78,13 @@ async fn watch_mobile_queued_join_rosters(
                 .await;
             });
         }
-        if config_path.is_none() {
+        let Some(changes) = changes.as_mut() else {
+            return;
+        };
+        if let Err(error) = changes.changed().await {
+            tracing::error!(?error, "mobile: failed to watch queued join approvals");
             return;
         }
-        tokio::time::sleep(OUTBOX_POLL_INTERVAL).await;
     }
 }
 
@@ -136,7 +138,8 @@ async fn deliver_mobile_queued_join_roster(
         {
             Ok(_) => {
                 if let Some(path) = outbox_path.as_deref()
-                    && let Err(error) = fs::remove_file(path)
+                    && let Err(error) =
+                        nostr_vpn_core::join_delivery::complete_join_roster_delivery(path, &queued)
                 {
                     tracing::warn!(?error, "mobile: failed to consume delivered join approval");
                 }
@@ -187,9 +190,11 @@ async fn push_mobile_wg_inbound_batch(
 struct MobileTunnelStarted {
     endpoint: Arc<FipsEndpoint>,
     state_control: FipsControlTcpSender,
+    control_pubsub: Option<ControlPubsubFipsRuntime>,
     mesh: MobileMesh,
     presence: Arc<RwLock<HashMap<String, MobilePeerPresence>>>,
     config: Arc<RwLock<MobileTunnelConfig>>,
+    peer_hints: Arc<RwLock<HashMap<String, Vec<FipsPeerAddressHint>>>>,
     app_config: Arc<RwLock<AppConfig>>,
     app_config_dirty: Arc<AtomicBool>,
     pending_join_roster_receipts: PendingJoinRosterReceipts,
@@ -395,6 +400,7 @@ impl Drop for MobileTunnel {
         }
         let tasks = std::mem::take(&mut self.tasks);
         let endpoint = self.endpoint.take();
+        let control_pubsub = self.control_pubsub.take();
         let wg_upstream = self.wg_upstream.take();
         self.runtime.block_on(async move {
             #[cfg(target_os = "ios")]
@@ -406,6 +412,9 @@ impl Drop for MobileTunnel {
             }
             if let Some(wg) = wg_upstream {
                 wg.shutdown().await;
+            }
+            if let Some(pubsub) = control_pubsub {
+                pubsub.stop().await;
             }
             if let Some(endpoint) = endpoint {
                 let _ = endpoint.shutdown().await;

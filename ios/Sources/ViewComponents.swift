@@ -465,7 +465,7 @@ func deviceStatus(_ participant: ParticipantState, state: AppState) -> String {
     case "local", "online", "present":
         return "Online"
     case "pending":
-        return "Connecting"
+        return participant.rosterAccepted ? "Connecting" : "Joining"
     case "offline", "absent", "off":
         return "Offline"
     default:

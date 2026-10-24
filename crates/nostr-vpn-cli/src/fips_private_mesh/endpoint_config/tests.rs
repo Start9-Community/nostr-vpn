@@ -36,7 +36,6 @@ mod endpoint_config_tests {
             advertise_on_nostr: true,
             webrtc_enabled,
             stun_servers: vec!["stun:stun.example.org:3478".to_string()],
-            nostr_relays: vec!["wss://relay.example.org".to_string()],
             websocket: WebSocketConfig {
                 seed_urls: vec!["wss://seed.example.org/fips".to_string()],
                 ..WebSocketConfig::default()
@@ -112,12 +111,22 @@ mod endpoint_config_tests {
         );
         assert_eq!(
             config.node.discovery.nostr.open_discovery_max_pending,
-            384,
+            480,
         );
         assert!(
             config.node.discovery.nostr.open_discovery_max_pending
                 < FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS,
             "public unaffiliated admission must remain bounded below socket capacity",
+        );
+        assert_eq!(
+            FIPS_PUBLIC_WEBSOCKET_MAX_INBOUND_CONNECTIONS
+                - config.node.discovery.nostr.open_discovery_max_pending,
+            32,
+        );
+        assert_eq!(
+            config.node.limits.max_peers
+                - config.node.discovery.nostr.open_discovery_max_pending,
+            160,
         );
     }
 

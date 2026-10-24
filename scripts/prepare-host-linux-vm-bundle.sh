@@ -17,6 +17,7 @@ source "$ROOT/scripts/lib-host-linux-native-builder.sh"
 
 load_release_env "$ROOT"
 load_mobile_env "$ROOT"
+host_linux_builder_resource_args
 [[ "$(uname -s)" == "Darwin" ]] || {
   echo "Linux release artifacts must be orchestrated by the controlling Mac" >&2
   exit 2
@@ -181,8 +182,8 @@ done < <(
   python3 "$PATCH_LOCK_VERIFIER" \
     --manifest-specs "$NVPN_FIPS_REPO_PATH"
 )
-[[ "${#FIPS_PATCH_PACKAGES[@]}" == 3 ]] || {
-  echo "Host Linux VM bundle lacks the three exact FIPS patch packages" >&2
+[[ "${#FIPS_PATCH_PACKAGES[@]}" == 8 ]] || {
+  echo "Host Linux VM bundle lacks the eight exact FIPS source packages" >&2
   exit 2
 }
 ROOT_REALIZED_CARGO_LOCK_SHA256="$(
@@ -461,18 +462,11 @@ else
   python3 "$CARGO_CACHE_VERIFIER" seed \
     "$DOWNLOAD_CACHE_DIR" "$TEMP_DIR/cargo-home" \
     "$TEMP_DIR/root-realized.lock" "$TEMP_DIR/linux-realized.lock"
-  IMAGE_TAG="nostr-vpn-linux-vm-gate:ubuntu24.04-rust${RUST_TOOLCHAIN//./-}-${BUILD_CACHE_ID:0:12}"
-  docker build \
-    --platform "$DOCKER_PLATFORM" \
-    --build-arg "RUST_TOOLCHAIN=$RUST_TOOLCHAIN" \
-    --file "$TEMP_DIR/source/app/Dockerfile.linux-vm-gate" \
-    --tag "$IMAGE_TAG" \
-    "$TEMP_DIR/docker-context" \
-    >"$TEMP_DIR/docker-build.log"
-  CONTAINER_IMAGE_ID="$(
-    docker image inspect --format '{{.Id}}' "$IMAGE_TAG"
-  )"
-  [[ "$CONTAINER_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+  host_linux_builder_prepare_image \
+    "$TEMP_DIR/source/app/Dockerfile.linux-vm-gate" \
+    "$RUST_TOOLCHAIN" "$DOCKER_PLATFORM" "$TEMP_DIR/docker-context" \
+    2>"$TEMP_DIR/docker-build.log"
+  CONTAINER_IMAGE_ID="$HOST_LINUX_BUILDER_IMAGE_ID"
 
   assert_local_target_empty() {
     docker run --rm \
@@ -499,7 +493,7 @@ else
     --volume "$TARGET_VOLUME_NAME:/target-root" \
     --env CARGO_HOME=/cargo-home \
     --env HOME=/cargo-home \
-    --env CARGO_INCREMENTAL=0 \
+    "${HOST_LINUX_BUILDER_RESOURCE_ARGS[@]}" \
     --env CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
     --env "EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256=$ROOT_REALIZED_CARGO_LOCK_SHA256" \
@@ -540,7 +534,7 @@ else
     --volume "$TEMP_DIR/package-linux-target:/workspace/app/linux/target" \
     --env CARGO_HOME=/cargo-home \
     --env HOME=/cargo-home \
-    --env CARGO_INCREMENTAL=0 \
+    "${HOST_LINUX_BUILDER_RESOURCE_ARGS[@]}" \
     --env CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
     --env "EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256=$ROOT_REALIZED_CARGO_LOCK_SHA256" \
@@ -676,9 +670,7 @@ import sys
     rust_toolchain,
     dockerfile_sha256,
     container_payload_sha256,
-    fips_core_patch_spec,
-    fips_endpoint_patch_spec,
-    fips_identity_patch_spec,
+    *fips_patch_specs,
     source_epoch,
     cli_short_arg,
     cli_verbose_arg,
@@ -739,17 +731,17 @@ if not rustc_version.startswith(f"rustc {rust_toolchain} "):
 if not cargo_version.startswith(f"cargo {rust_toolchain} "):
     raise SystemExit("Linux release builder used the wrong cargo toolchain")
 fips_patch_packages = dict(
-    spec.split("=", 1)
-    for spec in (
-        fips_core_patch_spec,
-        fips_endpoint_patch_spec,
-        fips_identity_patch_spec,
-    )
+    spec.split("=", 1) for spec in fips_patch_specs
 )
 if set(fips_patch_packages) != {
     "nvpn-fips-core",
     "nvpn-fips-endpoint",
     "nvpn-fips-identity",
+    "nvpn-mdns-sd",
+    "nvpn-turn",
+    "nvpn-webrtc",
+    "nvpn-webrtc-ice",
+    "nvpn-webrtc-util",
 }:
     raise SystemExit("unexpected exact FIPS patched lock package set")
 names = {

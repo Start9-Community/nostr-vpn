@@ -13,6 +13,7 @@ fn paid_exit_status_snapshot_json(
                 "key": key,
                 "offer": record.offer,
                 "event_id": record.signed_offer.event.id.to_string(),
+                "live": record.signed_offer.is_live_at(now_unix),
                 "relays": record.relay_urls,
                 "first_seen_unix": record.first_seen_unix,
                 "last_seen_unix": record.last_seen_unix,
@@ -376,10 +377,11 @@ fn print_paid_exit_status_snapshot(
                 .map(|score| format!(" rating_score={score:+}"))
                 .unwrap_or_default();
             println!(
-                "  {key} price={} country={} upstream={} last_seen={}{}",
+                "  {key} price={} country={} upstream={} live={} last_seen={}{}",
                 paid_exit_price_text(offer.pricing.price_msat_per_gb),
                 display_or_none(&offer.location.country_code),
                 offer.access.upstream.as_str(),
+                record.signed_offer.is_live_at(now_unix),
                 record.last_seen_unix,
                 rating_text
             );

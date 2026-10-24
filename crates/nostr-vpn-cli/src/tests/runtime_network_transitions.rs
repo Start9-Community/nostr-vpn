@@ -34,7 +34,7 @@ fn daemon_network_refresh_uses_platform_events_with_sparse_fallback() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn staged_refresh_retry_is_bounded_and_never_duplicates_a_successful_rebind() {
+async fn staged_refresh_retries_without_terminating_or_duplicating_a_successful_rebind() {
     let old_snapshot = crate::diagnostics::NetworkSnapshot {
         default_interface: Some("en0".to_string()),
         primary_ipv4: Some(Ipv4Addr::new(192, 0, 2, 10)),
@@ -55,7 +55,7 @@ async fn staged_refresh_retry_is_bounded_and_never_duplicates_a_successful_rebin
     let mut rebind_retry_deadline = PlatformNetworkSampleDeadline::default();
     assert_eq!(
         failed_rebind.schedule_completion_retry(&mut rebind_retry_deadline),
-        PlatformNetworkRefreshRetry::Scheduled
+        Duration::from_millis(DAEMON_NETWORK_REFRESH_RETRY_MILLIS)
     );
     assert!(
         !platform_network_background_maintenance_enabled(&rebind_retry_deadline),
@@ -88,28 +88,15 @@ async fn staged_refresh_retry_is_bounded_and_never_duplicates_a_successful_rebin
     );
     assert_eq!(
         failed_rebind.schedule_completion_retry(&mut rebind_retry_deadline),
-        PlatformNetworkRefreshRetry::Exhausted,
-        "a second transient failure must fail closed instead of stalling until the 5-minute tick"
+        Duration::from_millis(DAEMON_NETWORK_REFRESH_RETRY_MILLIS * 2),
+        "a second transient failure must keep recovery scheduled",
     );
-    let mut terminal_error = None;
+    assert!(platform_network_background_maintenance_enabled(
+        &rebind_retry_deadline
+    ));
     assert!(
-        !stage_platform_network_refresh_retry(
-            &mut terminal_error,
-            &mut failed_rebind,
-            &mut rebind_retry_deadline,
-            anyhow!("second transient carrier failure"),
-            "FIPS carrier rebind retry budget exhausted",
-        ),
-        "exhausted retries must terminate the unhealthy daemon generation"
-    );
-    assert!(
-        terminal_error
-            .as_ref()
-            .is_some_and(|error| error.to_string().contains("retry budget exhausted"))
-    );
-    assert!(
-        platform_network_event_receive_enabled(false, 0, &rebind_retry_deadline),
-        "exhausted retry did not release intake for a fresh OS event"
+        !platform_network_event_receive_enabled(false, 0, &rebind_retry_deadline),
+        "queued notifications must not reset the bounded recovery deadline"
     );
 
     let mut failed_completion = PlatformNetworkRefreshAttempt::new(
@@ -125,7 +112,7 @@ async fn staged_refresh_retry_is_bounded_and_never_duplicates_a_successful_rebin
     let mut completion_retry_deadline = PlatformNetworkSampleDeadline::default();
     assert_eq!(
         failed_completion.schedule_completion_retry(&mut completion_retry_deadline),
-        PlatformNetworkRefreshRetry::Scheduled
+        Duration::from_millis(DAEMON_NETWORK_REFRESH_RETRY_MILLIS)
     );
     assert!(
         !failed_completion.needs_carrier_rebind(true),
@@ -161,6 +148,82 @@ async fn staged_refresh_retry_is_bounded_and_never_duplicates_a_successful_rebin
     assert!(
         !network_reconcile.is_superseded_by(&network_reconcile.parameters(true).2, false, true),
         "an active network reconciliation already owns the same route drift"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_route_refresh_failures_keep_status_and_control_live_until_network_returns() {
+    let snapshot = crate::diagnostics::NetworkSnapshot {
+        default_interface: Some("en0".to_string()),
+        primary_ipv4: Some(Ipv4Addr::new(192, 0, 2, 10)),
+        ..Default::default()
+    };
+    let mut attempt = Some(PlatformNetworkRefreshAttempt::new(
+        snapshot.clone(),
+        FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths,
+        "network change",
+    ));
+    attempt.as_mut().unwrap().mark_carrier_rebound();
+    let mut deadline = PlatformNetworkSampleDeadline::default();
+    let mut periodic =
+        tokio::time::interval(Duration::from_secs(DAEMON_NETWORK_REFRESH_INTERVAL_SECS));
+    periodic.tick().await;
+    let mut status = String::new();
+    let started = tokio::time::Instant::now();
+    for failure in 0..160 {
+        stage_platform_network_refresh_failure(
+            &mut status,
+            &mut attempt,
+            &mut deadline,
+            anyhow!("temporary network outage"),
+            "network route refresh failed",
+        );
+        assert!(status.contains("retrying"));
+        assert!(attempt.as_ref().unwrap().parameters(true).2 == snapshot);
+        assert!(!attempt.as_ref().unwrap().needs_carrier_rebind(true));
+        if failure > 0 {
+            assert!(daemon_state_background_maintenance_enabled(
+                &deadline, false
+            ));
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+            sender.send(()).await.unwrap();
+            tokio::select! {
+                biased;
+                _ = next_daemon_network_trigger(&mut deadline, &mut periodic) => panic!("retry skipped its delay"),
+                _ = receiver.recv() => {},
+            }
+        }
+        let before = tokio::time::Instant::now();
+        assert_eq!(
+            next_daemon_network_trigger(&mut deadline, &mut periodic).await,
+            DaemonNetworkTrigger::EventDeadline
+        );
+        assert!(
+            tokio::time::Instant::now() - before
+                <= Duration::from_millis(DAEMON_NETWORK_REFRESH_RETRY_MAX_MILLIS)
+        );
+    }
+    assert!(
+        tokio::time::Instant::now() - started > Duration::from_secs(300),
+        "exercise the reported five-minute outage"
+    );
+    let mut restored = snapshot.clone();
+    restored.primary_ipv4 = Some(Ipv4Addr::new(198, 51, 100, 20));
+    assert!(
+        attempt
+            .as_ref()
+            .unwrap()
+            .is_superseded_by(&restored, false, false)
+    );
+    let mut next = PlatformNetworkRefreshAttempt::new(
+        restored,
+        FipsLinkEventRefresh::RebindUnderlayAndRefreshPaths,
+        "network change",
+    );
+    assert!(next.needs_carrier_rebind(true));
+    assert_eq!(
+        next.schedule_completion_retry(&mut deadline),
+        Duration::from_millis(DAEMON_NETWORK_REFRESH_RETRY_MILLIS)
     );
 }
 

@@ -2,11 +2,6 @@ import Darwin
 import Foundation
 import UIKit
 
-private struct DebugProcessCpuSample {
-    let pid: Int
-    let cpuSeconds: Double
-}
-
 extension AppModel {
     func runLaunchAutomationIfRequested() -> Bool {
         #if DEBUG
@@ -89,12 +84,11 @@ extension AppModel {
         }
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
         dispatch(NativeActions.addNetwork(normalized.isEmpty ? "iOS smoke" : normalized))
-        if arguments.contains("--nvpn-debug-isolate-idle-network") {
-            dispatch(NativeActions.updateSettings([
-                "fipsBootstrapEnabled": false,
-                "fipsNostrDiscoveryEnabled": false,
-            ]))
-        }
+        let isolated = arguments.contains("--nvpn-debug-isolate-idle-network")
+        dispatch(NativeActions.updateSettings([
+            "fipsBootstrapEnabled": !isolated,
+            "fipsNostrDiscoveryEnabled": !isolated,
+        ]))
         tunnelConfigSyncTask?.cancel()
         tunnelConfigSyncTask = nil
         refresh()
@@ -147,113 +141,6 @@ extension AppModel {
         #else
         return false
         #endif
-    }
-
-    private func runDebugIdleCpuProbe(arguments: [String]) async {
-        #if DEBUG
-        let previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
-        UIApplication.shared.isIdleTimerDisabled = true
-        defer {
-            UIApplication.shared.isIdleTimerDisabled = previousIdleTimerDisabled
-        }
-        let resultName = Self.argumentValue(after: "--nvpn-debug-idle-cpu-result", in: arguments)
-            ?? "debug-idle-cpu.json"
-        let sampleSeconds = Self.clampedDoubleArgument(
-            "--nvpn-debug-idle-cpu-sample-seconds",
-            in: arguments,
-            defaultValue: 10,
-            minValue: 0.1,
-            maxValue: 120
-        )
-        let settleSeconds = Self.clampedDoubleArgument(
-            "--nvpn-debug-idle-cpu-settle-seconds",
-            in: arguments,
-            defaultValue: 3,
-            minValue: 0,
-            maxValue: 120
-        )
-        let maxPercent = Self.clampedDoubleArgument(
-            "--nvpn-debug-idle-cpu-max-percent",
-            in: arguments,
-            defaultValue: 5,
-            minValue: 0,
-            maxValue: 100
-        )
-        let process = Self.argumentValue(
-            after: "--nvpn-debug-idle-cpu-process",
-            in: arguments
-        ) ?? "app"
-        let label = process == "packet-tunnel" ? "iOS packet tunnel" : "iOS app"
-        let startedAt = Date()
-        var result: [String: Any] = [
-            "ok": false,
-            "phase": "settling",
-            "label": label,
-            "process": process,
-            "maxPercent": maxPercent,
-            "sampleSeconds": sampleSeconds,
-            "settleSeconds": settleSeconds,
-            "startedAt": ISO8601DateFormatter().string(from: startedAt),
-        ]
-        for (key, value) in Self.appBuildMetadata() {
-            result[key] = value
-        }
-        writeDebugProbeResult(result, name: resultName)
-        if settleSeconds > 0 {
-            try? await Task.sleep(nanoseconds: UInt64(settleSeconds * 1_000_000_000))
-        }
-        guard let start = await debugProcessCpuSample(process: process) else {
-            result["phase"] = "finished"
-            result["error"] = "idle CPU process metrics unavailable"
-            result["finishedAt"] = ISO8601DateFormatter().string(from: Date())
-            writeDebugProbeResult(result, name: resultName)
-            return
-        }
-        let sampleStartedAt = Date()
-        result["phase"] = "sampling"
-        result["pid"] = start.pid
-        result["sampleStartedAt"] = ISO8601DateFormatter().string(from: sampleStartedAt)
-        writeDebugProbeResult(result, name: resultName)
-        try? await Task.sleep(nanoseconds: UInt64(sampleSeconds * 1_000_000_000))
-        let elapsed = max(0.001, Date().timeIntervalSince(sampleStartedAt))
-        guard let end = await debugProcessCpuSample(process: process) else {
-            result["phase"] = "finished"
-            result["error"] = "idle CPU process exited during sampling"
-            result["finishedAt"] = ISO8601DateFormatter().string(from: Date())
-            writeDebugProbeResult(result, name: resultName)
-            return
-        }
-        guard end.pid == start.pid, end.cpuSeconds >= start.cpuSeconds else {
-            result["phase"] = "finished"
-            result["error"] = "idle CPU process restarted during sampling"
-            result["finishedAt"] = ISO8601DateFormatter().string(from: Date())
-            writeDebugProbeResult(result, name: resultName)
-            return
-        }
-        let cpuSeconds = end.cpuSeconds - start.cpuSeconds
-        let cpuPercent = cpuSeconds * 100.0 / elapsed
-        result["phase"] = "finished"
-        result["ok"] = cpuPercent <= maxPercent
-        result["cpuPercent"] = cpuPercent
-        result["elapsedSeconds"] = elapsed
-        result["cpuSeconds"] = cpuSeconds
-        result["finishedAt"] = ISO8601DateFormatter().string(from: Date())
-        result["debugProbeElapsedMs"] = Self.elapsedMilliseconds(since: startedAt)
-        writeDebugProbeResult(result, name: resultName)
-        #endif
-    }
-
-    private func debugProcessCpuSample(process: String) async -> DebugProcessCpuSample? {
-        if process == "packet-tunnel" {
-            guard let metrics = await vpnController.packetTunnelProcessMetrics() else {
-                return nil
-            }
-            return DebugProcessCpuSample(pid: metrics.pid, cpuSeconds: metrics.cpuSeconds)
-        }
-        guard process == "app", let cpuSeconds = Self.processCpuSeconds() else {
-            return nil
-        }
-        return DebugProcessCpuSample(pid: Int(getpid()), cpuSeconds: cpuSeconds)
     }
 
     private func runDebugDisconnect(resultName: String) async {
@@ -705,34 +592,18 @@ extension AppModel {
     }
 
     private func startVpnForDebugProbe() async -> String? {
-        guard let core else {
-            return "Native core unavailable"
-        }
+        guard core != nil else { return "Native core unavailable" }
         guard packetTunnelStartAllowed(reason: "debug probe") else {
             return Self.vpnDisclosurePromptMessage
         }
-        if !state.vpnEnabled {
-            dispatch(NativeActions.connectVpn())
+        // Use the shipped transition queue, including its startup cancellation
+        // and serialization. A second controller.start here races autoconnect.
+        setVpnEnabled(true, force: true)
+        await packetTunnelTransitionTask?.value
+        guard await vpnController.statusRawValue() == 3 else {
+            return statusMessage.isEmpty ? "VPN did not connect" : statusMessage
         }
-        guard state.error.isEmpty, state.vpnEnabled else {
-            return state.error.isEmpty ? "Native VPN state did not enable" : state.error
-        }
-        let tunnelConfigJson = core.mobileTunnelConfigJson()
-        let providerOptionsConfigJson = core.mobileTunnelProviderOptionsConfigJson()
-        do {
-            try await vpnController.start(
-                state: state,
-                network: activeNetwork,
-                tunnelConfigJson: tunnelConfigJson,
-                providerOptionsConfigJson: providerOptionsConfigJson
-            )
-            return nil
-        } catch {
-            dispatch(NativeActions.disconnectVpn())
-            let message = error.localizedDescription
-            debugLog("debug probe start failed: \(message)")
-            return message
-        }
+        return nil
     }
 
     private func fetchDebugProbe(urlString: String) async -> [String: Any] {
@@ -788,18 +659,7 @@ extension AppModel {
         max(0, Int(Date().timeIntervalSince(start) * 1000))
     }
 
-    nonisolated private static func processCpuSeconds() -> Double? {
-        var usage = rusage()
-        guard getrusage(RUSAGE_SELF, &usage) == 0 else {
-            return nil
-        }
-        return Double(usage.ru_utime.tv_sec)
-            + Double(usage.ru_utime.tv_usec) / 1_000_000
-            + Double(usage.ru_stime.tv_sec)
-            + Double(usage.ru_stime.tv_usec) / 1_000_000
-    }
-
-    nonisolated private static func appBuildMetadata() -> [String: Any] {
+    nonisolated static func appBuildMetadata() -> [String: Any] {
         var metadata: [String: Any] = [:]
         if let bundleIdentifier = Bundle.main.bundleIdentifier,
            !bundleIdentifier.isEmpty {

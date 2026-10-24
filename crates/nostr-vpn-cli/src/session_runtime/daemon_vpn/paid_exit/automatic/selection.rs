@@ -61,10 +61,10 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
             return Ok(false);
         }
     };
-    let changing_mint = automatic.candidate.as_ref().is_some_and(|candidate| {
+    let replacing_unfunded = automatic.candidate.as_ref().is_some_and(|candidate| {
         !candidate.funded
-            && candidate.selection.offer_key == selection.offer_key
-            && candidate.selection.mint_url != selection.mint_url
+            && (candidate.selection.offer_key != selection.offer_key
+                || candidate.selection.mint_url != selection.mint_url)
     });
     let exhausted = automatic.candidate.as_ref().is_some_and(|candidate| {
         candidate.funded
@@ -72,15 +72,14 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
                 .buyer_session_has_remaining_capacity(&candidate.session_id)
                 .unwrap_or(false)
     });
-    if changing_mint || exhausted {
+    if replacing_unfunded || exhausted {
         // A wallet operation may already be committing funds. Consume its
         // result before deciding whether a replacement channel is necessary.
         if automatic.funding.is_some() {
             return Ok(false);
         }
-        // Keep the signed provider and its successful probe history. The old
-        // session remains available for recovery; its mint/request identity
-        // must never be rewritten underneath a wallet operation.
+        // Switch immediately to a payable mint/provider. Preserve the old
+        // session for wallet recovery and do not blame a seller for a mint outage.
         automatic.cancel_candidate(false, now_unix);
     }
     if let Some(candidate) = automatic.candidate.as_mut() {
@@ -133,7 +132,7 @@ pub(crate) fn reconcile_automatic_paid_exit_selection(
                 .funding_attempted = true;
         }
         finish_automatic_reselection(&store_path, &reselect_from)?;
-        return Ok(changing_mint || exhausted || route_changed);
+        return Ok(replacing_unfunded || exhausted || route_changed);
     }
 
     let buyer_npub = app
@@ -236,8 +235,7 @@ fn recover_automatic_paid_exit_session(
                 && channel.offer_id == offer.offer_id
                 && channel.counterparty_npub == offer.seller_npub
                 && channel.mint_url == selection.mint_url
-                && channel.expires_at_unix > now_unix
-                && lease.lease.expires_at_unix > now_unix
+                && channel.routing_expires_at_unix(lease.lease.expires_at_unix) > now_unix
                 && store
                     .buyer_session_has_remaining_capacity(&session.session.session_id)
                     .ok()?

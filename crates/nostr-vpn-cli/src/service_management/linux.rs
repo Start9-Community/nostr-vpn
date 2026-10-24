@@ -1,3 +1,11 @@
+#[cfg(any(target_os = "linux", test))]
+const LINUX_EGRESS_GUARD_UNIT: &str = "nvpn-egress-guard.service";
+
+#[cfg(target_os = "linux")]
+fn linux_guard_service_unit_path() -> PathBuf {
+    PathBuf::from(format!("/etc/systemd/system/{LINUX_EGRESS_GUARD_UNIT}"))
+}
+
 #[cfg(target_os = "linux")]
 fn linux_service_unit_path() -> PathBuf {
     PathBuf::from(format!("/etc/systemd/system/{LINUX_SERVICE_UNIT_NAME}"))
@@ -51,25 +59,24 @@ fn linux_install_service(
         mesh_refresh_interval_secs,
         log_path,
     )?;
+    let guard_unit = linux_guard_service_unit_content(&service_executable, config_path)?;
     for step in linux_service_disable_steps(LINUX_SERVICE_UNIT_NAME) {
         let _ = run_systemctl_allow_missing(&step, "disable/stop existing service", true);
     }
     stop_existing_daemons_before_service_install(config_path)?;
+    // Persist protection in root storage before installing/enabling the boot
+    // unit. It remains readable when the user's home is locked at boot.
+    {
+        let _lock = acquire_daemon_instance_lock(config_path)?;
+        crate::linux_exit_intent::initialize(config_path, None)?;
+    }
     install_service_executable_copy(executable, &service_executable)?;
-    let temp = unit_path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temp, unit).with_context(|| format!("failed to write {}", temp.display()))?;
-    #[cfg(unix)]
-    fs::set_permissions(&temp, fs::Permissions::from_mode(0o644))
-        .with_context(|| format!("failed to chmod {}", temp.display()))?;
-    fs::rename(&temp, &unit_path).with_context(|| {
-        format!(
-            "failed to move {} into {}",
-            temp.display(),
-            unit_path.display()
-        )
-    })?;
-
+    crate::write_runtime_file_durably(&unit_path, unit.as_bytes())?;
+    crate::write_runtime_file_durably(&linux_guard_service_unit_path(), guard_unit.as_bytes())?;
     run_systemctl_checked(&["daemon-reload"], "reload systemd")?;
+    for step in linux_service_enable_steps(LINUX_EGRESS_GUARD_UNIT) {
+        run_systemctl_checked(&step, "enable/start egress protection")?;
+    }
     for step in linux_service_enable_steps(LINUX_SERVICE_UNIT_NAME) {
         run_systemctl_checked(&step, "enable/start service")?;
     }
@@ -79,15 +86,30 @@ fn linux_install_service(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_uninstall_service() -> Result<()> {
+fn linux_uninstall_service(config_path: &Path) -> Result<()> {
     if !linux_systemctl_available() {
         return Err(anyhow!("systemd (systemctl) is not available on this host"));
     }
 
+    let identity = fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
+    let config_path = identity.as_path();
+    let unit_path = linux_service_unit_path();
+    if unit_path.exists() && !linux_service_unit_matches_config(&fs::read_to_string(&unit_path)?, config_path) {
+        return Err(anyhow!("installed Linux service belongs to another configuration"));
+    }
     for step in linux_service_disable_steps(LINUX_SERVICE_UNIT_NAME) {
         run_systemctl_allow_missing(&step, "disable/stop service", true)?;
     }
 
+    let _lock = acquire_daemon_instance_lock(config_path)?;
+    crate::linux_exit_intent::release_for_uninstall(config_path)?;
+    for step in linux_service_disable_steps(LINUX_EGRESS_GUARD_UNIT) {
+        run_systemctl_allow_missing(&step, "disable/stop egress protection service", true)?;
+    }
+    let guard_unit_path = linux_guard_service_unit_path();
+    if guard_unit_path.exists() {
+        fs::remove_file(guard_unit_path)?;
+    }
     let unit_path = linux_service_unit_path();
     if unit_path.exists() {
         fs::remove_file(&unit_path)
@@ -237,8 +259,9 @@ pub(crate) fn linux_service_config_path_from_unit_contents(unit: &str) -> Option
 
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn linux_service_unit_matches_config(unit: &str, config_path: &Path) -> bool {
+    let identity = fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
     linux_service_config_path_from_unit_contents(unit)
-        .is_some_and(|installed| installed == config_path.display().to_string())
+        .is_some_and(|installed| installed == identity.display().to_string())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -297,7 +320,7 @@ pub(crate) fn linux_service_unit_content(
     let iface = systemd_quote(&iface.replace('$', "$$"));
     let log = log.replace('%', "%%");
     Ok(format!(
-        "[Unit]\nDescription=Nostr VPN daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={exec} daemon --service --config {config} --iface {iface} --mesh-refresh-interval-secs {mesh_refresh_interval_secs}\nRestart=always\nRestartSec=3\nStandardOutput=append:{log}\nStandardError=append:{log}\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Nostr VPN daemon\nAfter={LINUX_EGRESS_GUARD_UNIT} network-online.target\nRequires={LINUX_EGRESS_GUARD_UNIT}\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={exec} daemon --service --config {config} --iface {iface} --mesh-refresh-interval-secs {mesh_refresh_interval_secs}\nRestart=always\nRestartSec=3\nStandardOutput=append:{log}\nStandardError=append:{log}\n\n[Install]\nWantedBy=multi-user.target\n"
     ))
 }
 
@@ -388,4 +411,16 @@ pub(crate) fn linux_service_status_from_show_output(show: &str) -> (bool, bool, 
     let running =
         active_state.as_deref() == Some("active") && sub_state.as_deref() == Some("running");
     (loaded, running, pid)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linux_guard_service_unit_content(executable: &Path, config_path: &Path) -> Result<String> {
+    for path in [executable, config_path] {
+        if !path.is_absolute() || path.to_string_lossy().chars().any(char::is_control) {
+            return Err(anyhow!("egress guard requires absolute paths without control characters"));
+        }
+    }
+    let exec = systemd_quote(&executable.display().to_string());
+    let config = systemd_quote(&config_path.display().to_string().replace('$', "$$"));
+    Ok(format!("[Unit]\nDescription=Nostr VPN saved egress protection\nDefaultDependencies=no\nAfter=local-fs.target\nBefore=network-pre.target {LINUX_SERVICE_UNIT_NAME}\nWants=network-pre.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart={exec} egress-guard --config {config}\n\n[Install]\nWantedBy=multi-user.target\n"))
 }

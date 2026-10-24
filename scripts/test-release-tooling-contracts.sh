@@ -8,8 +8,10 @@ source "$ROOT_DIR/scripts/lib-release-gate-parallel.sh"
 run_contract_batch() {
   local contract contract_status status=0
   for contract in "$@"; do
+    printf "Running release tooling contract: %s\n" "$contract"
     "$contract" || {
       contract_status="$?"
+      printf "Release tooling contract failed: %s (exit %s)\n" "$contract" "$contract_status" >&2
       ((status != 0)) || status="$contract_status"
     }
   done
@@ -31,6 +33,7 @@ start_lane "release and Windows contracts" run_contract_batch \
 start_lane "mobile contracts" run_contract_batch \
   scripts/test-mobile-{physical-device-selection,ios-vpn-cleanup,android-release-cleanup,wireguard-exit-dns,wireguard-fixture-cleanup,release-provenance,release-artifact-reuse,underlay-change,release-join-gate}-harness.sh \
   scripts/test-android-release-network-evidence-harness.sh \
+  scripts/test-ios-connected-use-evidence.py \
   scripts/test-{ios-vpn-desired-state,ios-packet-tunnel-replacement}.sh
 start_lane "cross-platform artifact contracts" run_contract_batch \
   scripts/test-{desktop-mobile-manual-join-receipt,mobile-ios-release-runner,windows-release-mobile-join}-harness.sh \

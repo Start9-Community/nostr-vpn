@@ -19,6 +19,53 @@ FILES=(
 for file in "${FILES[@]}"; do
   bash -n "$file"
 done
+python3 - "$ROOT/scripts/lib-mobile-release-join-artifacts.sh" <<'PY'
+import os, pathlib, subprocess, sys, tempfile
+with tempfile.TemporaryDirectory() as directory:
+    root = pathlib.Path(directory)
+    (root / 'tools').mkdir()
+    tool = root / 'tools/run-ios'
+    tool.write_text('#!/bin/sh\nexit 0\n')
+    tool.chmod(0o755)
+    production = root / 'production.json'
+    production.write_text('{}')
+    retained = root / 'retained'
+    (retained / 'Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app').mkdir(parents=True)
+    plan = retained / 'retained.xctestrun'
+    plan.write_text('retained plan')
+    receipt = root / 'installed.json'
+    receipt.write_text('{}')
+    for installed, expected in [(False, 'build-for-testing'), (True, 'build')]:
+        capture = root / 'arguments'
+        script = '''
+source "$LIBRARY"
+release_join_prepare_ios_profiles() { :; }
+resolve_physical_ios_udid() { printf fixture-device; }
+git() { printf '%040d' 1; }
+select_generated_ios_release_xctestrun() { printf '%s' "$NVPN_MOBILE_IOS_RELEASE_XCTESTRUN"; }
+xcodebuild() { printf '%s\\n' "$@" >"$CAPTURE"; }
+# The build stub creates no app, so the real preparation stops before signing.
+if release_join_prepare_ios_release; then exit 90; fi
+'''
+        env = {**os.environ, 'LIBRARY': sys.argv[1], 'ROOT': str(root),
+               'RESULT_DIR': str(root / 'result'), 'IOS_DEVICE': 'fixture-device',
+               'NVPN_RELEASE_JOIN_REUSE_ARTIFACTS': '0',
+               'NVPN_RELEASE_JOIN_IOS_PRODUCTION_RECEIPT': str(production),
+               'NVPN_IOS_TEAM_ID': 'fixture-team', 'NVPN_EXPECTED_IOS_DISTRIBUTION_TEAM_ID': 'fixture-team',
+               'NVPN_EXPECTED_IOS_DISTRIBUTION_CERT_SHA256': 'a' * 64,
+               'NVPN_IOS_CODE_SIGN_IDENTITY': 'fixture-signing',
+               'NVPN_IOS_PROVISIONING_PROFILE_UUID': 'fixture-profile',
+               'NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID': 'fixture-tunnel-profile',
+               'NVPN_FIPS_REPO_PATH': str(root), 'CAPTURE': str(capture),
+               'NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA': str(retained),
+               'NVPN_MOBILE_IOS_RELEASE_XCTESTRUN': str(plan),
+               'NVPN_MOBILE_IOS_INSTALLED_RUNNER_RECEIPT': str(receipt) if installed else ''}
+        subprocess.run(['bash', '-euc', script], env=env, check=True, capture_output=True)
+        arguments = capture.read_text().splitlines()
+        assert arguments[-1] == expected, arguments
+        assert arguments[arguments.index('-derivedDataPath') + 1] == str(root / 'result/ios-derived-data')
+        assert plan.read_text() == 'retained plan'
+PY
 python3 - "$ROOT/scripts/mobile-release-join-e2e.sh" <<'PY'
 import os, pathlib, subprocess, sys, tempfile
 source = pathlib.Path(sys.argv[1]).read_text()

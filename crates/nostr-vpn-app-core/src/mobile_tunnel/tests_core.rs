@@ -333,7 +333,7 @@
 
         let config = MobileTunnelConfig::from_app(&app).expect("direct mobile config");
 
-        assert!(config.peers.is_empty());
+        assert_eq!(config.peers, [] as [nostr_vpn_core::fips_mesh::FipsMeshPeerConfig; 0]);
         assert_eq!(config.route_targets, vec![MESH_TUNNEL_IPV4_CIDR]);
         assert!(config.wireguard_exit.is_none());
     }
@@ -398,13 +398,15 @@
 
     #[test]
     fn mobile_fips_exit_node_routes_default_traffic_to_selected_member() {
-        let runtime = RuntimeBuilder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_stack_size(4 * 1024 * 1024)
-            .build()
-            .expect("mobile FIPS test runtime");
-        runtime.block_on(Box::pin(run_mobile_fips_exit_node_route_test()));
+        for workers in [1, 2] {
+            let runtime = RuntimeBuilder::new_multi_thread()
+                .worker_threads(workers)
+                .enable_all()
+                .thread_stack_size(4 * 1024 * 1024)
+                .build()
+                .expect("mobile FIPS test runtime");
+            runtime.block_on(Box::pin(run_mobile_fips_exit_node_route_test()));
+        }
     }
 
     async fn run_mobile_fips_exit_node_route_test() {
@@ -501,6 +503,8 @@
         nostr_vpn_core::packet_checksums::finalize_ipv4_transport_checksum(&mut expected_reply_two);
         let expected_replies = vec![expected_reply, expected_reply_two];
         receive_mobile_inbound_packets_until(&mut started, &expected_replies).await;
+
+        assert_mobile_fips_packet_bursts(&mut started, &exit_endpoint, client_tunnel_ip).await;
 
         shutdown_started_mobile_tunnel(started).await;
         exit_endpoint
@@ -917,7 +921,7 @@
 
         assert_eq!(config.peers.len(), 1);
         assert_eq!(config.peers[0].participant_pubkey, admin);
-        assert!(config.peers[0].allowed_ips.is_empty());
+        assert_eq!(config.peers[0].allowed_ips, [] as [std::string::String; 0]);
         assert!(
             !config
                 .route_targets

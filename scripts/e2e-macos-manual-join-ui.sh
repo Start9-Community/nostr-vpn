@@ -96,8 +96,8 @@ codesign --verify --deep --strict "$APP_PATH"
 
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
 APP_EXE="$APP_PATH/Contents/MacOS/$executable"
-NVPN="$(find "$APP_PATH/Contents" -type f -name nvpn -perm -111 -print -quit)"
-if [[ -z "$NVPN" ]]; then
+NVPN="$APP_PATH/Contents/Resources/nvpn"
+if [[ ! -f "$NVPN" || ! -x "$NVPN" ]]; then
   echo "macOS release app has no bundled nvpn executable: $APP_PATH" >&2
   exit 1
 fi

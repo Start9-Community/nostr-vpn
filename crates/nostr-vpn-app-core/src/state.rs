@@ -36,6 +36,12 @@ pub struct DaemonRuntimeState {
     pub fips_direct_roster_peer_count: usize,
     #[serde(default, alias = "fips_other_peer_count")]
     pub fips_other_peer_count: usize,
+    #[serde(
+        default,
+        alias = "fips_routing",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fips_routing: Option<fips_endpoint::FipsEndpointRoutingStatus>,
     #[serde(alias = "mesh_ready")]
     pub mesh_ready: bool,
     #[serde(default)]
@@ -570,6 +576,7 @@ mod tests {
         assert_eq!(state.connected_peer_count, 1);
         assert_eq!(state.fips_direct_roster_peer_count, 1);
         assert_eq!(state.fips_other_peer_count, 2);
+        assert!(state.fips_routing.is_none());
         assert_eq!(state.port_mapping.active_protocol, None);
         assert_eq!(state.relays[0].url, "wss://temp.iris.to");
         assert_eq!(state.relays[0].status, "connected");

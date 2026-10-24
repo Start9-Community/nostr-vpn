@@ -106,24 +106,19 @@ if grep -Fq 'idle-cpu-gate.py" ios-process' "$MOBILE_IOS_SMOKE"; then
 fi
 grep -Fq 'case "processMetrics"' "$ROOT_DIR/ios/PacketTunnel/PacketTunnelProvider.swift" \
   || fail "iOS packet tunnel does not expose cumulative process metrics"
-grep -Fq 'packetTunnelProcessMetrics()' "$ROOT_DIR/ios/Sources/AppModelDebugAutomation.swift" \
+grep -Fq 'packetTunnelProcessMetrics()' "$ROOT_DIR/ios/Sources/AppModelDebugCPU.swift" \
   || fail "iOS idle CPU probe does not sample the packet-tunnel process"
-grep -Fq 'UIApplication.shared.isIdleTimerDisabled = true' "$ROOT_DIR/ios/Sources/AppModelDebugAutomation.swift" \
+grep -Fq 'UIApplication.shared.isIdleTimerDisabled = true' "$ROOT_DIR/ios/Sources/AppModelDebugCPU.swift" \
   || fail "iOS idle CPU probe does not keep the foreground collector awake"
-grep -Fq 'UIApplication.shared.isIdleTimerDisabled = previousIdleTimerDisabled' "$ROOT_DIR/ios/Sources/AppModelDebugAutomation.swift" \
+grep -Fq 'UIApplication.shared.isIdleTimerDisabled = previousIdleTimerDisabled' "$ROOT_DIR/ios/Sources/AppModelDebugCPU.swift" \
   || fail "iOS idle CPU probe does not restore the device idle timer"
 grep -Fq 'IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS="${NVPN_RELEASE_GATE_IOS_TUNNEL_IDLE_CPU_TIMEOUT_SECS:-360}"' "$RELEASE_GATE" \
   || fail "iOS physical idle CPU gate does not allow a clean build, lifecycle, and sample"
-grep -Fq 'NVPN_IOS_IDLE_CPU_ISOLATE_NETWORK=1' "$RELEASE_GATE" \
-  || fail "iOS physical idle CPU gate does not require an isolated network fixture"
-grep -Fq -- '--nvpn-debug-isolate-idle-network' "$MOBILE_IOS_SMOKE" \
-  || fail "iOS physical idle CPU gate does not isolate bootstrap and relay traffic"
-grep -Fq 'iOS idle network isolation verified: no bootstrap peers or public relays' "$MOBILE_IOS_SMOKE" \
-  || fail "iOS physical idle CPU gate lacks an isolation receipt"
-grep -Fq '"fipsBootstrapEnabled": false' "$ROOT_DIR/ios/Sources/AppModelDebugAutomation.swift" \
-  || fail "iOS idle fixture does not disable bootstrap peers"
-grep -Fq '"fipsNostrDiscoveryEnabled": false' "$ROOT_DIR/ios/Sources/AppModelDebugAutomation.swift" \
-  || fail "iOS idle fixture does not disable public relay discovery"
+grep -Fq 'NVPN_IOS_IDLE_CPU_ISOLATE_NETWORK=0' "$RELEASE_GATE" \
+  || fail "iOS release CPU gate must retain real bootstrap and relay traffic"
+grep -Fq -- '--nvpn-debug-idle-cpu-require-connected' "$MOBILE_IOS_SMOKE" \
+  || fail "iOS CPU gate does not require connected overlay evidence"
+python3 "$ROOT_DIR/scripts/test-ios-connected-cpu-receipt.py"
 grep -Fq 'local ios_smoke_command=(./scripts/mobile-ios-smoke.sh device)' "$RELEASE_GATE" \
   || fail "release gate does not construct the physical iOS packet-tunnel command safely"
 grep -Fq 'ios_smoke_command+=(--install --create-network --vpn-cycle)' "$RELEASE_GATE" \

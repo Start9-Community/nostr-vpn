@@ -12,6 +12,8 @@ fn main() -> Result<()> {
 
 fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
+        #[cfg(target_os = "linux")]
+        Command::EgressGuard { config } => crate::linux_exit_intent::restore_at_boot(&config),
         #[cfg(target_os = "windows")]
         Command::Daemon(args) if args.service => run_windows_service_dispatcher(args),
         command => run_command_on_runtime(command),
@@ -53,6 +55,8 @@ fn run_command_with_runtime(command: Command) -> Result<()> {
 
 async fn run_command(command: Command) -> Result<()> {
     match command {
+        #[cfg(target_os = "linux")]
+        Command::EgressGuard { config } => crate::linux_exit_intent::restore_at_boot(&config)?,
         Command::Init {
             config,
             force,
@@ -374,7 +378,7 @@ async fn run_command(command: Command) -> Result<()> {
                 if let Some(daemon_peers) = daemon_peers.as_ref() {
                     let reachable_count = daemon_peers.iter().filter(|p| p.reachable).count();
                     println!(
-                        "peers: {} total, {reachable_count} reachable",
+                        "peers: {} total, {reachable_count} reachable (private network)",
                         daemon_peers.len()
                     );
                     let now = unix_timestamp();

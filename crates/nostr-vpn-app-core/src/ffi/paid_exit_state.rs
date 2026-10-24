@@ -392,6 +392,7 @@ fn paid_route_market_state(
         .filter(|(_, record)| record.signed_offer.is_live_at(now_unix))
         .map(|(key, record)| paid_route_offer_state(key, record, &store))
         .collect::<Vec<_>>();
+    resolve_paid_provider_names(app, store_path, &mut offers, now_unix);
     let selected_seller = if app.exit_node_public_paid_exit {
         normalize_nostr_pubkey(&app.exit_node).ok()
     } else {
@@ -555,8 +556,9 @@ fn paid_route_visible_offers(
 
 fn paid_route_offer_search_text(offer: &NativePaidRouteOfferState) -> String {
     format!(
-        "{} {} {} {} {}",
+        "{} {} {} {} {} {}",
         offer.offer_id,
+        offer.display_name,
         offer.seller_npub,
         offer.status_text,
         offer.country_code,
@@ -635,3 +637,21 @@ fn paid_route_offer_country_options(offers: &[NativePaidRouteOfferState]) -> Vec
 }
 
 include!("paid_exit_state/market_records.rs");
+
+fn resolve_paid_provider_names(
+    app: &AppConfig,
+    store_path: &Path,
+    offers: &mut [NativePaidRouteOfferState],
+    now_unix: u64,
+) {
+    if let Ok(events) = nostr_vpn_core::control_pubsub_runtime::load_control_pubsub_events(store_path)
+        && let Ok(root) = app.own_nostr_pubkey_hex()
+    {
+        let graph = nostr_vpn_core::paid_provider_names::provider_name_graph(&root, &events, now_unix);
+        for offer in offers {
+            offer.display_name = nostr_vpn_core::paid_provider_names::provider_display_name(
+                &offer.seller_npub, &graph, &events, now_unix,
+            );
+        }
+    }
+}

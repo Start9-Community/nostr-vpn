@@ -14,6 +14,7 @@ if (!$AppExe) {
 $DataDir = Join-Path $ArtifactRoot "app-data"
 $Process = $null
 $ElevationProcess = $null
+$ConsentReceipt = Join-Path $ArtifactRoot "consent-observed.json"
 
 Set-Location $Root
 
@@ -22,6 +23,7 @@ if (Get-Service NvpnService -ErrorAction SilentlyContinue) {
 }
 
 New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
+Remove-Item -LiteralPath $ConsentReceipt -Force -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $DataDir
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 if (!(Test-Path $AppExe)) {
@@ -67,9 +69,7 @@ public static class NvpnServiceToggleInput {
   [DllImport("user32.dll")]
   public static extern bool SetForegroundWindow(IntPtr handle);
   [DllImport("user32.dll")]
-  public static extern bool SetCursorPos(int x, int y);
-  [DllImport("user32.dll")]
-  public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+  public static extern IntPtr GetForegroundWindow();
   [DllImport("kernel32.dll")]
   public static extern uint SetThreadExecutionState(uint flags);
 }
@@ -92,6 +92,26 @@ public static class NvpnServiceToggleInput {
   )
   Add-Type -AssemblyName UIAutomationClient
   Add-Type -AssemblyName UIAutomationTypes
+  Add-Type -ReferencedAssemblies @(
+    [System.Windows.Automation.AutomationElement].Assembly.Location,
+    [System.Windows.Automation.AutomationPattern].Assembly.Location
+  ) -TypeDefinition @'
+using System;
+using System.Threading;
+using System.Windows.Automation;
+public static class NvpnServiceToggleInvoke {
+  public static volatile string Error;
+  public static void Start(InvokePattern pattern) {
+    var thread = new Thread(() => {
+      try { pattern.Invoke(); }
+      catch (Exception error) { Error = error.ToString(); }
+    });
+    thread.IsBackground = true;
+    thread.SetApartmentState(ApartmentState.MTA);
+    thread.Start();
+  }
+}
+'@
   $Window = [System.Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
   $ButtonCondition = [System.Windows.Automation.PropertyCondition]::new(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
@@ -117,6 +137,9 @@ public static class NvpnServiceToggleInput {
   }
   [NvpnServiceToggleInput]::SetForegroundWindow($Process.MainWindowHandle) | Out-Null
   Start-Sleep -Milliseconds 250
+  if ([NvpnServiceToggleInput]::GetForegroundWindow() -ne $Process.MainWindowHandle) {
+    throw "Windows VPN window did not become foreground before invoking its toggle"
+  }
   Add-Type -AssemblyName System.Drawing
   $ScreenshotCaptured = $false
   $ScreenshotError = $null
@@ -161,25 +184,18 @@ public static class NvpnServiceToggleInput {
   if (!$ScreenshotCaptured) {
     throw "could not capture the painted visible WPF window after 20 attempts: $ScreenshotError"
   }
-  $ToggleRect = $Toggle.Current.BoundingRectangle
-  if ($ToggleRect.IsEmpty) {
-    throw "Windows VPN toggle has no clickable screen bounds"
-  }
-  $ToggleX = [int][Math]::Floor(($ToggleRect.Left + $ToggleRect.Right) / 2)
-  $ToggleY = [int][Math]::Floor(($ToggleRect.Top + $ToggleRect.Bottom) / 2)
-  if (![NvpnServiceToggleInput]::SetCursorPos($ToggleX, $ToggleY)) {
-    throw "could not move the real pointer to the Windows VPN toggle"
-  }
-  # InvokePattern waits for the synchronous RunAs handler and therefore cannot
-  # observe or cancel the consent prompt it opened. A real pointer click returns
-  # immediately while exercising the same shipped control and production path.
-  [NvpnServiceToggleInput]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-  [NvpnServiceToggleInput]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+  # Invoke the shipped accessibility control on a dedicated thread: RunAs can
+  # block its caller while this observer needs to acknowledge the UAC prompt.
+  $ToggleInvoke = $Toggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  [NvpnServiceToggleInvoke]::Start($ToggleInvoke)
 
   $PromptDeadline = (Get-Date).AddSeconds(20)
   $ConsentObserved = $false
   while ((Get-Date) -lt $PromptDeadline) {
     Start-Sleep -Milliseconds 100
+    if ([NvpnServiceToggleInvoke]::Error) {
+      throw "Windows VPN toggle invocation failed: $([NvpnServiceToggleInvoke]::Error)"
+    }
     $ElevationProcess = Get-CimInstance Win32_Process |
       Where-Object {
         $_.ParentProcessId -eq $Process.Id -and
@@ -188,10 +204,20 @@ public static class NvpnServiceToggleInput {
       Select-Object -First 1
     if ($ElevationProcess -and (Get-Process consent -ErrorAction SilentlyContinue)) {
       $ConsentObserved = $true
+      @{
+        appProcessId = $Process.Id
+        elevationProcessId = $ElevationProcess.ProcessId
+        observedAtUtc = [DateTime]::UtcNow.ToString("o")
+      } | ConvertTo-Json | Set-Content -Encoding utf8 -LiteralPath $ConsentReceipt
       break
     }
   }
   if (!$ConsentObserved) {
+    $Window.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition
+    ) | ForEach-Object { $_.Current.Name } |
+      Set-Content -Encoding utf8 (Join-Path $ArtifactRoot "prompt-failure-ui.txt")
     throw "VPN toggle did not open a Windows UAC consent prompt"
   }
 

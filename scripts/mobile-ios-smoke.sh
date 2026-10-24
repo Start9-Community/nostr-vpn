@@ -229,6 +229,10 @@ run_simulator() {
 }
 
 ios_sim_device_id() {
+  if [[ -n "${NVPN_IOS_SIMULATOR_ID:-}" ]]; then
+    printf '%s\n' "$NVPN_IOS_SIMULATOR_ID"
+    return
+  fi
   local booted
   booted="$(xcrun simctl list devices available \
     | sed -n 's/.*iPhone[^()]*(\([0-9A-F-]\{36\}\)) (Booted).*/\1/p' \
@@ -752,8 +756,13 @@ import sys
 print(math.ceil(float(sys.argv[1]) + float(sys.argv[2]) + 20))
 PY
 )"
-  launch_device "$device" \
-    --nvpn-debug-idle-cpu-probe \
+  local connected=0
+  local -a probe_args=(--nvpn-debug-idle-cpu-probe)
+  if [[ "$process" == "packet-tunnel" ]] && ! bool_is_true "$IDLE_CPU_ISOLATE_NETWORK"; then
+    connected=1
+    probe_args+=(--nvpn-debug-idle-cpu-require-connected)
+  fi
+  launch_device "$device" "${probe_args[@]}" \
     --nvpn-debug-idle-cpu-result "$IOS_IDLE_CPU_RESULT_NAME" \
     --nvpn-debug-idle-cpu-process "$process" \
     --nvpn-debug-idle-cpu-max-percent "$IDLE_CPU_MAX_PERCENT" \
@@ -781,42 +790,9 @@ PY
     fi
   done
 
-  python3 - \
+  python3 "$ROOT/scripts/validate-ios-cpu-receipt.py" \
     "$result_path" "$process" "$label" "$IDLE_CPU_MAX_PERCENT" \
-    "$IDLE_CPU_SAMPLE_SECONDS" "$NVPN_BUILD_GIT_SHA" <<'PY'
-import json
-import math
-import sys
-
-path, process, label, maximum, sample_seconds, git_sha = sys.argv[1:]
-with open(path, encoding="utf-8") as handle:
-    result = json.load(handle)
-maximum = float(maximum)
-sample_seconds = float(sample_seconds)
-errors = []
-for key, expected in (
-    ("phase", "finished"),
-    ("process", process),
-    ("label", label),
-    ("appBuildGitSha", git_sha),
-):
-    if result.get(key) != expected:
-        errors.append(f"{key}={result.get(key)!r}, expected {expected!r}")
-cpu = result.get("cpuPercent")
-elapsed = result.get("elapsedSeconds")
-if result.get("ok") is not True:
-    errors.append(f"ok={result.get('ok')!r} error={result.get('error')!r}")
-if not isinstance(result.get("pid"), int) or result["pid"] <= 0:
-    errors.append(f"pid={result.get('pid')!r}")
-if not isinstance(cpu, (int, float)) or not math.isfinite(cpu) or cpu < 0 or cpu > maximum:
-    errors.append(f"cpuPercent={cpu!r}, maximum={maximum!r}")
-if not isinstance(elapsed, (int, float)) or elapsed < sample_seconds * 0.95:
-    errors.append(f"elapsedSeconds={elapsed!r}, sampleSeconds={sample_seconds!r}")
-if errors:
-    raise SystemExit("iOS idle CPU receipt failed: " + "; ".join(errors))
-print(f"{label} idle CPU ok: {cpu:.3f}% <= {maximum:.3f}%")
-print(f"Result: {path}")
-PY
+    "$IDLE_CPU_SAMPLE_SECONDS" "$NVPN_BUILD_GIT_SHA" "$connected"
 }
 
 run_ios_connected_direct_ui_driver() {

@@ -1,9 +1,14 @@
 impl NativeAppRuntime {
-    fn network_states(&self, own_pubkey_hex: &str, vpn_active: bool) -> Vec<NativeNetworkState> {
+    fn network_states(
+        &self,
+        own_pubkey_hex: &str,
+        vpn_active: bool,
+        join_request_link: &str,
+    ) -> Vec<NativeNetworkState> {
         self.config
             .networks
             .iter()
-            .map(|network| self.network_state(network, own_pubkey_hex, vpn_active))
+            .map(|network| self.network_state(network, own_pubkey_hex, vpn_active, join_request_link))
             .collect()
     }
 
@@ -25,7 +30,7 @@ impl NativeAppRuntime {
                 blocked,
                 needs_attention,
                 text: if blocked {
-                    format!("Automatic paid exit · Blocked · {payment_status}")
+                    format!("Automatic paid exit · {payment_status} · Internet paused by nvpn to prevent leaks")
                 } else {
                     format!("Automatic paid exit · {payment_status}")
                 },
@@ -69,7 +74,17 @@ impl NativeAppRuntime {
             let blocked =
                 self.config.exit_node_leak_protection && vpn_enabled && !selected_exit_active;
             let text = if blocked {
-                format!("{source} · Blocked, waiting for {name}")
+                let paid_error = paid_exit.then(|| self.selected_paid_route_error()).flatten();
+                let reason = paid_error.as_deref()
+                    .or_else(|| selected_peer.and_then(|peer| peer.error.as_deref()).filter(|error| !error.is_empty()));
+                let progress = reason.map_or_else(|| {
+                    if selected_peer.is_some_and(|peer| peer.reachable) {
+                        format!("Checking internet access through {name}")
+                    } else {
+                        format!("Connecting to {name}")
+                    }
+                }, |reason| format!("{name} · {reason}"));
+                format!("{source} · {progress} · Internet paused by nvpn to prevent leaks")
             } else if selected_exit_active {
                 let realized_exit_ip = active_paid_exit_ip.unwrap_or_default();
                 if realized_exit_ip.is_empty() {
@@ -112,7 +127,7 @@ impl NativeAppRuntime {
                 blocked,
                 needs_attention: blocked,
                 text: if blocked {
-                    format!("{source} · Blocked")
+                    format!("{source} · Selecting provider · Internet paused by nvpn to prevent leaks")
                 } else if self.config.internet_source == InternetSource::PaidAutomatic {
                     format!("{source} · Selecting provider")
                 } else {
@@ -128,7 +143,7 @@ impl NativeAppRuntime {
             let blocked =
                 self.config.exit_node_leak_protection && vpn_enabled && !wireguard_exit_active;
             let text = if blocked {
-                "WireGuard exit · Blocked".to_string()
+                "WireGuard exit · Connecting · Internet paused by nvpn to prevent leaks".to_string()
             } else if wireguard_exit_active {
                 "WireGuard exit · Connected".to_string()
             } else {
@@ -153,6 +168,7 @@ impl NativeAppRuntime {
         network: &NetworkConfig,
         own_pubkey_hex: &str,
         vpn_active: bool,
+        join_request_link: &str,
     ) -> NativeNetworkState {
         let mut admins = network
             .admins
@@ -170,19 +186,27 @@ impl NativeAppRuntime {
         {
             participant_keys.push(own_pubkey_hex.to_string());
         }
+        let pending_confirmations = nostr_vpn_core::join_delivery::pending_join_confirmations(
+            &self.config_path,
+            &normalize_runtime_network_id(&network.network_id),
+        );
         let participants = participant_keys
             .iter()
             .map(|participant| {
-                self.participant_state(participant, network, own_pubkey_hex, vpn_active)
+                self.participant_state(
+                    participant,
+                    network,
+                    own_pubkey_hex,
+                    vpn_active,
+                    pending_confirmations.contains(participant),
+                )
             })
             .collect::<Vec<_>>();
         let online_count = participants
             .iter()
-            .filter(|participant| participant.reachable)
+            .filter(|participant| participant.reachable && participant.roster_accepted)
             .count() as u64;
         let expected_count = participants.len() as u64;
-        let join_request_qr_code_or_link = self.current_join_request_link();
-
         NativeNetworkState {
             id: network.id.clone(),
             name: network.name.clone(),
@@ -200,7 +224,7 @@ impl NativeAppRuntime {
                 .outbound_join_request
                 .as_ref()
                 .map(native_outbound_join_request),
-            join_request_qr_code_or_link,
+            join_request_qr_code_or_link: join_request_link.to_string(),
             inbound_join_requests: network
                 .inbound_join_requests
                 .iter()
@@ -220,6 +244,7 @@ impl NativeAppRuntime {
         network: &NetworkConfig,
         own_pubkey_hex: &str,
         vpn_active: bool,
+        confirmation_pending: bool,
     ) -> NativeParticipantState {
         let daemon_peer = vpn_active.then_some(()).and_then(|()| {
             self.daemon_state.as_ref().and_then(|state| {
@@ -230,7 +255,8 @@ impl NativeAppRuntime {
             })
         });
         let is_local = participant == own_pubkey_hex;
-        let roster_accepted = !self.network_access_pending(network, own_pubkey_hex);
+        let roster_accepted = !self.network_access_pending(network, own_pubkey_hex)
+            && (is_local || !confirmation_pending);
         let reachable = vpn_active && (is_local || daemon_peer.is_some_and(|peer| peer.reachable));
         let access_pending = !roster_accepted && !is_local;
         let assigned_magic_dns_alias = self.config.peer_alias(participant).unwrap_or_default();
@@ -274,7 +300,9 @@ impl NativeAppRuntime {
             self.peer_state_label(participant, daemon_peer, is_local, vpn_active)
         };
         let mesh_state = Self::peer_mesh_label(daemon_peer, is_local, vpn_active);
-        let status_text = if access_pending {
+        let status_text = if confirmation_pending && !is_local {
+            "Waiting for this device to confirm the network".to_string()
+        } else if access_pending {
             if network
                 .outbound_join_request
                 .as_ref()

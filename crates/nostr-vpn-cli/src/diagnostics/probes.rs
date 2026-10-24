@@ -180,6 +180,9 @@ pub(super) fn probe_nat_pmp_server(server: SocketAddr, timeout: Duration) -> Pro
         Ok(socket) => socket,
         Err(error) => return ProbeStatus::new(ProbeState::Error, error.to_string()),
     };
+    if let Err(error) = protect_control_socket(&socket2::SockRef::from(&socket)) {
+        return ProbeStatus::new(ProbeState::Error, error.to_string());
+    }
     let _ = socket.set_read_timeout(Some(timeout));
     let _ = socket.set_write_timeout(Some(timeout));
 
@@ -210,6 +213,9 @@ pub(super) fn probe_pcp_server(
         Ok(socket) => socket,
         Err(error) => return ProbeStatus::new(ProbeState::Error, error.to_string()),
     };
+    if let Err(error) = protect_control_socket(&socket2::SockRef::from(&socket)) {
+        return ProbeStatus::new(ProbeState::Error, error.to_string());
+    }
     let _ = socket.set_read_timeout(Some(timeout));
     let _ = socket.set_write_timeout(Some(timeout));
 
@@ -248,6 +254,9 @@ pub(super) fn probe_upnp_ssdp_server(server: SocketAddr, timeout: Duration) -> P
         Ok(socket) => socket,
         Err(error) => return ProbeStatus::new(ProbeState::Error, error.to_string()),
     };
+    if let Err(error) = protect_control_socket(&socket2::SockRef::from(&socket)) {
+        return ProbeStatus::new(ProbeState::Error, error.to_string());
+    }
     let _ = socket.set_read_timeout(Some(timeout));
     let _ = socket.set_write_timeout(Some(timeout));
 
@@ -274,6 +283,15 @@ pub(super) fn probe_upnp_ssdp_server(server: SocketAddr, timeout: Duration) -> P
         }
         Err(error) => ProbeStatus::new(ProbeState::Unavailable, error.to_string()),
     }
+}
+
+pub(super) fn protect_control_socket(socket: &socket2::SockRef<'_>) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(network) = crate::linux_host_network::current() {
+        return fips_core::host_network::HostNetwork::protect_socket(network.as_ref(), socket);
+    }
+    let _ = socket;
+    Ok(())
 }
 
 pub(super) fn mapping_varies_by_dest_ip(endpoints: &[String]) -> Option<bool> {

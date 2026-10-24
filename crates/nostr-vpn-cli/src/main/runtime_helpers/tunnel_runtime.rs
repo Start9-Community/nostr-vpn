@@ -2,6 +2,8 @@ impl CliTunnelRuntime {
     fn new(iface: impl Into<String>) -> Self {
         Self {
             iface: iface.into(),
+            tunnel_exit_peer: None,
+            probe_route_generation: current_daemon_probe_route_generation(),
             active_listen_port: None,
             paid_exit_seller_ready: false,
             wireguard_exit_ready: false,
@@ -9,6 +11,7 @@ impl CliTunnelRuntime {
     }
 
     fn stop(&mut self) {
+        self.tunnel_exit_peer = None;
         self.active_listen_port = None;
         self.paid_exit_seller_ready = false;
         self.wireguard_exit_ready = false;
@@ -27,12 +30,16 @@ impl CliTunnelRuntime {
         &mut self,
         runtime: Option<&crate::fips_private_mesh::FipsPrivateTunnelRuntime>,
     ) {
-        self.active_listen_port = runtime.and_then(
-            crate::fips_private_mesh::FipsPrivateTunnelRuntime::active_listen_port,
-        );
-        self.wireguard_exit_ready = runtime.is_some_and(
-            crate::fips_private_mesh::FipsPrivateTunnelRuntime::wireguard_exit_ready,
-        );
+        self.probe_route_generation = current_daemon_probe_route_generation();
+        if let Some(runtime) = runtime {
+            self.iface = runtime.iface().to_string();
+        }
+        self.tunnel_exit_peer =
+            runtime.and_then(|runtime| runtime.exit_route_peer().map(ToOwned::to_owned));
+        self.active_listen_port = runtime
+            .and_then(crate::fips_private_mesh::FipsPrivateTunnelRuntime::active_listen_port);
+        self.wireguard_exit_ready = runtime
+            .is_some_and(crate::fips_private_mesh::FipsPrivateTunnelRuntime::wireguard_exit_ready);
         #[cfg(feature = "paid-exit")]
         {
             self.paid_exit_seller_ready = runtime.is_some_and(
@@ -46,9 +53,7 @@ impl CliTunnelRuntime {
     }
 }
 
-fn load_pending_fips_control_recipients(
-    config_path: &Path,
-) -> Result<Vec<(&'static str, String)>> {
+fn load_pending_fips_control_recipients(config_path: &Path) -> Result<Vec<(&'static str, String)>> {
     let recipients = nostr_vpn_core::join_delivery::load_join_rosters(config_path)
         .into_iter()
         .map(|(_, queued)| ("join roster", queued.recipient_npub))

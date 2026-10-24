@@ -209,6 +209,17 @@ impl Drop for WindowsFullDefaultRoute {
 pub(crate) fn capture_windows_default_route_excluding(
     excluded_tunnel_interfaces: &[u32],
 ) -> Result<WindowsDefaultRoute> {
+    capture_windows_default_route_for_interfaces(
+        excluded_tunnel_interfaces,
+        &netdev::get_interfaces(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn capture_windows_default_route_for_interfaces(
+    excluded_tunnel_interfaces: &[u32],
+    interfaces: &[netdev::Interface],
+) -> Result<WindowsDefaultRoute> {
     // `route print -4 0.0.0.0` lists IPv4 default routes. Output
     // includes columns like:
     //   Network Destination | Netmask | Gateway | Interface | Metric
@@ -223,20 +234,27 @@ pub(crate) fn capture_windows_default_route_excluding(
     select_windows_default_route_from_output(
         &stdout,
         excluded_tunnel_interfaces,
-        resolve_windows_interface_index_for_address,
+        interfaces,
     )
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(test, target_os = "windows"))]
 fn select_windows_default_route_from_output(
     output: &str,
     excluded_tunnel_interfaces: &[u32],
-    resolve_interface_index: impl FnMut(&str) -> Result<u32>,
+    interfaces: &[netdev::Interface],
 ) -> Result<WindowsDefaultRoute> {
     select_windows_default_route_candidate(
         parse_windows_default_route_candidates(output),
         excluded_tunnel_interfaces,
-        resolve_interface_index,
+        |address| {
+            let address = address.parse::<std::net::Ipv4Addr>()?;
+            interfaces
+                .iter()
+                .find(|interface| interface.ipv4.iter().any(|network| network.addr() == address))
+                .map(|interface| interface.index)
+                .ok_or_else(|| anyhow!("no Windows interface found with IPv4 address {address}"))
+        },
     )
 }
 
@@ -357,46 +375,6 @@ fn parse_windows_ipv6_default_route_columns(output: &str) -> Vec<WindowsIpv6Defa
 }
 
 #[cfg(target_os = "windows")]
-fn resolve_windows_interface_index_for_address(interface_ip: &str) -> Result<u32> {
-    use std::net::Ipv4Addr;
-    let target: Ipv4Addr = interface_ip
-        .parse()
-        .with_context(|| format!("invalid IPv4 interface address {interface_ip}"))?;
-
-    // `netsh interface ipv4 show ipaddresses level=verbose` enumerates
-    // every IPv4 address with its interface index in one bounded query.
-    let output = ProcessCommand::new("netsh")
-        .args(["interface", "ipv4", "show", "ipaddresses", "level=verbose"])
-        .bounded_output("`netsh interface ipv4 show ipaddresses level=verbose`")?;
-    if !output.status.success() {
-        return Err(anyhow!("netsh show ipaddresses failed: {}", output.status));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    match parse_windows_ipaddresses_interface(&stdout, target) {
-        Some(WindowsAddressInterface::Index(idx)) => return Ok(idx),
-        Some(WindowsAddressInterface::Alias(alias)) => {
-            let output = ProcessCommand::new("netsh")
-                .args(["interface", "ipv4", "show", "interfaces"])
-                .bounded_output("`netsh interface ipv4 show interfaces`")?;
-            if !output.status.success() {
-                return Err(anyhow!("netsh show interfaces failed: {}", output.status));
-            }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(idx) = parse_windows_interface_index_for_alias(&stdout, &alias) {
-                return Ok(idx);
-            }
-            return Err(anyhow!(
-                "no Windows interface index found for alias {alias:?} with IPv4 address {target}"
-            ));
-        }
-        None => {}
-    }
-    Err(anyhow!(
-        "no Windows interface found with IPv4 address {target}"
-    ))
-}
-
-#[cfg(target_os = "windows")]
 fn resolve_windows_interface_identity(interface_index: u32) -> Result<String> {
     // This is on the underlay-handoff hot path; avoid a PowerShell startup.
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
@@ -427,55 +405,6 @@ fn format_windows_interface_guid(
         "{data1:08x}-{data2:04x}-{data3:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         data4[0], data4[1], data4[2], data4[3], data4[4], data4[5], data4[6], data4[7]
     )
-}
-
-#[cfg(any(test, target_os = "windows"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum WindowsAddressInterface {
-    Index(u32),
-    Alias(String),
-}
-
-#[cfg(any(test, target_os = "windows"))]
-fn parse_windows_ipaddresses_interface(
-    output: &str,
-    target: std::net::Ipv4Addr,
-) -> Option<WindowsAddressInterface> {
-    let mut current_index: Option<u32> = None;
-    let mut current_address_matches = false;
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if current_address_matches
-            && let Some((_, alias)) = trimmed.split_once(':')
-            && trimmed.starts_with("Interface Luid")
-        {
-            let alias = alias.trim();
-            if !alias.is_empty() {
-                return Some(WindowsAddressInterface::Alias(alias.to_string()));
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("Interface ") {
-            // "Interface 7: ..."
-            if let Some((idx_str, _)) = rest.split_once(':')
-                && let Ok(idx) = idx_str.trim().parse::<u32>()
-            {
-                current_index = Some(idx);
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("Address ") {
-            current_address_matches = false;
-            let Some(addr_str) = rest.split_whitespace().next() else {
-                continue;
-            };
-            if let Ok(addr) = addr_str.parse::<std::net::Ipv4Addr>()
-                && addr == target
-            {
-                if let Some(idx) = current_index {
-                    return Some(WindowsAddressInterface::Index(idx));
-                }
-                current_address_matches = true;
-            }
-        }
-    }
-    None
 }
 
 #[cfg(any(test, target_os = "windows"))]

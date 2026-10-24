@@ -3,7 +3,94 @@ use super::*;
 const PRIMARY: &str = "https://primary.example";
 const ALTERNATIVE: &str = "https://alternative.example";
 
+#[test]
+fn mint_failover_switches_provider_immediately_when_only_other_provider_can_be_paid() {
+    for shortfall in [false, true] {
+        let (dir, mut app, mut automatic, now) = fixture();
+        let path = dir.path().join("config.toml");
+        let original = automatic.candidate.as_ref().unwrap().session_id.clone();
+        let seller = Keys::generate();
+        update_paid_route_store(&paid_route_store_file_path(&path), |store| {
+            let config = PaidExitConfig {
+                enabled: true,
+                pricing: PaidRoutePricing {
+                    price_msat_per_gb: 30_000,
+                },
+                channel: PaidRouteChannelTerms {
+                    accepted_mints: vec!["https://other-provider.example".into()],
+                    free_probe_units: 1_048_576,
+                    ..Default::default()
+                },
+                ip_support: PaidRouteIpSupport {
+                    ipv4: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let signed = nostr_vpn_core::paid_routes::signed_paid_exit_offer_from_config(
+                "other-exit",
+                &seller,
+                &config,
+                None,
+                now,
+            )?;
+            store.upsert_signed_offer(signed, vec![], now)?;
+            store.upsert_wallet_mint(ALTERNATIVE, "alternative", Some(0), now);
+            store.upsert_wallet_mint("https://other-provider.example", "other", Some(10_000), now);
+            if shortfall {
+                store.buyer_mint_retries.clear();
+                store.record_buyer_session_funding_shortfall(&original, 100)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            reconcile_automatic_paid_exit_selection(&mut automatic, &mut app, &path, now + 1)
+                .unwrap()
+        );
+        let candidate = automatic.candidate.as_ref().unwrap();
+        assert_eq!(candidate.seller_pubkey, seller.public_key().to_hex());
+        assert_ne!(candidate.session_id, original);
+        assert!(
+            automatic.rejected_offers.is_empty(),
+            "mint failure is not a seller failure"
+        );
+    }
+}
+
 struct TestDirectory(PathBuf);
+
+#[tokio::test]
+async fn payment_setup_failure_without_mint_cooldown_fails_over_immediately() {
+    let (dir, app, mut automatic, now) = fixture();
+    let path = dir.path().join("config.toml");
+    update_paid_route_store(&paid_route_store_file_path(&path), |store| {
+        store.buyer_mint_retries.clear();
+        Ok(())
+    })
+    .unwrap();
+    automatic.funding = Some(tokio::spawn(async { Err(anyhow!("Cannot queue payment")) }));
+    while !automatic.funding.as_ref().unwrap().is_finished() {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        funding::update_funding(&mut automatic, &app, &path, now + 1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        automatic
+            .candidate
+            .as_ref()
+            .unwrap()
+            .should_failover(now + 1)
+    );
+    let store = load_paid_route_store(&paid_route_store_file_path(&path)).unwrap();
+    let session = &store.sessions[&store.selected_buyer_session_id];
+    let channel = &store.channels[&session.session.payment.channel_id];
+    assert_eq!(channel.status, PaidRouteLifecycleStatus::Failed);
+    assert_eq!(channel.error, "Payment setup failed: Cannot queue payment");
+}
 
 impl TestDirectory {
     fn path(&self) -> &Path {
@@ -66,7 +153,7 @@ fn fixture() -> (TestDirectory, AppConfig, PaidExitAutomaticBuyer, u64) {
             .get_mut(&session_id)
             .unwrap()
             .last_successful_probe_unix = now;
-        store.defer_buyer_mint_retry(PRIMARY, now, true, Some(600))?;
+        store.defer_buyer_mint_retry(PRIMARY, now, Some("Mint unavailable"), Some(600))?;
         store.upsert_wallet_mint(ALTERNATIVE, "alternative", Some(10_000), now);
         Ok(())
     })
@@ -196,7 +283,7 @@ fn mint_failover_waits_without_rejecting_seller_when_all_mints_cooling_down() {
     let (dir, mut app, mut automatic, now) = fixture();
     let path = dir.path().join("config.toml");
     update_paid_route_store(&paid_route_store_file_path(&path), |store| {
-        store.defer_buyer_mint_retry(ALTERNATIVE, now, true, Some(600))
+        store.defer_buyer_mint_retry(ALTERNATIVE, now, Some("Mint unavailable"), Some(600))
     })
     .unwrap();
     reconcile_automatic_paid_exit_selection(&mut automatic, &mut app, &path, now + 1).unwrap();

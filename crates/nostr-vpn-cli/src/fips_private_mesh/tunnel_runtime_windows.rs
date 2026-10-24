@@ -36,8 +36,9 @@ impl FipsPrivateTunnelRuntime {
             .await?;
         #[cfg(feature = "paid-exit")]
         mesh.set_paid_route_accounting_peers(config.paid_route_accounting_peers.clone())?;
-        let control_pubsub = crate::control_pubsub_runtime::ControlPubsubFipsRuntime::start_for_peers(
+        let control_pubsub = crate::control_pubsub_runtime::ControlPubsubFipsRuntime::start_for_peers_with_advert_app(
             Arc::clone(mesh.endpoint()),
+            &mesh.nostr_advert_app,
             config.nostr_pubsub.clone(),
             config.nostr_relays.clone(),
             Some(config.control_pubsub_store_path.clone()),
@@ -232,9 +233,6 @@ impl FipsPrivateTunnelRuntime {
             .set_paid_route_accounting_peers(config.paid_route_accounting_peers.clone())?;
         if let Err(error) = self.mesh.update_peers(&config.endpoint_peers).await {
             eprintln!("fips: update_peers during apply_config failed: {error}");
-        }
-        if self.config.nostr_relays != config.nostr_relays {
-            self.mesh.update_relays(&config.nostr_relays).await?;
         }
         if starting_secure_dns {
             crate::secure_dns_runtime::SecureDnsRuntime::start_into(

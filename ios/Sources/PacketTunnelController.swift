@@ -211,6 +211,13 @@ final class PacketTunnelController {
         }
         try Task.checkCancellation()
         activeManager = manager
+        // A failed provider can have an OS restart pending while its current
+        // connection reports disconnected. Persist OFF before accepting that
+        // status, so the queued restart cannot resurrect the tunnel.
+        // updateAndStart re-enables this same configuration on the next start.
+        manager.isEnabled = false
+        try await save(manager, waitsForUserApproval: false)
+        try await reload(manager)
         return try await stopAndWaitForDisconnected(manager)
     }
 

@@ -40,8 +40,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var appConfigSnapshot = Data()
     private var underlayMonitors: [NWPathMonitor] = []
     private var underlayMonitorGeneration: UInt64?
-    private var initializedUnderlaySources: Set<UnderlayPathSource> = []
+    private var previousUnderlayPaths: [UnderlayPathSource: Network.NWPath] = [:]
     private var underlayRefreshWorkItem: DispatchWorkItem?
+    private let bonjourDiscovery = FipsBonjourDiscovery()
 
     override func startTunnel(
         options: [String: NSObject]?,
@@ -207,6 +208,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.stopRustTunnel(generation: startGeneration)
                 completionHandler(PacketTunnelError.startFailed)
                 return
+            }
+            let lanInfo = self.withTunnelHandle(generation: startGeneration) { handle in
+                consumeCString(nostr_vpn_mobile_tunnel_lan_discovery_info_json(handle))
+            } ?? ""
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.tunnelIsActive(generation: startGeneration) else { return }
+                self.bonjourDiscovery.start(infoJson: lanInfo) { [weak self] npub, addresses in
+                    guard let json = try? JSONSerialization.data(withJSONObject: addresses),
+                          let text = String(data: json, encoding: .utf8) else { return }
+                    _ = self?.withTunnelHandle(generation: startGeneration) { handle in
+                        npub.withCString { peer in
+                            text.withCString { nostr_vpn_mobile_tunnel_observe_lan_peer(handle, peer, $0) }
+                        }
+                    }
+                }
             }
             NSLog("nvpn-pkt: completionHandler(nil) — VPN should transition to connected")
             packetDebugLog("completionHandler nil totalMs=\(totalMs)")
@@ -427,6 +443,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         tunnelRunning = false
+        let stoppedGeneration = tunnelGeneration
         let packetFlowBridge = self.packetFlowBridge
         self.packetFlowBridge = nil
         packetFlowBridge?.stop()
@@ -437,6 +454,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         tunnelCondition.unlock()
         stopUnderlayNetworkMonitor()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.tunnelCondition.lock()
+            let stillStopped = self.tunnelGeneration == stoppedGeneration && !self.tunnelRunning
+            self.tunnelCondition.unlock()
+            if stillStopped { self.bonjourDiscovery.stop() }
+        }
 
         if let handle {
             nostr_vpn_mobile_tunnel_free(handle)
@@ -522,7 +546,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let previousMonitors = underlayMonitors
         underlayMonitors = monitors
         underlayMonitorGeneration = generation
-        initializedUnderlaySources.removeAll()
+        previousUnderlayPaths.removeAll()
         underlayRefreshWorkItem?.cancel()
         underlayRefreshWorkItem = nil
         underlayMonitorLock.unlock()
@@ -537,7 +561,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let monitors = underlayMonitors
         underlayMonitors.removeAll()
         underlayMonitorGeneration = nil
-        initializedUnderlaySources.removeAll()
+        previousUnderlayPaths.removeAll()
         underlayRefreshWorkItem?.cancel()
         underlayRefreshWorkItem = nil
         underlayMonitorLock.unlock()
@@ -554,9 +578,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             underlayMonitorLock.unlock()
             return
         }
-        if initializedUnderlaySources.insert(source).inserted {
+        let previous = previousUnderlayPaths.updateValue(path, forKey: source)
+        guard let previous else {
             underlayMonitorLock.unlock()
             packetDebugLog("\(source) underlay monitor ready status=\(path.status)")
+            return
+        }
+        // Network.framework can deliver the same path more than once. Only
+        // an actual path change should invalidate working FIPS carriers.
+        guard previous != path else {
+            underlayMonitorLock.unlock()
             return
         }
         underlayRefreshWorkItem?.cancel()

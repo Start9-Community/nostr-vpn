@@ -6,6 +6,8 @@ mod config_secrets;
 pub use config_secrets::PlatformCashuWalletSeedStore;
 pub mod control;
 pub mod control_pubsub;
+#[cfg(feature = "control-pubsub")]
+pub mod control_pubsub_runtime;
 pub mod data_plane;
 pub mod diagnostics;
 pub mod fips_control;
@@ -22,6 +24,8 @@ pub mod magic_dns;
 mod network_roster;
 mod network_routes;
 pub mod packet_checksums;
+#[cfg(feature = "paid-exit")]
+pub mod paid_provider_names;
 pub mod paid_route_accounting;
 pub mod paid_route_probe;
 #[cfg(feature = "paid-exit")]

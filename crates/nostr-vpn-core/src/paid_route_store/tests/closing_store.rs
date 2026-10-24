@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn seller_payment_rejects_regressing_balance_update_without_mutating_store() {
+fn seller_payment_acknowledges_obsolete_balance_without_mutating_store() {
     let seller = Keys::generate();
     let buyer = Keys::generate();
     let seller_npub = seller.public_key().to_bech32().expect("seller npub");
@@ -34,7 +34,7 @@ fn seller_payment_rejects_regressing_balance_update_without_mutating_store() {
         .expect("apply first update");
     let before = store.clone();
 
-    let error = store
+    let result = store
         .apply_seller_payment(ApplyPaidRouteSellerPaymentRequest {
             envelope: seller_payment_envelope(
                 "internet-exit",
@@ -49,14 +49,74 @@ fn seller_payment_rejects_regressing_balance_update_without_mutating_store() {
                     payment: sample_spilman_payment("channel-1", 0),
                 }),
             ),
-            seller_npub,
-            config,
+            seller_npub: seller_npub.clone(),
+            config: config.clone(),
             now_unix: 121,
         })
-        .expect_err("regressing update rejected");
+        .expect("obsolete update is already covered by the persisted payment");
 
-    assert!(error.to_string().contains("regressed"));
+    assert!(!result.changed);
+    assert_eq!(result.paid_msat, 1_000);
     assert_eq!(store, before);
+
+    let receiver = FakeSpilmanReceiver::new("channel-1", 1);
+    for status in [
+        PaidRouteLifecycleStatus::Closing,
+        PaidRouteLifecycleStatus::Closed,
+        PaidRouteLifecycleStatus::Expired,
+        PaidRouteLifecycleStatus::Failed,
+    ] {
+        store.channels.get_mut("channel-1").unwrap().status = status;
+        store.leases.get_mut("lease-1").unwrap().status = status;
+        let before = store.clone();
+        for payload in [
+            StreamingRoutePaymentPayload::BalanceUpdate(StreamingRouteBalanceUpdate {
+                delivered_units: 0,
+                amount_due_msat: 0,
+                paid_msat: 0,
+                payment: sample_spilman_payment("channel-1", 0),
+            }),
+            StreamingRoutePaymentPayload::ChannelOpen(StreamingRouteChannelOpen {
+                mint_url: config.channel.accepted_mints[0].clone(),
+                unit: "sat".into(),
+                capacity: 10,
+                expires_unix: 500,
+                receiver_pubkey_hex: seller.public_key().to_hex(),
+                paid_msat: 0,
+                payment: sample_spilman_payment("channel-1", 0),
+            }),
+        ] {
+            let request = ApplyPaidRouteSellerPaymentRequest {
+                envelope: seller_payment_envelope(
+                    "internet-exit",
+                    "lease-1",
+                    &buyer_npub,
+                    &seller_npub,
+                    121,
+                    payload,
+                ),
+                seller_npub: seller_npub.clone(),
+                config: config.clone(),
+                now_unix: 121,
+            };
+            let result = store
+                .apply_seller_payment_with_spilman_receiver(request.clone(), &receiver, &())
+                .expect("obsolete payment remains acknowledgeable after settlement");
+            assert!(!result.changed);
+            assert!(!result.allow_routing);
+            assert_eq!(store, before);
+            let mut forged = request;
+            forged.envelope.lease_id = "different-lease".into();
+            assert!(store.apply_seller_payment(forged).is_err());
+            assert_eq!(store, before);
+        }
+    }
+    assert_eq!(receiver.validate_calls.get(), 0);
+    assert_eq!(
+        receiver.process_calls.get(),
+        0,
+        "obsolete retries must not contact the mint"
+    );
 }
 
 #[test]
@@ -214,6 +274,9 @@ fn seller_payment_cooperative_close_suspends_admission() {
     assert_eq!(collection.len(), 1);
     assert!(collection[0].collectable);
     assert!(collection[0].manual_collect);
+    assert!(collection[0].auto_collect_due);
+    assert_eq!(collection[0].due_at_unix, 130);
+    assert!(collection[0].expires_at_unix > 131);
 
     let mut refreshed_payment = sample_spilman_payment("channel-1", 1);
     refreshed_payment.signature.push_str("-retry");
@@ -253,6 +316,7 @@ fn seller_payment_cooperative_close_suspends_admission() {
         store.channels["channel-1"].status,
         PaidRouteLifecycleStatus::Closed
     );
+    assert!(store.seller_collection_states(&config, 132).is_empty());
 }
 
 #[test]

@@ -79,6 +79,7 @@ impl NativeAppRuntime {
             last_service_status_refresh_at: None,
             paid_route_market_filter: NativePaidRouteMarketFilterState::default(),
             paid_route_wallet_last_action: NativePaidRouteWalletActionState::default(),
+            #[cfg(feature = "paid-exit")]
             paid_route_wallet_history: NativePaidRouteWalletHistoryState::default(),
             #[cfg(feature = "paid-exit")]
             paid_route_wallet_next_refresh_at: None,
@@ -142,6 +143,7 @@ impl NativeAppRuntime {
             last_service_status_refresh_at: None,
             paid_route_market_filter: NativePaidRouteMarketFilterState::default(),
             paid_route_wallet_last_action: NativePaidRouteWalletActionState::default(),
+            #[cfg(feature = "paid-exit")]
             paid_route_wallet_history: NativePaidRouteWalletHistoryState::default(),
             #[cfg(feature = "paid-exit")]
             paid_route_wallet_next_refresh_at: None,
@@ -252,10 +254,17 @@ impl NativeAppRuntime {
                 })
                 .unwrap_or_default()
         };
+        // The device approval request is shared by every network. Validate and
+        // encode it once per snapshot instead of repeating the crypto per row.
+        let join_request_qr_code_or_link = if config_unavailable {
+            String::new()
+        } else {
+            self.current_join_request_link()
+        };
         let networks = if config_unavailable {
             Vec::new()
         } else {
-            self.network_states(&own_pubkey_hex, vpn_active)
+            self.network_states(&own_pubkey_hex, vpn_active, &join_request_qr_code_or_link)
         };
         let fips_peer_stats = active_network_fips_peer_stats(&networks, &own_pubkey_hex);
         let other_fips_peer_count =
@@ -270,6 +279,25 @@ impl NativeAppRuntime {
                 self.service_binary_version.clone()
             };
 
+        let mut runtime_status_detail = capabilities.runtime_status_detail;
+        if let Some(routing) = daemon_state.and_then(|state| state.fips_routing)
+            && routing.client_only_requested
+            && vpn_active
+        {
+            if !runtime_status_detail.is_empty() {
+                runtime_status_detail.push_str(" · ");
+            }
+            let routing_detail = if routing.client_only {
+                "Client routing active".to_string()
+            } else {
+                format!(
+                    "Router compatibility ({} peers without client support)",
+                    routing.peers_without_client_support
+                )
+            };
+            runtime_status_detail.push_str(&routing_detail);
+        }
+
         NativeAppState {
             rev: self.rev,
             platform: capabilities.platform,
@@ -278,7 +306,7 @@ impl NativeAppRuntime {
             cli_install_supported: capabilities.cli_install_supported,
             startup_settings_supported: capabilities.startup_settings_supported,
             tray_behavior_supported: capabilities.tray_behavior_supported,
-            runtime_status_detail: capabilities.runtime_status_detail,
+            runtime_status_detail,
             app_version: if self.app_version.is_empty() {
                 env!("CARGO_PKG_VERSION").to_string()
             } else {
@@ -374,11 +402,7 @@ impl NativeAppRuntime {
             } else {
                 self.config.effective_network_id()
             },
-            join_request_qr_code_or_link: if config_unavailable {
-                String::new()
-            } else {
-                self.current_join_request_link()
-            },
+            join_request_qr_code_or_link,
             internet_source: if config_unavailable {
                 String::new()
             } else {

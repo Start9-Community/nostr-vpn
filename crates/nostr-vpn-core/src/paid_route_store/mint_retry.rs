@@ -6,6 +6,8 @@ use super::*;
 pub struct PaidRouteMintRetry {
     pub consecutive_failures: u32,
     pub retry_at_unix: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 impl PaidRouteStore {
@@ -82,24 +84,29 @@ impl PaidRouteStore {
         &mut self,
         mint_url: &str,
         now_unix: u64,
-        failed: bool,
+        error: Option<&str>,
         retry_after_secs: Option<u64>,
     ) -> Result<()> {
         let mint = normalize_paid_route_mint_url(mint_url)?;
         let retry = self.buyer_mint_retries.entry(mint).or_default();
         // A concurrent success cannot shorten a server's outstanding cooldown.
-        if !failed && retry.retry_at_unix > now_unix {
+        if error.is_none() && retry.retry_at_unix > now_unix {
             return Ok(());
         }
-        retry.consecutive_failures = if failed {
+        retry.error = error.unwrap_or_default().to_string();
+        retry.consecutive_failures = if error.is_some() {
             retry.consecutive_failures.saturating_add(1)
         } else {
             0
         };
         let exponent = retry.consecutive_failures.saturating_sub(1).min(6);
-        let delay = (10_u64 << exponent)
-            .min(600)
-            .max(retry_after_secs.unwrap_or(0));
+        let delay = if error.is_some() {
+            (10_u64 << exponent).min(600)
+        } else {
+            // Unsettled refunds need no ten-second background mint polling.
+            60
+        }
+        .max(retry_after_secs.unwrap_or(0));
         // Persistence uses whole Unix seconds; round up to avoid retrying early.
         retry.retry_at_unix = retry
             .retry_at_unix

@@ -431,6 +431,7 @@ run_macos_rust() {
 run_macos_xcframework() {
   local headers_dir="$BUILD_DIR/headers"
   local universal_lib="$BUILD_DIR/libnostr_vpn_app_core_macos.a"
+  local framework_lib="$universal_lib"
   local framework="$FRAMEWORKS_DIR/NostrVpnAppCore.xcframework"
   local header_path
   local modulemap_path
@@ -460,13 +461,13 @@ run_macos_xcframework() {
   done
 
   if [[ "${#libs[@]}" -eq 1 ]]; then
-    cp "${libs[0]}" "$universal_lib"
+    framework_lib="${libs[0]}"
   else
     lipo -create "${libs[@]}" -output "$universal_lib"
   fi
 
   xcodebuild -create-xcframework \
-    -library "$universal_lib" \
+    -library "$framework_lib" \
     -headers "$headers_dir" \
     -output "$framework"
 }

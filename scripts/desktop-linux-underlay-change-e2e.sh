@@ -24,6 +24,7 @@ LISTEN_PORT="${NVPN_UNDERLAY_LISTEN_PORT:-45821}"
 RECOVERY_DEADLINE_MS="${NVPN_UNDERLAY_RECOVERY_DEADLINE_MS:-4000}"
 EXPECTED_FIPS_REV="${NVPN_UNDERLAY_EXPECTED_FIPS_REV:-}"
 WG_IFACE="${NVPN_UNDERLAY_WG_INTERFACE:-nvpn-wg-exit}"
+CARRIER_MARK=0x4e56
 WG_PEER_PUBLIC_KEY="${NVPN_UNDERLAY_WG_PEER_PUBLIC_KEY:-}"
 WG_ENDPOINT="${NVPN_UNDERLAY_WG_ENDPOINT:-}"
 WG_CLIENT_ADDRESS="${NVPN_UNDERLAY_WG_CLIENT_ADDRESS:-10.232.0.2/32}"
@@ -116,6 +117,40 @@ daemon_pid() {
 
 route_dev() {
   gate_command ip -j -4 route get "$1" | jq -er '.[0].dev'
+}
+
+carrier_route_json() {
+  gate_command ip -j -4 route get "$(endpoint_host)" mark "$CARRIER_MARK"
+}
+
+carrier_route_dev() {
+  carrier_route_json | jq -er '.[0].dev'
+}
+
+egress_policy_installed() {
+  local intent owner
+  intent="/var/lib/nvpn/egress/$(printf %s "$CONFIG" | sha256sum | cut -d ' ' -f 1).json"
+  owner="$(jq -er 'select(.version == 1 and .protection == true) | .owner' "$intent")" || return 1
+  gate_command nft -j list table inet nvpn_egress | jq -e --arg owner "owner_$owner" '
+    any(.nftables[]; .chain.name? == $owner)
+    and any(.nftables[]; .chain.name? == "output" and .chain.policy? == "drop")
+  ' >/dev/null || return 1
+  gate_command ip -j -4 route show table 20054 default | jq -e --arg interface "$WG_IFACE" '
+    any(.[]; .dev? == $interface) and any(.[]; .type? == "unreachable")
+  ' >/dev/null
+}
+
+egress_policy_removed() {
+  local family
+  ! nft list table inet nvpn_egress >/dev/null 2>&1 || return 1
+  for family in -4 -6; do
+    ip -j "$family" rule show | jq -e '
+      all(.[]; (.table? | tostring) != "20054" and .priority != 106)
+    ' >/dev/null || return 1
+    ip -j "$family" route show table all | jq -e '
+      all(.[]; (.table? | tostring) != "20054")
+    ' >/dev/null || return 1
+  done
 }
 
 endpoint_host() {
@@ -234,36 +269,25 @@ wireguard_endpoint_route_matches() {
      and (.[0].dst == $host or .[0].dst == ($host + "/32"))
      and .[0].dev == $dev
      and .[0].gateway == $gateway
-     and .[0].prefsrc == $source' <<<"$route_json" >/dev/null
+     and .[0].prefsrc == $source
+     and .[0].mark == 20054' <<<"$route_json" >/dev/null
 }
 
 assert_wireguard_endpoint_route() {
   local expected_iface="$1"
   local host expected_gateway expected_source route_json
   host="$(endpoint_host)"
-  [[ -s "$CLEANUP_JOURNAL" ]] || return 1
+  [[ "$(gate_command wg show "$WG_IFACE" fwmark)" == "$CARRIER_MARK" ]] || return 1
   expected_gateway="$(
-    jq -er --arg interface "$expected_iface" '
-      first(
-        .exit_node_runtime.wireguard_exit.previous_main_default_routes[]
-        | (split(" ")) as $tokens
-        | ($tokens | index("dev")) as $dev_index
-        | ($tokens | index("via")) as $via_index
-        | select(
-            $dev_index != null
-            and $via_index != null
-            and $tokens[$dev_index + 1] == $interface
-          )
-        | $tokens[$via_index + 1]
-      )
-    ' "$CLEANUP_JOURNAL"
+    gate_command ip -j -4 route show table main default dev "$expected_iface" \
+      | jq -er 'min_by(.metric // 0).gateway'
   )"
   expected_source="$(
     gate_command ip -j -4 address show dev "$expected_iface" scope global \
       | jq -er '.[].addr_info[] | select(.family == "inet" and .scope == "global") | .local' \
       | head -n1
   )"
-  route_json="$(gate_command ip -j -4 route show exact "$host/32")"
+  route_json="$(carrier_route_json)"
   wireguard_endpoint_route_matches \
     "$route_json" "$expected_iface" "$expected_gateway" "$expected_source" "$host"
 }
@@ -429,9 +453,13 @@ assert_active_exit_state() {
   ACTIVE_EXIT_LAST_PREDICATE=wireguard_default_route
   [[ "$(route_dev 1.1.1.1)" == "$WG_IFACE" ]] || return 1
   ACTIVE_EXIT_LAST_PREDICATE=wireguard_endpoint_interface
-  [[ "$(route_dev "$(endpoint_host)")" == "$expected_iface" ]] || return 1
+  [[ "$(carrier_route_dev)" == "$expected_iface" ]] || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=no_unmarked_endpoint_bypass
+  [[ "$(route_dev "$(endpoint_host)")" == "$WG_IFACE" ]] || return 1
   ACTIVE_EXIT_LAST_PREDICATE=wireguard_endpoint_tuple
   assert_wireguard_endpoint_route "$expected_iface" || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=durable_egress_protection
+  egress_policy_installed || return 1
   ACTIVE_EXIT_LAST_PREDICATE=wireguard_handshake
   wireguard_handshake_active || return 1
   ACTIVE_EXIT_LAST_PREDICATE=secure_dns
@@ -471,8 +499,8 @@ initial_ready() {
   (( $(payload_success_count) > 2 )) || return 1
   ACTIVE_EXIT_LAST_PREDICATE=wireguard_payload_progress
   (( $(wireguard_payload_success_count) > 1 )) || return 1
-  ACTIVE_EXIT_LAST_PREDICATE=unexpected_pre_cut_rebind
-  (( $(rebind_count) == 0 )) || return 1
+  ACTIVE_EXIT_LAST_PREDICATE=single_endpoint_start
+  [[ "$(endpoint_start_count)" == 1 ]] || return 1
   ACTIVE_EXIT_LAST_PREDICATE=ready
 }
 
@@ -480,18 +508,28 @@ wait_initial_ready() {
   local primary_iface="$1"
   local expected_pid="$2"
   local deadline="$((SECONDS + 30))"
+  local stable_rebinds="" stable_since=0 count now
   while ((SECONDS < deadline)); do
     if initial_ready "$primary_iface" "$expected_pid"; then
-      return 0
+      count="$(rebind_count)"
+      now="$(monotonic_milliseconds)"
+      if [[ "$count" != "$stable_rebinds" ]]; then
+        stable_rebinds="$count"
+        stable_since="$now"
+      elif ((now - stable_since >= 1000)); then
+        return 0
+      fi
+    else
+      stable_rebinds=""
     fi
     sleep 0.25
   done
   {
     echo "initial_last_predicate=$ACTIVE_EXIT_LAST_PREDICATE"
     echo "initial_route=$(route_dev 1.1.1.1 2>/dev/null || echo unavailable)"
-    echo "initial_endpoint_route=$(route_dev "$(endpoint_host)" 2>/dev/null || echo unavailable)"
+    echo "initial_endpoint_route=$(carrier_route_dev 2>/dev/null || echo unavailable)"
     echo "initial_endpoint_route_json=$(
-      gate_command ip -j -4 route show exact "$(endpoint_host)/32" 2>/dev/null \
+      carrier_route_json 2>/dev/null \
         | jq -c . 2>/dev/null || echo unavailable
     )"
     echo "initial_payload_successes=$(payload_success_count)"
@@ -511,7 +549,7 @@ dump_recovery_failure() {
   {
     echo "recovery_label=$label"
     echo "expected_interface=$expected_iface"
-    echo "last_route=$(route_dev "$(endpoint_host)" 2>/dev/null || echo unavailable)"
+    echo "last_route=$(carrier_route_dev 2>/dev/null || echo unavailable)"
     echo "last_carrier=$(<"/sys/class/net/$expected_carrier_iface/carrier")"
     echo "last_payload_successes=$(payload_success_count)"
     echo "last_wireguard_payload_successes=$(wireguard_payload_success_count)"
@@ -623,12 +661,12 @@ observe_recovery() {
 
   local route_deadline="$((SECONDS + 15))"
   while ((SECONDS < route_deadline)); do
-    if [[ "$(route_dev "$(endpoint_host)" 2>/dev/null || true)" == "$expected_iface" ]]; then
+    if [[ "$(carrier_route_dev 2>/dev/null || true)" == "$expected_iface" ]]; then
       break
     fi
     sleep 0.025
   done
-  if [[ "$(route_dev "$(endpoint_host)" 2>/dev/null || true)" != "$expected_iface" ]]; then
+  if [[ "$(carrier_route_dev 2>/dev/null || true)" != "$expected_iface" ]]; then
     dump_recovery_failure "$label" "$expected_iface" "$expected_carrier_iface"
     fail "$label physical endpoint route did not become usable within 15s"
   fi
@@ -732,7 +770,7 @@ observe_recovery() {
     "$STATE_DIR/daemon.stderr.log" \
     || fail "$label replaced the FIPS endpoint"
   recovered_at="$((route_usable_at + recovered_elapsed))"
-  endpoint_route="$(ip -j -4 route show exact "$(endpoint_host)/32")"
+  endpoint_route="$(carrier_route_json)"
   jq -cn \
     --argjson recovery_milliseconds "$recovered_elapsed" \
     --argjson route_usable_unix_milliseconds "$route_usable_at" \
@@ -837,11 +875,29 @@ stop_pid_file() {
 }
 
 restore_network() {
-  local failed=0
+  local failed=0 cleanup_pid=""
   stop_recovery_network_probe
   if [[ -x "$BINARY" && -e "$CONFIG" ]]; then
-    "$BINARY" stop --config "$CONFIG" --timeout-secs 5 --force >/dev/null 2>&1 \
+    "$BINARY" pause --config "$CONFIG" >"$STATE_DIR/cleanup-control.log" 2>&1 || failed=1
+    if ! daemon_pid >/dev/null 2>&1 && ! egress_policy_removed; then
+      "$BINARY" daemon --paused --config "$CONFIG" --iface "$TUN_IFACE" \
+        >"$STATE_DIR/cleanup-daemon.stdout.log" 2>"$STATE_DIR/cleanup-daemon.stderr.log" &
+      cleanup_pid="$!"
+    fi
+    local deadline="$((SECONDS + 15))"
+    while ((SECONDS < deadline)); do
+      if egress_policy_removed; then
+        [[ -z "$cleanup_pid" || "$(daemon_pid 2>/dev/null || true)" == "$cleanup_pid" ]] && break
+      fi
+      sleep 0.1
+    done
+    ((SECONDS < deadline)) || failed=1
+    egress_policy_removed || failed=1
+    "$BINARY" stop --config "$CONFIG" --timeout-secs 5 --force >>"$STATE_DIR/cleanup-control.log" 2>&1 \
       || failed=1
+  fi
+  if [[ -n "$cleanup_pid" ]]; then
+    wait "$cleanup_pid" || failed=1
   fi
   stop_pid_file "$STATE_DIR/probe.pid"
   stop_pid_file "$STATE_DIR/wireguard-probe.pid"
@@ -1032,29 +1088,15 @@ assert_secondary_underlay_ready() {
         )
       ' >/dev/null \
     || fail "secondary global IPv4 address is missing before the host cut"
-  [[ -s "$CLEANUP_JOURNAL" ]] \
-    || fail "strict exit cleanup ownership is missing before the host cut"
-  jq -e \
-    --arg interface "$interface" \
-    --arg gateway "$SECONDARY_GATEWAY" '
-      any(
-        .exit_node_runtime.wireguard_exit.previous_main_default_routes[];
-        (split(" ")) as $tokens
-        | ($tokens | index("dev")) as $dev_index
-        | ($tokens | index("via")) as $via_index
-        | $dev_index != null
-        and $via_index != null
-        and $tokens[$dev_index + 1] == $interface
-        and $tokens[$via_index + 1] == $gateway
-      )
-    ' "$CLEANUP_JOURNAL" >/dev/null \
-    || fail "secondary default route lacks durable cleanup ownership before the host cut"
-  defaults_json="$(ip -j -4 route show table main default)" \
-    || fail "could not inspect strict-exit defaults before the host cut"
-  jq -e --arg wireguard "$WG_IFACE" '
-    length >= 1 and all(.[]; .dev == $wireguard)
+  egress_policy_installed \
+    || fail "durable strict egress protection is missing before the host cut"
+  defaults_json="$(ip -j -4 route show table main default)"
+  jq -e --arg interface "$interface" --arg gateway "$SECONDARY_GATEWAY" \
+    --arg wireguard "$WG_IFACE" '
+    any(.[]; .dev == $interface and .gateway == $gateway)
+    and all(.[]; .dev != $wireguard)
   ' <<<"$defaults_json" >/dev/null \
-    || fail "strict exit retained an unmanaged physical default before the host cut"
+    || fail "network-manager physical defaults changed under strict exit"
   jq -cn \
     --arg interface "$interface" \
     --arg profile_uuid "$profile_uuid" \
@@ -1067,9 +1109,9 @@ assert_secondary_underlay_ready() {
       gateway: $gateway,
       carrier: true,
       active_profile: true,
-      default_route: false,
-      durable_default_route: true,
-      strict_exit_physical_defaults_absent: true
+      physical_default_route: true,
+      egress_policy_protected: true,
+      application_endpoint_bypass: false
     }' >"$STATE_DIR/secondary-underlay-ready.json"
 }
 
@@ -1188,8 +1230,8 @@ run_gate() {
       && resolve_name "$(probe_host)" \
       && test_https \
       && ! ip link show dev "$WG_IFACE" >/dev/null 2>&1 \
-      && ! ip -4 rule show \
-        | grep -Eq '^10888:.*from .* lookup 51888$' \
+      && egress_policy_removed \
+      && ! ip -4 rule show | grep -Eq '^10888:.*from .* lookup 51888$' \
       && [[ -z "$(ip -4 route show exact "$(endpoint_host)/32")" ]]
     then
       break
@@ -1227,10 +1269,11 @@ run_gate() {
       wireguard_endpoint_route_removed: true,
       wireguard_policy_rule_removed: true,
       wireguard_policy_table_empty: true,
+      egress_policy_removed: true,
       public_dns: true,
       verified_https: true
     }' >"$(marker_path direct.receipt.json)"
-  write_marker done
+  write_marker "done"
 }
 
 crash_repair_gate() {
@@ -1288,7 +1331,7 @@ crash_repair_gate() {
     handshake="$(wireguard_latest_handshake 2>/dev/null || echo 0)"
     if kill -0 "$CRASH_CONNECT_PID" >/dev/null 2>&1 \
       && [[ "$(route_dev 1.1.1.1 2>/dev/null || true)" == "$WG_IFACE" ]] \
-      && [[ "$(route_dev "$(endpoint_host)" 2>/dev/null || true)" == "$primary_iface" ]] \
+      && [[ "$(carrier_route_dev 2>/dev/null || true)" == "$primary_iface" ]] \
       && assert_wireguard_endpoint_route "$primary_iface" \
       && [[ "$handshake" =~ ^[0-9]+$ && "$handshake" -ge "$crash_started" ]] \
       && assert_secure_dns \
@@ -1304,7 +1347,7 @@ crash_repair_gate() {
   if ((SECONDS >= deadline)); then
     {
       echo "crash_connect_route=$(route_dev 1.1.1.1 2>/dev/null || echo unavailable)"
-      echo "crash_connect_endpoint_route=$(route_dev "$(endpoint_host)" 2>/dev/null || echo unavailable)"
+      echo "crash_connect_endpoint_route=$(carrier_route_dev 2>/dev/null || echo unavailable)"
       echo "crash_connect_handshake=$(wireguard_latest_handshake 2>/dev/null || echo unavailable)"
       resolvectl status "$TUN_IFACE" 2>/dev/null || true
       tail -n 100 "$STATE_DIR/crash-connect.stderr.log" 2>/dev/null || true
@@ -1321,6 +1364,9 @@ crash_repair_gate() {
       and .exit_node_runtime.wireguard_exit.interface == $wireguard
       and .exit_node_runtime.wireguard_exit.table == 51888
       and .exit_node_runtime.wireguard_exit.priority == 10888
+      and .exit_node_runtime.wireguard_exit.main_defaults_owned == false
+      and .exit_node_runtime.wireguard_exit.policy_rule_owned == true
+      and (.exit_node_runtime.wireguard_exit.endpoint_routes | length) == 0
       and .secure_dns.Resolved.interface == $iface
     ' "$CLEANUP_JOURNAL" >/dev/null \
     || fail "cleanup journal lacks exact WireGuard and secure-DNS ownership"
@@ -1347,6 +1393,9 @@ crash_repair_gate() {
       and .exit_node_runtime.wireguard_exit.interface == $wireguard
       and .exit_node_runtime.wireguard_exit.table == 51888
       and .exit_node_runtime.wireguard_exit.priority == 10888
+      and .exit_node_runtime.wireguard_exit.main_defaults_owned == false
+      and .exit_node_runtime.wireguard_exit.policy_rule_owned == true
+      and (.exit_node_runtime.wireguard_exit.endpoint_routes | length) == 0
       and .secure_dns.Resolved.interface == $iface
     ' "$CLEANUP_JOURNAL" >/dev/null \
     || fail "SIGKILL journal lost exact WireGuard or secure-DNS ownership"
@@ -1370,11 +1419,13 @@ crash_repair_gate() {
     ' "$CLEANUP_JOURNAL" >"$STATE_DIR/crash-journal-ownership.json"
   [[ "$(route_dev 1.1.1.1)" == "$WG_IFACE" ]] \
     || fail "SIGKILL did not retain the owned WireGuard default"
-  [[ "$(route_dev "$(endpoint_host)")" == "$primary_iface" ]] \
+  [[ "$(carrier_route_dev)" == "$primary_iface" ]] \
     || fail "SIGKILL did not retain the owned endpoint bypass"
   assert_wireguard_endpoint_route "$primary_iface"
   ip link show dev "$WG_IFACE" >/dev/null 2>&1 \
     || fail "SIGKILL removed the owned WireGuard interface"
+  egress_policy_installed \
+    || fail "SIGKILL removed the durable egress protection"
   ip -4 rule show | grep -Eq '^10888:.*from .* lookup 51888$' \
     || fail "SIGKILL removed the owned WireGuard policy rule"
   ip -4 route show table 51888 | grep -q . \
@@ -1412,6 +1463,7 @@ crash_repair_gate() {
     if [[ ! -e "$CLEANUP_JOURNAL" ]] \
       && [[ "$(route_dev 1.1.1.1 2>/dev/null || true)" == "$primary_iface" ]] \
       && ! ip link show dev "$WG_IFACE" >/dev/null 2>&1 \
+      && egress_policy_removed \
       && ! ip -4 rule show | grep -Eq '^10888:.*from .* lookup 51888$' \
       && [[ -z "$(ip -4 route show exact "$(endpoint_host)/32")" ]] \
       && { [[ -z "$policy_table" ]] || grep -Fq 'FIB table does not exist' <<<"$policy_table"; } \
@@ -1474,6 +1526,7 @@ crash_repair_gate() {
       wireguard_endpoint_route_survived_sigkill: true,
       wireguard_policy_rule_survived_sigkill: true,
       wireguard_policy_table_survived_sigkill: true,
+      durable_egress_protection_survived_sigkill: true,
       secure_dns_cleanup_ownership_survived_sigkill: true,
       startup_repair_without_explicit_command: true,
       cleanup_journal_removed: true,
@@ -1481,6 +1534,7 @@ crash_repair_gate() {
       wireguard_endpoint_route_removed: true,
       wireguard_policy_rule_removed: true,
       wireguard_policy_table_empty: true,
+      egress_policy_removed: true,
       secure_dns_cleanup_ownership_removed: true,
       physical_default_restored: true,
       public_dns_restored: true,

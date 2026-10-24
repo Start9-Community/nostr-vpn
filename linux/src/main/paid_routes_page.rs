@@ -333,14 +333,15 @@ fn paid_route_offer_row(
         paid_exit_rating_buttons(app, &row, &offer.seller_npub, offer.personal_rating);
     }
     let active = state.internet_source == "paid_manual" && state.exit_node == offer.seller_npub;
-    let compatible_mint = offer.accepted_mints.iter().any(|accepted| {
-        state
-            .paid_route_market
-            .wallet
-            .mints
-            .iter()
-            .any(|mint| mint.url == *accepted)
-    });
+    let compatible_mint = offer.price_msat_per_gb == 0
+        || offer.accepted_mints.iter().any(|accepted| {
+            state
+                .paid_route_market
+                .wallet
+                .mints
+                .iter()
+                .any(|mint| mint.url == *accepted)
+        });
     let connect = icon_text_button(
         if active { "Active" } else { "Connect" },
         if active {
@@ -369,11 +370,44 @@ fn paid_route_offer_row(
     row.append(&connect);
     parent.append(&row);
     if !compatible_mint {
-        let help = gtk::Label::new(Some("Add one of this seller's accepted mints to buy"));
+        let help = gtk::Label::new(Some(if offer.accepted_mints.is_empty() {
+            "This seller has not listed a payment mint"
+        } else {
+            "Trust an accepted mint to buy"
+        }));
         help.add_css_class("caption");
         help.add_css_class("warning");
         help.set_xalign(0.0);
         parent.append(&help);
+        for mint in &offer.accepted_mints {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            let label = gtk::Label::new(Some(mint));
+            label.add_css_class("caption");
+            label.set_xalign(0.0);
+            label.set_selectable(true);
+            label.set_wrap(true);
+            label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            label.set_width_chars(1);
+            label.set_hexpand(true);
+            row.append(&label);
+            let trust = gtk::Button::with_label("Trust mint");
+            trust.set_tooltip_text(Some(&format!("Allow this wallet to hold funds at {mint}")));
+            {
+                let app = app.clone();
+                let url = mint.clone();
+                trust.connect_clicked(move |_| {
+                    dispatch(
+                        &app,
+                        NativeAppAction::AddPaidRouteWalletMint {
+                            url: url.clone(),
+                            label: None,
+                        },
+                    );
+                });
+            }
+            row.append(&trust);
+            parent.append(&row);
+        }
     }
 }
 

@@ -48,10 +48,12 @@ RUN apt-get update \
       iptables \
       iputils-ping \
       libdbus-1-3 \
+      nftables \
       procps \
       socat \
       wireguard-tools \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ! grep -q MIICTjCCAdOgAwIBAgIKPPYHqWhwDtqLhDAKBggqhkjOPQQDAzBr /etc/ssl/certs/ca-certificates.crt
 
 COPY --from=rust-builder /out/nvpn /usr/local/bin/nvpn
 COPY --from=rust-builder /out/nvpn-web /usr/local/bin/nvpn-web

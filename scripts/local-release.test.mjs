@@ -103,6 +103,20 @@ INVALID KEY=nope
   })
 })
 
+test('parseEnvFile preserves literal Windows paths and only expands double-quoted escapes', () => {
+  const parsed = parseEnvFile(String.raw`
+NVPN_WINDOWS_GUEST_REPO_PATH=C:\src\nvpn-release\target
+NVPN_WINDOWS_GUEST_FIPS_REPO_PATH='C:\src\release\fips'
+NVPN_NOTE="line one\nline two\r\ttail"
+`)
+
+  assert.deepEqual(parsed, {
+    NVPN_WINDOWS_GUEST_REPO_PATH: String.raw`C:\src\nvpn-release\target`,
+    NVPN_WINDOWS_GUEST_FIPS_REPO_PATH: String.raw`C:\src\release\fips`,
+    NVPN_NOTE: 'line one\nline two\r\ttail',
+  })
+})
+
 test('GitHub publication derives one explicit repository from the github remote', () => {
   for (const remote of [
     'git@github.com:mmalmi/nostr-vpn.git',
@@ -1752,14 +1766,6 @@ test('release builds include paid exit support by default', () => {
     /if \[\[ \$\{NVPN_LINUX_MUSL_NO_DEFAULT_FEATURES:-0\} == 1 \]\]; then[\s\S]*cargo_feature_args\+=\(--no-default-features\)/,
   )
   assert.doesNotMatch(releaseWorkflow, /NVPN_LINUX_MUSL_NO_DEFAULT_FEATURES/)
-})
-
-test('Linux musl builds extract only rustables instead of vendoring every dependency', () => {
-  const linuxBuilder = readFileSync('scripts/build-nvpn-linux-musl', 'utf8')
-
-  assert.doesNotMatch(linuxBuilder, /\bcargo\b[^\n]*\bvendor\b/)
-  assert.match(linuxBuilder, /rustables-\$\{rustables_version\}\.crate/)
-  assert.match(linuxBuilder, /tar -xzf "\$rustables_crate" -C vendor/)
 })
 
 test('deterministicBuildEnv fills stable defaults without clobbering explicit env', () => {

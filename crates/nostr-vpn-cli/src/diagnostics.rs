@@ -268,6 +268,37 @@ pub(crate) async fn detect_captive_portal(timeout: Duration) -> Option<bool> {
 }
 
 async fn detect_captive_portal_on_default_route(timeout: Duration) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    if let Some(network) = crate::linux_host_network::current() {
+        let client = network
+            .http_client_builder()
+            .ok()?
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(timeout)
+            .build()
+            .ok()?;
+        for endpoint in CAPTIVE_PORTAL_ENDPOINTS {
+            let Ok(response) = client
+                .get(endpoint.url)
+                .header("Cache-Control", "no-cache")
+                .send()
+                .await
+            else {
+                continue;
+            };
+            if response.status().as_u16() != endpoint.expected_status {
+                return Some(true);
+            }
+            if endpoint.expected_prefix.is_empty() {
+                return Some(false);
+            }
+            let Ok(body) = response.text().await else {
+                continue;
+            };
+            return Some(!body.starts_with(endpoint.expected_prefix));
+        }
+        return None;
+    }
     for endpoint in CAPTIVE_PORTAL_ENDPOINTS {
         match tokio::task::spawn_blocking({
             let endpoint = *endpoint;

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::future::{pending, poll_fn};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::task::Poll;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use fips_core::{FipsEndpoint, PeerIdentity};
@@ -12,6 +14,7 @@ use fips_tcp_endpoint::FipsTcpEndpoint;
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, Sleep, sleep_until};
 
 use crate::fips_control::{
     FipsControlFrame, JoinRosterControl, decode_fips_control_frame, encode_fips_control_frame,
@@ -27,7 +30,6 @@ const DELIVERY_CAPACITY: usize = 128;
 const MAX_CONNECTIONS: usize = 256;
 const MAX_CONNECTIONS_PER_PEER: usize = 8;
 const IO_CHUNK_BYTES: usize = 16 * 1024;
-const DRIVE_INTERVAL: Duration = Duration::from_millis(20);
 // FIPS may spend its full default 30-second handshake window recovering a
 // route. Keep state-control alive long enough to use the resulting session.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(35);
@@ -331,21 +333,35 @@ async fn run(
 ) {
     let mut outbound = HashMap::<ConnectionId, OutboundRecord>::new();
     let mut inbound = HashMap::<ConnectionId, InboundRecord>::new();
-    let mut drive_delay = next_drive_delay(false);
-    let drive = tokio::time::sleep(drive_delay);
+    // TCP's injected clock and its timer share one origin. Recomputing a
+    // relative delay from wall time would move an unchanged deadline.
+    let clock_origin = Instant::now();
+    let drive = None::<Sleep>;
     tokio::pin!(drive);
+    let mut continue_work = false;
 
     loop {
-        // `receive_report` snapshots the TCP clock before awaiting a packet.
-        // Retaining the close-retention deadline while quiet bounds that clock
-        // staleness and retires closed tuples without waking at the active
-        // 20 ms retransmission cadence.
-        let receive_now = now_ms();
-        let (now, drive_fired) = tokio::select! {
+        let deadline = next_drive_deadline(
+            tcp.next_poll_at(tcp_now_ms(clock_origin)),
+            clock_origin,
+            &outbound,
+            &inbound,
+        );
+        if drive.as_ref().get_ref().as_ref().map(Sleep::deadline) != deadline {
+            match (drive.as_mut().as_pin_mut(), deadline) {
+                (Some(timer), Some(deadline)) => timer.reset(deadline),
+                (_, deadline) => drive.as_mut().set(deadline.map(sleep_until)),
+            }
+        }
+        let ready_record = inbound
+            .iter()
+            .find_map(|(id, record)| record.ready.as_ref().map(|_| *id));
+        let timer = drive.as_mut().as_pin_mut();
+        tokio::select! {
             _ = &mut shutdown => break,
             command = commands.recv() => {
                 let Some(command) = command else { break; };
-                let now = now_ms();
+                let now = tcp_now_ms(clock_origin);
                 match tcp.connect(command.peer, now).await {
                     Ok(id) => {
                         outbound.insert(id, OutboundRecord {
@@ -363,35 +379,55 @@ async fn run(
                         }
                     }
                 }
-                (now, false)
             }
-            result = tcp.receive_report(receive_now) => {
+            result = tcp.wait_for_input() => {
                 if result.is_err() { break; }
-                (now_ms(), false)
+                // Only the readiness wait is cancellable. A selected batch
+                // advances TCP using arrival time and finishes its output.
+                if tcp.receive_report_filtered_datagrams_with_clock(
+                    || tcp_now_ms(clock_origin),
+                    |_, _| true,
+                ).await.is_err() { break; }
             }
-            () = &mut drive => {
-                let now = now_ms();
-                if tcp.poll(now).await.is_err() { break; }
-                (now, true)
+            () = async {
+                match timer {
+                    Some(timer) => timer.await,
+                    None => pending().await,
+                }
+            } => {
+                let now = tcp_now_ms(clock_origin);
+                if tcp.next_poll_at(now).is_some_and(|deadline| deadline <= now)
+                    && tcp.poll(now).await.is_err()
+                {
+                    break;
+                }
             }
+            () = wait_for_cancelled_send(&mut outbound) => {}
+            permit = received.reserve(), if ready_record.is_some() => {
+                let mut record = inbound
+                    .remove(&ready_record.expect("ready record selected"))
+                    .expect("ready record retained until delivery");
+                let delivered = ReceivedFipsControlFrame {
+                    source_peer: record.peer,
+                    frame: record.ready.take().expect("ready frame retained"),
+                };
+                if let Ok(permit) = permit {
+                    permit.send(delivered.clone());
+                }
+                // Preserve observation when the local receiver is closed.
+                let _ = observed.send(delivered);
+            }
+            () = tokio::task::yield_now(), if continue_work => {}
         };
-        drive_ready(
+        continue_work = drive_ready(
             &mut tcp,
             &received,
             &observed,
             &mut outbound,
             &mut inbound,
-            now,
+            tcp_now_ms(clock_origin),
         )
         .await;
-
-        let next_delay = next_drive_delay(!outbound.is_empty() || !inbound.is_empty());
-        if drive_fired || next_delay != drive_delay {
-            drive_delay = next_delay;
-            drive
-                .as_mut()
-                .reset(tokio::time::Instant::now() + drive_delay);
-        }
     }
 
     for (_, mut record) in outbound {
@@ -401,12 +437,49 @@ async fn run(
     }
 }
 
-fn next_drive_delay(has_open_record: bool) -> Duration {
-    if has_open_record {
-        DRIVE_INTERVAL
-    } else {
-        Duration::from_millis(CONTROL_CLOSE_RETENTION_MS)
-    }
+fn tcp_now_ms(origin: Instant) -> u64 {
+    origin.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn next_drive_deadline(
+    tcp_deadline_ms: Option<u64>,
+    clock_origin: Instant,
+    outbound: &HashMap<ConnectionId, OutboundRecord>,
+    inbound: &HashMap<ConnectionId, InboundRecord>,
+) -> Option<Instant> {
+    tcp_deadline_ms
+        .map(|deadline| clock_origin + Duration::from_millis(deadline))
+        .into_iter()
+        .chain(outbound.values().map(|record| {
+            record
+                .connected_at
+                .map_or(record.started + CONNECTION_TIMEOUT, |connected| {
+                    connected + STREAM_TIMEOUT
+                })
+        }))
+        // Decoded records already completed their stream. They wait for local
+        // queue capacity, even after their TCP close-retention deadline passes.
+        .chain(
+            inbound
+                .values()
+                .filter(|record| record.ready.is_none())
+                .map(|record| record.started + STREAM_TIMEOUT),
+        )
+        .min()
+}
+
+async fn wait_for_cancelled_send(outbound: &mut HashMap<ConnectionId, OutboundRecord>) {
+    poll_fn(|cx| {
+        for record in outbound.values_mut() {
+            if let Some(response) = &mut record.response
+                && response.poll_closed(cx).is_ready()
+            {
+                return Poll::Ready(());
+            }
+        }
+        Poll::Pending
+    })
+    .await;
 }
 
 async fn drive_ready(
@@ -416,7 +489,8 @@ async fn drive_ready(
     outbound: &mut HashMap<ConnectionId, OutboundRecord>,
     inbound: &mut HashMap<ConnectionId, InboundRecord>,
     now_ms: u64,
-) {
+) -> bool {
+    let mut continue_work = false;
     while let Some(id) = tcp.accept() {
         if inbound.len() >= MAX_CONNECTIONS {
             let _ = tcp.abort(id).await;
@@ -449,6 +523,7 @@ async fn drive_ready(
             let _ = tcp.abort(id).await;
             continue;
         }
+        let previous_offset = record.offset;
         let result = drive_outbound(tcp, id, &mut record, now_ms).await;
         match result {
             Ok(Some(sent)) => {
@@ -457,6 +532,8 @@ async fn drive_ready(
                 }
             }
             Ok(None) => {
+                continue_work |=
+                    record.offset > previous_offset && record.offset < record.bytes.len();
                 outbound.insert(id, record);
             }
             Err(error) => {
@@ -478,6 +555,7 @@ async fn drive_ready(
             }
             continue;
         }
+        let previous_len = record.bytes.len();
         match drive_inbound(tcp, id, &mut record, now_ms).await {
             Ok(Some(frame)) => {
                 if !try_deliver(received, observed, &mut record, frame) {
@@ -485,6 +563,7 @@ async fn drive_ready(
                 }
             }
             Ok(None) => {
+                continue_work |= record.bytes.len() > previous_len;
                 inbound.insert(id, record);
             }
             Err(()) => {
@@ -492,6 +571,7 @@ async fn drive_ready(
             }
         }
     }
+    continue_work
 }
 
 fn try_deliver(
@@ -592,10 +672,16 @@ async fn drive_inbound(
             .read(id, remaining.min(IO_CHUNK_BYTES), now_ms)
             .await
             .map_err(|_| ())?;
+        let made_progress = !bytes.is_empty();
         record.bytes.extend(bytes);
         if let Some(frame) = decode_complete_stateful_record(&record.bytes) {
             tcp.close(id, now_ms).await.map_err(|_| ())?;
             return Ok(Some(frame));
+        }
+        if made_progress {
+            // FIN can arrive with more than one read chunk already buffered.
+            // Drain those bytes before treating EOF as an incomplete record.
+            return Ok(None);
         }
     }
     if !tcp.is_read_closed(id) {

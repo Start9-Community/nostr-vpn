@@ -194,7 +194,9 @@ extension AppManager {
     func setManualPaidExitProvider(_ provider: String) {
         let provider = provider.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !provider.isEmpty else { return }
-        dispatch(.setManualPaidExitProvider(provider: provider), status: "Adding provider")
+        guard openingPaidExitLink != provider else { return }
+        pendingPaidExitLink = provider
+        openPendingPaidExitLink()
     }
 
     func clearManualPaidExitProvider() {

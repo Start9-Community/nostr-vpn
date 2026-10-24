@@ -33,6 +33,13 @@ const DEFAULT_CHANNEL_EXPIRY_SECS: u64 = 86_400;
 const DEFAULT_FREE_PROBE_BYTES: u64 = 1_048_576;
 const DEFAULT_GRACE_BYTES: u64 = 262_144;
 
+/// Stop using a channel and begin settlement before its immutable refund deadline.
+/// The standard 24-hour channel gets a 12-hour retry window; shorter contracts
+/// reserve half their lifetime, and longer contracts still retire after 12 hours.
+pub fn paid_route_collection_after_secs(refund_lifetime_secs: u64) -> u64 {
+    (refund_lifetime_secs / 2).min(12 * 60 * 60)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PaidRouteServiceKind {
@@ -196,6 +203,7 @@ pub struct PaidRouteChannelTerms {
     pub accepted_mints: Vec<String>,
     #[serde(default = "default_max_channel_capacity_sat")]
     pub max_channel_capacity_sat: u64,
+    /// Funding refund lifetime, not the earlier automatic collection cutoff.
     #[serde(default = "default_channel_expiry_secs")]
     pub channel_expiry_secs: u64,
     #[serde(default = "default_free_probe_bytes")]
@@ -342,7 +350,8 @@ impl ManualPaidExitProvider {
     }
 
     pub fn new(npub: &str, max_price_msat_per_gb: Option<u64>, mint: Option<&str>) -> Result<Self> {
-        let public_key = PublicKey::parse(npub).context("invalid paid exit provider npub")?;
+        let public_key = PublicKey::parse(npub.trim().trim_start_matches('@'))
+            .context("invalid paid exit provider npub; paste the complete npub or provider link")?;
         let npub = public_key
             .to_bech32()
             .context("failed to encode paid exit provider npub")?;
@@ -379,12 +388,15 @@ impl ManualPaidExitProvider {
     }
 
     pub fn seller_link(npub: &str, config: &PaidExitConfig) -> Result<String> {
-        Self::new(
-            npub,
-            Some(config.pricing.price_msat_per_gb),
-            config.channel.accepted_mints.first().map(String::as_str),
-        )?
-        .link()
+        let mut config = config.clone();
+        config.normalize();
+        // Multiple accepted mints are alternatives, not a preference. Leave
+        // the buyer free to use an accepted mint already trusted in its wallet.
+        let mint = match config.channel.accepted_mints.as_slice() {
+            [mint] => Some(mint.as_str()),
+            _ => None,
+        };
+        Self::new(npub, Some(config.pricing.price_msat_per_gb), mint)?.link()
     }
 
     pub fn accepts(&self, offer: &PaidRouteOffer) -> Result<()> {

@@ -320,7 +320,7 @@ pub(crate) async fn update_manual_paid_exit(
             "Seller transport is no longer authenticated"
         };
         if manual.record_probe_failure(reason, now_unix) {
-            return fail_manual_paid_exit(manual, app, config_path, reason, now_unix);
+            return fail_manual_paid_exit(manual, config_path, reason, now_unix);
         }
         eprintln!("paid-exit: selected seller health check failed: {reason}; retrying");
     }
@@ -366,7 +366,6 @@ pub(crate) async fn update_manual_paid_exit(
                         );
                         return fail_manual_paid_exit(
                             manual,
-                            app,
                             config_path,
                             &format!(
                                 "Seller Internet failed {} consecutive health checks: {error}",
@@ -388,15 +387,19 @@ pub(crate) async fn update_manual_paid_exit(
     // seller-health deadline could otherwise strand a successfully opened
     // channel before the route store observes its result.
     if manual.health_deadline_expired(now_unix) {
-        let reason = manual.timeout_reason();
-        return fail_manual_paid_exit(manual, app, config_path, &reason, now_unix);
+        let reason = load_paid_route_store(&store_path)?
+            .channels
+            .get(&store.sessions[&session_id].session.payment.channel_id)
+            .map(|channel| channel.error.trim().to_string())
+            .filter(|error| !error.is_empty())
+            .unwrap_or_else(|| manual.timeout_reason());
+        return fail_manual_paid_exit(manual, config_path, &reason, now_unix);
     }
     Ok(false)
 }
 
 pub(super) fn fail_manual_paid_exit(
     manual: &mut PaidExitManualBuyer,
-    app: &mut AppConfig,
     config_path: &Path,
     reason: &str,
     now_unix: u64,
@@ -405,9 +408,7 @@ pub(super) fn fail_manual_paid_exit(
         store.fail_selected_buyer_session(reason, now_unix)?;
         Ok(())
     })?;
-    eprintln!("paid-exit: {reason}; falling back to direct Internet");
-    app.set_internet_source(nostr_vpn_core::config::InternetSource::Direct);
-    app.save(config_path)?;
+    eprintln!("paid-exit: {reason}; retaining the selected paid exit");
     manual.cancel();
     Ok(true)
 }

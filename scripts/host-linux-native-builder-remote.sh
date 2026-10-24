@@ -4,11 +4,11 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 REMOTE_ROOT APP_BUNDLE_SHA APP_SHA APP_TREE FIPS_BUNDLE_SHA FIPS_SHA FIPS_TREE RUST_TOOLCHAIN CACHE_ID TARGET_GENERATION TARGET_VOLUME CONTAINER_NAME ROOT_REALIZED_LOCK LINUX_REALIZED_LOCK SOURCE_DATE_EPOCH DOCKERFILE_SHA PAYLOAD_SHA" >&2
+  echo "usage: $0 REMOTE_ROOT APP_BUNDLE_SHA APP_SHA APP_TREE FIPS_BUNDLE_SHA FIPS_SHA FIPS_TREE RUST_TOOLCHAIN CACHE_ID TARGET_GENERATION TARGET_VOLUME CONTAINER_NAME ROOT_REALIZED_LOCK LINUX_REALIZED_LOCK SOURCE_DATE_EPOCH DOCKERFILE_SHA PAYLOAD_SHA BUILD_CPUS BUILD_MEMORY CARGO_JOBS TARGET_TMPFS_BYTES" >&2
   exit 2
 }
 
-[[ "$#" == 17 ]] || usage
+[[ "$#" == 21 ]] || usage
 REMOTE_ROOT="$1"
 APP_BUNDLE_SHA256="$2"
 APP_GIT_SHA="$3"
@@ -26,6 +26,13 @@ LINUX_REALIZED_CARGO_LOCK_SHA256="${14}"
 SOURCE_DATE_EPOCH="${15}"
 EXPECTED_DOCKERFILE_SHA256="${16}"
 EXPECTED_PAYLOAD_SHA256="${17}"
+export NVPN_HOST_LINUX_VM_BUILD_CPUS="${18}"
+export NVPN_HOST_LINUX_VM_BUILD_MEMORY="${19}"
+export NVPN_HOST_LINUX_VM_CARGO_JOBS="${20}"
+export NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES="${21}"
+for resource in NVPN_HOST_LINUX_VM_BUILD_CPUS NVPN_HOST_LINUX_VM_BUILD_MEMORY NVPN_HOST_LINUX_VM_CARGO_JOBS NVPN_HOST_LINUX_VM_TARGET_TMPFS_BYTES; do
+  [[ "${!resource}" != - ]] || unset "$resource"
+done
 
 EXPECTED_RUNS_ROOT="$HOME/.cache/nostr-vpn-linux-release-builder/runs"
 [[ -d "$EXPECTED_RUNS_ROOT" \
@@ -235,6 +242,7 @@ flock 9
 
 # shellcheck disable=SC1091
 source "$REMOTE_ROOT/app/scripts/lib-host-linux-builder-isolation.sh"
+host_linux_builder_resource_args
 host_linux_builder_stop_container "$CONTAINER_NAME" "$BUILD_CACHE_ID"
 host_linux_builder_stop_container "$OWNER_CONTAINER_NAME" "$BUILD_CACHE_ID"
 host_linux_builder_create_fresh_target_volume \
@@ -251,7 +259,7 @@ fips_packages=()
 while IFS= read -r package; do
   fips_packages+=("$package")
 done < <(python3 "$PATCH_LOCK_VERIFIER" --manifest-specs "$REMOTE_ROOT/fips")
-[[ "${#fips_packages[@]}" == 3 ]]
+[[ "${#fips_packages[@]}" == 8 ]]
 python3 "$PATCH_LOCK_VERIFIER" \
   --materialize "$REMOTE_ROOT/app/Cargo.lock" \
   "$REMOTE_ROOT/root-realized.lock" \
@@ -271,17 +279,9 @@ python3 "$CARGO_CACHE_VERIFIER" seed \
   "$DOWNLOAD_CACHE_DIR" "$REMOTE_ROOT/cargo-home" \
   "$REMOTE_ROOT/root-realized.lock" \
   "$REMOTE_ROOT/linux-realized.lock"
-IMAGE_TAG="nostr-vpn-linux-vm-gate:ubuntu24.04-rust${RUST_TOOLCHAIN//./-}-${BUILD_CACHE_ID:0:12}"
-docker build \
-  --platform linux/amd64 \
-  --build-arg "RUST_TOOLCHAIN=$RUST_TOOLCHAIN" \
-  --file "$DOCKERFILE" \
-  --tag "$IMAGE_TAG" \
-  "$REMOTE_ROOT/docker-context"
-CONTAINER_IMAGE_ID="$(
-  docker image inspect --format '{{.Id}}' "$IMAGE_TAG"
-)"
-[[ "$CONTAINER_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+host_linux_builder_prepare_image \
+  "$DOCKERFILE" "$RUST_TOOLCHAIN" linux/amd64 "$REMOTE_ROOT/docker-context"
+CONTAINER_IMAGE_ID="$HOST_LINUX_BUILDER_IMAGE_ID"
 
 # A fresh named Docker volume is root-owned. Prove it is empty, then give the
 # unprivileged build identity ownership before either Cargo phase can mount it.
@@ -329,7 +329,7 @@ run_builder_phase() {
     "${package_mounts[@]}" \
     --env CARGO_HOME=/cargo-home \
     --env HOME=/cargo-home \
-    --env CARGO_INCREMENTAL=0 \
+    "${HOST_LINUX_BUILDER_RESOURCE_ARGS[@]}" \
     --env CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     --env "NVPN_BUILD_GIT_SHA=$APP_GIT_SHA" \
     --env "EXPECTED_ROOT_REALIZED_CARGO_LOCK_SHA256=$ROOT_REALIZED_CARGO_LOCK_SHA256" \
