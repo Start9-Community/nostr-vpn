@@ -57,6 +57,13 @@ control panel as two separate daemons rather than one process.
 | `nostr-vpn-daemon`        | the `daemon` mesh process — the one to `attach` to |
 | `nostr-vpn-control-panel` | the `control-panel` web process                    |
 
+The Rust binaries are built with `Cargo.lock` enforced. Their embedded roots
+must exclude emSign ECC Root CA - G3, and their verifier must reject the eight
+compromised eMudhra intermediate public keys, independently of the OS CA bundle.
+`webpki-roots` 1.0.10 (also re-exported by 0.26.11) and `rustls-webpki` 0.103.16
+supply these fixes. `crates/nostr-vpn-core/tests/tls_trust.rs` covers both contracts.
+The runtime OS CA bundle is checked separately in `umbrel/Dockerfile`.
+
 Both subcontainers mount the same `main` volume, which is how the panel reads the
 daemon's state. A `prepare-data` oneshot runs as root before either daemon and
 creates the home and config directories.

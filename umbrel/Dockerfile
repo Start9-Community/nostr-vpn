@@ -31,7 +31,7 @@ COPY vendor ./vendor
 RUN --mount=type=cache,id=nostr-vpn-umbrel-cargo-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry \
     --mount=type=cache,id=nostr-vpn-umbrel-cargo-git-${TARGETPLATFORM},target=/usr/local/cargo/git \
     --mount=type=cache,id=nostr-vpn-umbrel-cargo-target-${TARGETPLATFORM},target=/work/target \
-    cargo build --release -p nvpn -p nostr-vpn-web \
+    cargo build --locked --release -p nvpn -p nostr-vpn-web \
     && mkdir -p /out \
     && cp /work/target/release/nvpn /out/nvpn \
     && cp /work/target/release/nostr-vpn-web /out/nvpn-web
