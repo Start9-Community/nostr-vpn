@@ -6,9 +6,8 @@ and `aarch64`.
 
 Install the prerequisites from the StartOS
 [environment setup guide](https://docs.start9.com/packaging/0.4.0.x/environment-setup.html),
-and use `start-cli 1.1.0`, the version required by the release validator. Check
-`start-cli --version` in the same environment that runs the release command;
-an older copy earlier in `PATH` will stop packaging.
+and use a StartOS CLI compatible with the package's pinned SDK. Start9 builds
+use the SDK Makefile flow below.
 
 The checkout must be inside a packaging workspace created with
 `start-cli s9pk init-workspace <workspace>`. Keep the existing package-signing
@@ -16,7 +15,8 @@ key in that workspace's `.startos/build.key.pem`; do not generate a replacement
 key for an existing package. The setup guide explains how to retain older keys.
 These prerequisites can be checked before building any release artifacts.
 
-The StartOS CLI 1.1.0 download must match the reviewed SHA-256 before use:
+The standalone upstream release validator still requires exactly `start-cli 1.1.0`.
+Its downloads must match the reviewed SHA-256 before use:
 
 | Asset | SHA-256 |
 | --- | --- |
@@ -31,13 +31,10 @@ WireGuard tools, nftables, iptables and iproute2. Debian package repositories
 remain external build inputs; these pins alone do not establish a byte-for-byte
 binary reproduction. Keep the resolved image and package evidence with a build.
 
-The pinned StartOS CLI internally invokes `ghcr.io/start9labs/sdk/utils:latest`.
-The Makefile pulls that helper by a committed multi-architecture digest, binds
-the CLI's required local tag to it, and checks the image identity before and
-after packing. A changed helper causes the package build to fail and deletes
-the output. Serialize StartOS packaging that uses this tag on one Docker daemon.
-Keep that daemon local to the packaging workspace so the CLI's temporary bind
-mounts resolve; a separate native Buildx builder may perform compilation.
+`Makefile` includes `node_modules/@start9labs/start-sdk/s9pk.mk`; the SDK owns
+packaging and helper-image behavior. This fork has no Makefile-owned
+`utils:latest` digest/retag guard. The standalone validator's CLI requirement
+does not define the SDK packaging workflow.
 
 Then build both package architectures:
 
@@ -46,8 +43,8 @@ make
 ```
 
 The Makefile installs Node dependencies and runs the TypeScript check and build
-before packaging. It uses `npm ci` and refuses a stale dependency lock; update
-and commit `package-lock.json` explicitly when changing package dependencies.
+before packaging. Update and commit `package-lock.json` explicitly when changing
+package dependencies.
 
 Useful targeted builds:
 
@@ -57,13 +54,14 @@ make arm
 make clean
 ```
 
-To produce versioned, validated x86_64 and aarch64 artifacts:
+The inherited standalone validator has the separate legacy CLI requirement above:
 
 ```bash
 just release-startos
 ```
 
-This command builds and validates both architectures; it does not publish them.
+This command builds and validates both architectures; it does not publish them
+and is not the standard Start9 packaging path.
 
 Before opening a Start9 Community Registry PR, verify:
 

@@ -181,74 +181,22 @@ test('validateStartosManifest requires tunnel access, the v0.4 runtime, release 
   )
 })
 
-
-test('StartOS helper is pinned before packing and drift deletes the package', () => {
-  const makefile = readFileSync(new URL('../Makefile', import.meta.url), 'utf8')
-  const pinned = makefile.match(/^STARTOS_UTILS_IMAGE := (\S+)$/m)?.[1]
-  assert.match(pinned ?? '', /^ghcr\.io\/start9labs\/sdk\/utils@sha256:[a-f0-9]{64}$/)
-  const directory = mkdtempSync(join(tmpdir(), 'nvpn-startos-helper-'))
+test('StartOS Makefile delegates to the SDK with both supported architectures', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'nvpn-startos-sdk-'))
   try {
-    for (const scenario of ['ok', 'pull-failure', 'drift']) {
-      const root = join(directory, scenario)
-      const bin = join(root, 'bin')
-      const log = join(root, 'commands')
-      const drift = join(root, 'drifted')
-      mkdirSync(bin, { recursive: true })
-      mkdirSync(join(root, 'startos', 'manifest'), { recursive: true })
-      writeFileSync(join(root, 'startos', 'manifest', 'index.ts'), "id: 'nostr-vpn',\n")
-      for (const name of ['Makefile', 's9pk.mk']) {
-        copyFileSync(new URL(`../${name}`, import.meta.url), join(root, name))
-      }
-      writeFileSync(join(bin, 'docker'), `#!/bin/sh
-printf 'docker %s\\n' "$*" >> "$HELPER_LOG"
-case "$1" in
-  pull)
-    test "$2" = "$HELPER_PIN" || exit 91
-    test "$HELPER_CASE" != pull-failure || exit 92
-    ;;
-  tag)
-    test "$2" = "$HELPER_PIN" || exit 93
-    test "$3" = ghcr.io/start9labs/sdk/utils:latest || exit 94
-    ;;
-  image)
-    test "$2" = inspect || exit 95
-    if test "$3" = ghcr.io/start9labs/sdk/utils:latest && test -f "$HELPER_DRIFT"; then
-      printf 'sha256:changed\\n'
-    else
-      printf 'sha256:pinned\\n'
-    fi
-    ;;
-  *) exit 96 ;;
-esac
+    const sdk = join(directory, 'node_modules', '@start9labs', 'start-sdk')
+    mkdirSync(sdk, { recursive: true })
+    copyFileSync(new URL('../Makefile', import.meta.url), join(directory, 'Makefile'))
+    writeFileSync(join(sdk, 's9pk.mk'), `.PHONY: sdk-integration
+sdk-integration:
+\t@printf '%s\\n' '$(ARCHES)'
 `)
-      writeFileSync(join(bin, 'start-cli'), `#!/bin/sh
-if test "$1 $2" = 's9pk list-ingredients'; then exit 0; fi
-test "$1 $2" = 's9pk pack' || exit 97
-printf 'pack\\n' >> "$HELPER_LOG"
-for output do :; done
-printf fixture > "$output"
-if test "$HELPER_CASE" = drift; then touch "$HELPER_DRIFT"; fi
-`)
-      chmodSync(join(bin, 'docker'), 0o755)
-      chmodSync(join(bin, 'start-cli'), 0o755)
-      const result = spawnSync('make', ['nostr-vpn_x86_64.s9pk'], {
-        cwd: root, encoding: 'utf8',
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HELPER_PIN: pinned,
-          HELPER_LOG: log, HELPER_DRIFT: drift, HELPER_CASE: scenario },
-      })
-      const commands = readFileSync(log, 'utf8').trim().split('\n')
-      assert.equal(commands[0], `docker pull ${pinned}`)
-      assert.equal(existsSync(join(root, 'nostr-vpn_x86_64.s9pk')), scenario === 'ok')
-      if (scenario === 'ok') {
-        assert.equal(result.status, 0, result.stderr)
-        assert.equal(commands.filter((line) => line === 'pack').length, 1)
-        assert.ok(commands.indexOf('pack') > commands.findIndex((line) => line.startsWith('docker image inspect')))
-        assert.ok(commands.at(-1).startsWith('docker image inspect'))
-      } else {
-        assert.notEqual(result.status, 0)
-        assert.equal(commands.includes('pack'), scenario === 'drift')
-      }
-    }
+    const result = spawnSync('make', ['--no-print-directory', 'sdk-integration'], {
+      cwd: directory, encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.trim(), 'x86 arm')
+    assert.equal(existsSync(new URL('../s9pk.mk', import.meta.url)), false)
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }

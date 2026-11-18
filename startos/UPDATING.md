@@ -50,7 +50,8 @@ the existing exceptions below.
 
 - `startos/`, root `Makefile`, `package.json`, `package-lock.json`, `.prettierrc`,
   `tsconfig.json` and `assets/.gitkeep` integrate the published SDK packaging flow.
-  Root `instructions.md` describes the StartOS setup and joining flow.
+  Root `instructions.md` describes the StartOS setup and joining flow;
+  `CONTRIBUTING.md` distinguishes SDK builds from the standalone release validator.
 - The Start9 `build.yml`, `pr-retarget.yml`, `tagAndRelease.yml` and `syncNext.yml`
   workflows coexist with upstream's workflows; `release.yml` remains upstream's.
 - `umbrel/Dockerfile` adds `socat` for the mesh forwarders and checks the final
@@ -64,5 +65,10 @@ the existing exceptions below.
 - `scripts/release-publication-bundle.test.mjs` derives the fixture version from
   the StartOS source, including its package revision, rather than assuming the
   workspace marketing version. Retire it when upstream reads that same owner.
+- `scripts/startos-release.test.mjs` checks SDK delegation and package architectures
+  instead of upstream's removed local helper recipe. Retire it when upstream's
+  tests support this packaging integration.
+- `crates/nostr-vpn-cli/src/config_bootstrap.rs` carries a Linux cfg-tail lint
+  correction required by CI's pinned Clippy. Retire it when upstream includes it.
 
 Prefer upstream releases or upstream contributions over additional fork delta.
