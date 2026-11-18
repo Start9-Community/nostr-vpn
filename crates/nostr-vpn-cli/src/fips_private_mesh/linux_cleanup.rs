@@ -87,6 +87,7 @@ trait LinuxNetworkCleanupActions {
 #[cfg(any(test, target_os = "linux"))]
 fn cleanup_linux_network_state_with_actions(
     actions: &mut impl LinuxNetworkCleanupActions,
+    had_network_ownership: bool,
 ) -> anyhow::Result<()> {
     let mut failures = Vec::new();
     let mut endpoint_cleanup_error = None;
@@ -159,7 +160,7 @@ fn cleanup_linux_network_state_with_actions(
         failures.push("failed to restore original IPv6 default route".to_string());
     }
 
-    if let Err(error) = actions.flush_route_cache() {
+    if had_network_ownership && let Err(error) = actions.flush_route_cache() {
         failures.push(format!("failed to flush Linux route cache: {error:#}"));
     }
 
@@ -434,11 +435,21 @@ fn cleanup_linux_legacy_forwarding_rules(iface: &str) -> Result<()> {
     ] {
         let forward_in = crate::linux_exit_node_legacy_forward_in_rule(iface, family);
         let forward_out = crate::linux_exit_node_legacy_forward_out_rule(iface, family);
-        if let Err(error) = crate::linux_iptables_delete_rule(family, None, &forward_out) {
-            failures.push(format!("remove legacy forward-out rule: {error:#}"));
-        }
-        if let Err(error) = crate::linux_iptables_delete_rule(family, None, &forward_in) {
-            failures.push(format!("remove legacy forward-in rule: {error:#}"));
+        for (label, rule) in [("forward-out", &forward_out), ("forward-in", &forward_in)] {
+            if let Err(error) = crate::linux_iptables_delete_rule(family, None, rule) {
+                // This sweep is only for rules from older versions. A missing
+                // tool does not prove that kernel rules are absent, but must
+                // not make it a dependency of every private mesh session.
+                // Cleanup of rules tracked by this runtime remains strict.
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    eprintln!("fips: skipping unavailable legacy firewall cleanup: {error:#}");
+                    break;
+                }
+                failures.push(format!("remove legacy {label} rule: {error:#}"));
+            }
         }
     }
     if failures.is_empty() {
@@ -613,7 +624,7 @@ pub(crate) fn repair_linux_network_cleanup_state(
 ) -> Result<()> {
     let network_error = state
         .has_network_ownership()
-        .then(|| cleanup_linux_network_state_with_actions(state).err())
+        .then(|| cleanup_linux_network_state_with_actions(state, true).err())
         .flatten();
     let dns_error =
         crate::secure_dns_runtime::repair_linux_secure_dns_cleanup_state(&mut state.secure_dns)

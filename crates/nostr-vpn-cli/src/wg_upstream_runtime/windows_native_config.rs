@@ -413,7 +413,24 @@ fn ensure_windows_native_wireguard_config_root_is_safe(config_root: &Path) -> Re
         .parent()
         .expect("native WireGuard app root has a ProgramData parent");
     for component in [program_data, app_root, config_root] {
+        let metadata = match std::fs::symlink_metadata(component) {
+            Ok(metadata) => metadata,
+            // Cleanup may revisit ownership after its directory was removed.
+            // Existing ancestors are still checked before treating it as absent.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect native WireGuard directory {}", component.display())
+                });
+            }
+        };
         ensure_windows_path_is_not_reparse_point(component)?;
+        if !metadata.is_dir() {
+            return Err(anyhow!(
+                "native WireGuard root is not a directory: {}",
+                component.display()
+            ));
+        }
     }
     Ok(())
 }

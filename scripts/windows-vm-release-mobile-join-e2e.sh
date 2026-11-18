@@ -29,8 +29,9 @@ fi
 assert_release_checkout_state \
   "$ROOT" "$(git -C "$ROOT" rev-parse HEAD)" "$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
   "Windows/Pixel Release join" || exit 2
-APP_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
-APP_GIT_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
+DESKTOP_ROOT="${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}"
+APP_GIT_SHA="$(git -C "$DESKTOP_ROOT" rev-parse HEAD)"
+APP_GIT_TREE="$(git -C "$DESKTOP_ROOT" rev-parse 'HEAD^{tree}')"
 [[ "${NVPN_EXPECTED_APP_GIT_SHA:-}" =~ ^[0-9a-f]{40}$ \
   && "$APP_GIT_SHA" == "$NVPN_EXPECTED_APP_GIT_SHA" ]] || {
   echo "Set NVPN_EXPECTED_APP_GIT_SHA to the exact committed candidate" >&2
@@ -184,7 +185,7 @@ REMOTE_PARTICIPANT_ALIAS=""
 remote() {
   local mode="$1" command
   printf -v command \
-    "\$ErrorActionPreference = 'Stop'\n& %s -Mode %s -RepoRoot %s -ArtifactRoot %s -AppExe %s -FipsRepo %s -ExpectedAppGitSha %s -ExpectedAppGitTree %s -ExpectedFipsGitSha %s -ExpectedFipsGitTree %s -ExpectedFipsVersion %s -NetworkName %s -AdminNpub %s -NetworkId %s -ParticipantNpub %s -ParticipantAlias %s" \
+    "\$ErrorActionPreference = 'Stop'\n& %s -Mode %s -RepoRoot %s -ArtifactRoot %s -AppExe %s -FipsRepo %s -ExpectedAppGitSha %s -ExpectedAppGitTree %s -ExpectedFipsGitSha %s -ExpectedFipsGitTree %s -ExpectedFipsVersion %s -NetworkName %s -AdminNpub %s -NetworkId %s -ParticipantNpub %s -ParticipantAlias %s -VerifiedCliSha256 %s -VerifiedCliSize %s -VerifiedFipsRuntimeVersion %s" \
     "$(ps_quote "$REMOTE_SCRIPT")" \
     "$(ps_quote "$mode")" \
     "$(ps_quote "$GUEST_REPO")" \
@@ -200,9 +201,34 @@ remote() {
     "$(ps_quote "$REMOTE_ADMIN_NPUB")" \
     "$(ps_quote "$REMOTE_NETWORK_ID")" \
     "$(ps_quote "$REMOTE_PARTICIPANT_NPUB")" \
-    "$(ps_quote "$REMOTE_PARTICIPANT_ALIAS")"
+    "$(ps_quote "$REMOTE_PARTICIPANT_ALIAS")" \
+    "$(ps_quote "$VERIFIED_CLI_SHA256")" \
+    "$(ps_quote "$VERIFIED_CLI_SIZE")" \
+    "$(ps_quote "$VERIFIED_FIPS_RUNTIME_VERSION")"
   run_ps "$command"
 }
+
+HOST_SOURCE_RECEIPT="${NVPN_WINDOWS_HOST_SOURCE_FIPS_RECEIPT_PATH:?exact Windows source receipt required}"
+HOST_INSTALLER_RECEIPT="${NVPN_WINDOWS_HOST_INSTALLER_RECEIPT_PATH:?exact installed Windows artifact receipt required}"
+GUEST_CLI="${GUEST_APP%\\*}\\nvpn.exe"
+run_ps "& $(ps_quote "$GUEST_CLI") version --verbose" | tr -d '\r' >"$PLATFORM_RESULT/windows-runtime-version.txt"
+VERIFIED_CLI_SHA256="$(run_ps "(Get-FileHash -Algorithm SHA256 -LiteralPath $(ps_quote "$GUEST_CLI")).Hash.ToLowerInvariant()" | tr -d '\r' | awk '/^[0-9a-f]{64}$/ {print; exit}')"
+VERIFIED_CLI_SIZE="$(run_ps "(Get-Item -LiteralPath $(ps_quote "$GUEST_CLI")).Length" | tr -d '\r' | awk '/^[1-9][0-9]*$/ {print; exit}')"
+node "$ROOT/scripts/release-source-verification.mjs" windows-runtime-provenance \
+  "$HOST_SOURCE_RECEIPT" "$HOST_INSTALLER_RECEIPT" \
+  "$DESKTOP_APP_GIT_SHA" "$DESKTOP_APP_GIT_TREE" "$NVPN_FIPS_REPO_PATH" \
+  "$RELEASE_JOIN_FIPS_SHA" "$RELEASE_JOIN_FIPS_TREE" "$RELEASE_JOIN_FIPS_VERSION" \
+  "$PLATFORM_RESULT/windows-runtime-version.txt" "$VERIFIED_CLI_SHA256" "$VERIFIED_CLI_SIZE" \
+  >"$PLATFORM_RESULT/windows-runtime-provenance.json"
+VERIFIED_FIPS_RUNTIME_VERSION="$(jq -er '.runtimeFipsVersion' "$PLATFORM_RESULT/windows-runtime-provenance.json")"
+# Bind the GUI and native DLLs as well as the CLI before any public UI action.
+for payload in app appCore wintun; do
+  file="$(jq -er --arg key "$payload" '.payloads[$key].file' "$HOST_INSTALLER_RECEIPT")"
+  hash="$(jq -er --arg key "$payload" '.payloads[$key].sha256' "$HOST_INSTALLER_RECEIPT")"
+  size="$(jq -er --arg key "$payload" '.payloads[$key].size' "$HOST_INSTALLER_RECEIPT")"
+  run_ps "\$p = Join-Path (Split-Path -Parent $(ps_quote "$GUEST_APP")) $(ps_quote "$file"); if ((Get-FileHash -Algorithm SHA256 -LiteralPath \$p).Hash.ToLowerInvariant() -ne $(ps_quote "$hash") -or (Get-Item -LiteralPath \$p).Length -ne $size) { throw 'GUI payload differs from verified installer' }" >/dev/null
+done
+
 
 REMOTE_ACTION_PID=""
 acceptance_observer_pids=()
@@ -600,6 +626,9 @@ assert_release_checkout_state \
 receipt_binding_args=(
   ${android_install_binding_args[@]+"${android_install_binding_args[@]}"}
   --desktop-receipt "$DESKTOP_RECEIPT"
+  --windows-source-receipt "$HOST_SOURCE_RECEIPT"
+  --windows-installer-receipt "$HOST_INSTALLER_RECEIPT"
+  --windows-fips-repo "$NVPN_FIPS_REPO_PATH"
   --android-artifact-receipt "$ANDROID_ARTIFACT_RECEIPT"
   --android-install-receipt "$ANDROID_INSTALL_RECEIPT"
   --android-fips-metadata-receipt "$ANDROID_FIPS_METADATA_RECEIPT"

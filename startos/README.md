@@ -57,6 +57,10 @@ control panel as two separate daemons rather than one process.
 | `nostr-vpn-daemon`        | the `daemon` mesh process — the one to `attach` to |
 | `nostr-vpn-control-panel` | the `control-panel` web process                    |
 
+The binaries use upstream's locked Rust TLS roots and verifier, which exclude the
+compromised emSign G3 root and reject compromised eMudhra intermediate keys. The
+runtime OS certificate bundle has a separate build-time G3 exclusion check.
+
 Both subcontainers mount the same `main` volume, which is how the panel reads the
 daemon's state. A `prepare-data` oneshot runs as root before either daemon and
 creates the home and config directories.
@@ -72,12 +76,14 @@ but remove this flag and the tunnel cannot come up.
 One volume holds everything: the node's identity, its network membership,
 upstream's own config, and the package's state.
 
-| Path                            | Written by | Contents                                      |
-| ------------------------------- | ---------- | --------------------------------------------- |
-| `/data`                         | —          | the `main` volume's mount point               |
-| `/data/config/nvpn/config.toml` | `nvpn`     | networks, peers, roster — upstream's own file |
-| `/data/home`                    | `nvpn`     | the process `HOME`                            |
-| `/data/store.json`              | StartOS    | the package's own state                       |
+| Path                                      | Written by | Contents                                      |
+| ----------------------------------------- | ---------- | --------------------------------------------- |
+| `/data`                                   | —          | the `main` volume's mount point               |
+| `/data/config/nvpn/config.toml`           | `nvpn`     | networks, peers, roster — upstream's own file |
+| `/data/home`                              | `nvpn`     | the process `HOME`                            |
+| `/data/store.json`                        | StartOS    | the package's own state                       |
+| `/data/config/nvpn/file-transfers/`       | `nvpn`     | transfer state and received files             |
+| `/data/config/nvpn/file-transfer-outbox/` | `nvpn`     | outgoing transfer files                       |
 
 `config.toml` is passed to both binaries with `--config` and is owned entirely by
 the service. StartOS neither seeds nor rewrites it, and it is not modelled here.

@@ -7,6 +7,7 @@ mod diagnostics;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod fips_host_tunnel;
 mod fips_private_mesh;
+mod join_approval;
 #[cfg(unix)]
 mod join_request_ipc;
 #[cfg(any(target_os = "linux", test))]
@@ -199,9 +200,8 @@ pub(crate) use crate::service_management::parse_nonzero_pid;
 pub(crate) use crate::service_management::windows_should_apply_config_via_service;
 #[cfg(test)]
 pub(crate) use crate::service_management::{
-    WindowsServiceState, WindowsServiceStopAction, windows_service_bin_path,
-    windows_service_binary_path_from_sc_qc_output, windows_service_disabled_from_qc_output,
-    windows_service_state_from_query_output, windows_service_status_from_query_output,
+    WindowsServiceState, WindowsServiceStopAction, windows_command_line_argv,
+    windows_service_bin_path, windows_service_executable_from_command_line,
     windows_service_stop_action, windows_service_stop_failure_is_joinable,
 };
 #[cfg(test)]
@@ -272,6 +272,7 @@ include!("main/runtime_helpers.rs");
 include!("main/runtime_roster.rs");
 include!("main/daemon_commands.rs");
 include!("main/doctor_and_parsing.rs");
+include!("main/file_transfers.rs");
 
 #[cfg(test)]
 mod tests {

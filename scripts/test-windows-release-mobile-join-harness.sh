@@ -69,6 +69,8 @@ done
   [[ -n "$source_selection" ]] || fail 'Windows join conflates product and harness sources'
   ROOT="$fixture/harness"
   for NVPN_RELEASE_APP_REPO_PATH in '' "$fixture/product"; do
+    NVPN_EXPECTED_APP_GIT_SHA="$(git -C "${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}" rev-parse HEAD)"
+    NVPN_EXPECTED_APP_GIT_TREE="$(git -C "${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}" rev-parse 'HEAD^{tree}')"
     eval "$source_selection"
     [[ "$DESKTOP_ROOT" == "${NVPN_RELEASE_APP_REPO_PATH:-$ROOT}" ]]
     [[ "$DESKTOP_APP_GIT_SHA" == "$(git -C "$DESKTOP_ROOT" rev-parse HEAD)" ]]
@@ -195,8 +197,8 @@ for service_contract in \
   'Get-Sha256 $ServiceExecutable' \
   'Get-Sha256 $CliExe' \
   'Normalize-ComparableWindowsPath' \
-  "\$ConfigArgument.Groups['config'].Value" \
-  "^ daemon --service --config \"(?<config>[^\"]+)\" --iface \"(?<iface>[^\"]+)\" --mesh-refresh-interval-secs (?<refresh>[1-9][0-9]*)\\s*\$" \
+  'Test-OwnedServiceConfig ([string]$Service.PathName) $Config' \
+  "\$match.Groups['config'].Value" \
   '$CliExe service uninstall --config $Config' \
   'WINDOWS_RELEASE_MOBILE_JOIN_CLEAN'
 do

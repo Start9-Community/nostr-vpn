@@ -1,0 +1,76 @@
+# https://haps.hashtree.cc
+# Source-built packages use the native toolchain and platform prerequisites.
+# Published release payloads and their signing remain defined in haps-release.json.
+[package]
+name = "nostr-vpn"
+version = "4.1.22"
+target = "host"
+description = "Private mesh networking and VPN bandwidth sharing."
+
+[targets."aarch64-apple-darwin".package]
+commands = { nostr-vpn = "Nostr VPN.app/Contents/MacOS/Nostr VPN" }
+app = "Nostr VPN.app"
+
+# The documented local build produces an unsigned app without publisher keys.
+# Requires Xcode, XcodeGen, Rust, and Node.js.
+[targets."aarch64-apple-darwin".build]
+commands = [
+    ["env", "NVPN_MACOS_RUST_PROFILE=release", "NVPN_MACOS_XCODE_CONFIGURATION=Release", "scripts/macos-build", "macos-build"],
+]
+artifacts = { "Nostr VPN.app" = "macos/.build/DerivedData/Build/Products/Release/Nostr VPN.app" }
+
+[targets."x86_64-unknown-linux-gnu".package]
+commands = { nostr-vpn = "usr/bin/nostr-vpn" }
+desktop = { name = "Nostr VPN", command = "nostr-vpn", icon = "usr/share/icons/hicolor/256x256/apps/nostr-vpn.png" }
+
+# Uses the GTK4/libadwaita prerequisites and runtime dependencies in linux/.
+# Both native executables share the layout of the established Debian package.
+[targets."x86_64-unknown-linux-gnu".build]
+commands = [
+    ["cargo", "build", "--release", "--locked", "--package", "nvpn", "--bin", "nvpn", "--target", "{target}", "--target-dir", "target"],
+    ["cargo", "build", "--release", "--locked", "--manifest-path", "linux/Cargo.toml", "--bin", "nostr-vpn", "--target", "{target}", "--target-dir", "target"],
+]
+
+[targets."x86_64-unknown-linux-gnu".build.artifacts]
+"usr/bin/nostr-vpn" = "target/{target}/release/nostr-vpn"
+"usr/bin/nvpn" = "target/{target}/release/nvpn"
+"usr/share/applications/nostr-vpn.desktop" = "linux/resources/nostr-vpn.desktop"
+"usr/share/icons/hicolor/16x16/apps/nostr-vpn.png" = "linux/resources/nostr-vpn-16.png"
+"usr/share/icons/hicolor/22x22/apps/nostr-vpn.png" = "linux/resources/nostr-vpn-22.png"
+"usr/share/icons/hicolor/24x24/apps/nostr-vpn.png" = "linux/resources/nostr-vpn-24.png"
+"usr/share/icons/hicolor/32x32/apps/nostr-vpn.png" = "linux/resources/nostr-vpn-32.png"
+"usr/share/icons/hicolor/48x48/apps/nostr-vpn.png" = "linux/resources/nostr-vpn-48.png"
+"usr/share/icons/hicolor/64x64/apps/nostr-vpn.png" = "linux/resources/nostr-vpn-64.png"
+"usr/share/icons/hicolor/128x128/apps/nostr-vpn.png" = "linux/resources/nostr-vpn-128.png"
+"usr/share/icons/hicolor/256x256/apps/nostr-vpn.png" = "linux/resources/nostr-vpn-256.png"
+"usr/share/icons/hicolor/512x512/apps/nostr-vpn.png" = "linux/resources/nostr-vpn-512.png"
+
+[targets."x86_64-apple-darwin".build]
+unavailable = "The established Haps desktop release is for Apple Silicon; no Intel macOS desktop package is configured."
+
+[targets."aarch64-unknown-linux-gnu".build]
+unavailable = "The established Haps Linux desktop package is x86-64; use the nvpn CLI package on ARM64."
+
+[targets."x86_64-pc-windows-msvc".build]
+unavailable = "The Windows desktop app uses the documented Windows installer workflow; Haps currently publishes only the nvpn CLI on Windows."
+
+[packages.nvpn.package]
+name = "nvpn"
+version = "4.1.22"
+target = "host"
+description = "Nostr VPN command-line client"
+commands = { nvpn = "nvpn{exe}" }
+
+# Local Linux source builds use native GNU libc; published Linux CLI archives
+# use the separate musl release workflow. Their binaries need not be identical.
+[packages.nvpn.build]
+commands = [
+    ["cargo", "build", "--release", "--locked", "--package", "nvpn", "--bin", "nvpn", "--target", "{target}", "--target-dir", "target"],
+]
+artifacts = { "nvpn{exe}" = "target/{target}/release/nvpn{exe}" }
+
+# The Windows helper's existing Cargo build script copies the bundled driver
+# beside nvpn.exe; preserve the published CLI archive's driver layout.
+[packages.nvpn.targets."x86_64-pc-windows-msvc".build.artifacts]
+"nvpn.exe" = "target/{target}/release/nvpn.exe"
+"binaries/wintun.dll" = "target/{target}/release/wintun.dll"

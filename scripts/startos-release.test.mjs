@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -179,4 +179,25 @@ test('validateStartosManifest requires tunnel access, the v0.4 runtime, release 
       revision: 1,
     }),
   )
+})
+
+test('StartOS Makefile delegates to the SDK with both supported architectures', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'nvpn-startos-sdk-'))
+  try {
+    const sdk = join(directory, 'node_modules', '@start9labs', 'start-sdk')
+    mkdirSync(sdk, { recursive: true })
+    copyFileSync(new URL('../Makefile', import.meta.url), join(directory, 'Makefile'))
+    writeFileSync(join(sdk, 's9pk.mk'), `.PHONY: sdk-integration
+sdk-integration:
+\t@printf '%s\\n' '$(ARCHES)'
+`)
+    const result = spawnSync('make', ['--no-print-directory', 'sdk-integration'], {
+      cwd: directory, encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.trim(), 'x86 arm')
+    assert.equal(existsSync(new URL('../s9pk.mk', import.meta.url)), false)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })

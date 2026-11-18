@@ -1,35 +1,15 @@
-import { createHash } from 'node:crypto'
 import {
-  closeSync,
   constants,
   copyFileSync,
   lstatSync,
-  openSync,
-  readSync,
   rmSync,
   statSync,
 } from 'node:fs'
 import { basename, join, posix as pathPosix } from 'node:path'
 
-import { validateReleaseGateAttestation } from './release-artifact-provenance-lib.mjs'
+import { sha256FileSync, validateReleaseGateAttestation } from './release-artifact-provenance-lib.mjs'
 
-export function sha256FileSync(path) {
-  const hash = createHash('sha256')
-  const descriptor = openSync(path, 'r')
-  const chunk = Buffer.allocUnsafe(1024 * 1024)
-  try {
-    for (;;) {
-      const bytesRead = readSync(descriptor, chunk, 0, chunk.length, null)
-      if (bytesRead === 0) {
-        break
-      }
-      hash.update(chunk.subarray(0, bytesRead))
-    }
-  } finally {
-    closeSync(descriptor)
-  }
-  return hash.digest('hex')
-}
+export { sha256FileSync }
 
 export function replaceWithExactFileCopy(source, destination) {
   const sourceMetadata = lstatSync(source)
@@ -754,7 +734,8 @@ export function extractChangelogSection(changelogText, tag) {
   return null
 }
 
-function extractProductReleaseNotes(changelogSection, tag) {
+export function productReleaseNotes(changelogText, tag) {
+  const changelogSection = extractChangelogSection(changelogText, tag)
   if (!changelogSection) {
     return null
   }
@@ -1228,8 +1209,7 @@ export function renderReleaseNotes({
   assetBaseUrl = '',
 }) {
   const lines = []
-  const changelogSection = extractChangelogSection(changelogText, tag)
-  const productNotes = extractProductReleaseNotes(changelogSection, tag)
+  const productNotes = productReleaseNotes(changelogText, tag)
 
   if (productNotes) {
     lines.push(

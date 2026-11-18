@@ -405,7 +405,7 @@ fn install_cli_and_uninstall_cli_roundtrip_for_custom_path() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("nvpn-install-test-{nonce}"));
     fs::create_dir_all(&dir).expect("create temp dir");
-    let target = dir.join("nvpn");
+    let target = dir.join("custom path ' $HOME").join("nvpn");
 
     install_cli(InstallCliArgs {
         path: Some(target.clone()),
@@ -413,18 +413,29 @@ fn install_cli_and_uninstall_cli_roundtrip_for_custom_path() {
     })
     .expect("install custom cli target");
     assert!(target.exists(), "installed target should exist");
+    let installed_len = fs::metadata(&target).unwrap().len();
+    fs::write(&target, b"old executable").expect("create replacement fixture");
 
     let duplicate = install_cli(InstallCliArgs {
         path: Some(target.clone()),
         force: false,
-    });
-    assert!(duplicate.is_err(), "install without --force should fail");
+    })
+    .expect_err("install without --force should fail");
+    assert_eq!(
+        duplicate.to_string(),
+        format!(
+            "{} already exists (pass --force to overwrite)",
+            target.display()
+        )
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"old executable");
 
     install_cli(InstallCliArgs {
         path: Some(target.clone()),
         force: true,
     })
     .expect("force reinstall custom cli target");
+    assert_eq!(fs::metadata(&target).unwrap().len(), installed_len);
 
     uninstall_cli(UninstallCliArgs {
         path: Some(target.clone()),
@@ -433,4 +444,63 @@ fn install_cli_and_uninstall_cli_roundtrip_for_custom_path() {
     assert!(!target.exists(), "uninstall should remove target");
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn install_cli_permission_denied_preserves_cause_and_offers_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("permission-denied fixture requires an unprivileged user");
+        return;
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock is after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("nvpn-install-denied-{nonce}"));
+    fs::create_dir(&dir).expect("create temp dir");
+    let existing = dir.join("existing ' $HOME");
+    fs::write(&existing, b"keep existing executable").expect("create existing target");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).expect("deny writes");
+
+    // Exercise copy, parent creation, and --force removal through the installer.
+    let results = [
+        (dir.join("nvpn"), false, "failed to copy"),
+        (
+            dir.join("missing").join("nvpn"),
+            false,
+            "failed to create directory",
+        ),
+        (existing.clone(), true, "failed to remove"),
+    ]
+    .map(|(target, force, context)| {
+        let result = install_cli(InstallCliArgs {
+            path: Some(target.clone()),
+            force,
+        });
+        (target, force, context, result)
+    });
+
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("restore writes");
+    let preserved = fs::read(&existing).expect("read existing target");
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+    assert_eq!(preserved, b"keep existing executable");
+
+    for (target, force, context, result) in results {
+        let error = result.expect_err("install into read-only directory must fail");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let message = error.to_string();
+        assert!(message.contains(&target.display().to_string()), "{message}");
+        assert!(message.contains("Retry the same command with administrator privileges"));
+        let force_flag = if force { " --force" } else { "" };
+        assert!(message.contains(&format!(
+            "nvpn install-cli{force_flag} --path \"$HOME/.local/bin/nvpn\""
+        )));
+        assert!(format!("{error:#}").contains(context), "{error:#}");
+    }
 }

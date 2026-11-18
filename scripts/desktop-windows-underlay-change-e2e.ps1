@@ -26,6 +26,7 @@ param(
   [string]$ProbeUrl = "https://example.com/",
   [string]$ExpectedFipsVersion,
   [string]$ExpectedFipsRevision,
+  [string]$VerifiedFipsRuntimeVersion,
   [string]$TunnelInterface = "nvpn-underlay-gate",
   [int]$ListenPort = 45821,
   [int]$RecoveryDeadlineMilliseconds = 4000,
@@ -399,7 +400,9 @@ function Write-Marker {
 function Test-ExpectedFipsCoreVersion {
   param([object]$Value)
   return (
-    [string]$Value -eq "$ExpectedFipsVersion (rev $ExpectedFipsRevision)"
+    $VerifiedFipsRuntimeVersion -cin @(
+      $ExpectedFipsVersion, "$ExpectedFipsVersion (rev $ExpectedFipsRevision)"
+    ) -and [string]$Value -ceq $VerifiedFipsRuntimeVersion
   )
 }
 
@@ -979,7 +982,8 @@ switch ($Action) {
       $WireGuardServerIp,
       $WireGuardInterface,
       $ExpectedFipsVersion,
-      $ExpectedFipsRevision
+      $ExpectedFipsRevision,
+      $VerifiedFipsRuntimeVersion
     )) {
       if ([string]::IsNullOrWhiteSpace($value)) {
         throw "Run is missing a required peer/underlay argument"

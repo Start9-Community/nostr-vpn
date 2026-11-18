@@ -79,20 +79,7 @@ struct InternetPage: View {
                             }
                         }
                     }
-                }
 
-                AppCard {
-                    Text("Share Internet")
-                        .font(.headline)
-                    Toggle("Share internet with this network", isOn: Binding(
-                        get: { model.state.advertiseExitNode },
-                        set: { value in
-                            model.dispatch(
-                                NativeActions.updateSettings(["advertiseExitNode": value]),
-                                status: "Saving internet"
-                            )
-                        }
-                    ))
                     Toggle("Block internet if selected source disconnects", isOn: Binding(
                         get: { model.state.exitNodeLeakProtection },
                         set: { value in

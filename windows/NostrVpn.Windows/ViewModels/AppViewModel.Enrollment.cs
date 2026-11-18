@@ -144,23 +144,32 @@ public sealed partial class AppViewModel
             return;
         }
         var participant = ParticipantInput.Trim();
+        var alias = ParticipantAliasInput.Trim();
         var added = await DispatchAsync(
-            NativeActions.AddParticipant(network.Id, participant, string.IsNullOrWhiteSpace(ParticipantAliasInput) ? null : ParticipantAliasInput.Trim()),
+            NativeActions.AddParticipant(network.Id, participant, alias.Length == 0 ? null : alias),
             "Adding device");
+        CompleteParticipantSubmission(added, network.Id, participant, alias);
+    }
+
+    private void CompleteParticipantSubmission(bool added, string networkId, string participant, string alias)
+    {
         if (!added)
         {
             return;
         }
         BeginJoinCoordinationRefresh();
-        if (ActiveNetwork?.Participants.Any(item =>
-                item.RosterAccepted
-                && string.Equals(item.Npub, participant, StringComparison.Ordinal)) == true)
+        var network = ActiveNetwork;
+        if (Page != AppPage.AddDevice || network is null || network.Id != networkId
+            || ParticipantInput.Trim() != participant || ParticipantAliasInput.Trim() != alias)
         {
-            ParticipantInput = "";
-            ParticipantAliasInput = "";
-            Page = AppPage.Devices;
-            Notice = "Device added";
+            return;
         }
+        ParticipantInput = "";
+        ParticipantAliasInput = "";
+        Page = AppPage.Devices;
+        Notice = network.Participants.Any(item =>
+            item.RosterAccepted && string.Equals(item.Npub, participant, StringComparison.Ordinal))
+            ? "Device added" : "";
     }
 
     private async Task AddNetworkAsync()

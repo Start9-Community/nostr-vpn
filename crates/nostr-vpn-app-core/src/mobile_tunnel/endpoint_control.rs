@@ -28,6 +28,7 @@ struct MobilePeerPresence {
     last_control_seen_at: Option<u64>,
     last_data_seen_at: Option<u64>,
     last_ping_sent_at: Option<u64>,
+    last_path_refresh_attempt_at: Option<u64>,
     last_ping_started_at: Option<Instant>,
     rtt_ms: Option<u64>,
     tx_bytes: u64,

@@ -51,17 +51,10 @@ async fn sync_provider_profiles(
             .kinds([Kind::ContactList, Kind::MuteList])
             .limit(graph_authors.len() * 2),
     ];
-    let sender = relay.notification_tx.clone();
-    match NostrEventSubscriber::subscribe(
-        relay.bus.as_ref(),
-        filters,
-        Arc::new(move |event| {
-            if sender.try_send(event).is_err() {
-                tracing::warn!("provider profile ingress queue is full");
-            }
-        }),
-    )
-    .await
+    match relay
+        .bus
+        .subscribe_with_admission(filters, Arc::clone(&relay.ingress))
+        .await
     {
         Ok(subscription) => {
             relay.profile_subscription = Some(subscription);

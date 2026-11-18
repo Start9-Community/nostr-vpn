@@ -127,7 +127,11 @@ a paid-route session-open frame over authenticated FIPS-TCP. The seller validate
 the authenticated buyer and terms before returning an admission. Default-route
 traffic is not enabled for that seller until the admission is current. The
 admission is scoped to the paid session and does not expose the seller's private
-network.
+network. Before host forwarding, seller packet admission rejects private,
+loopback, link-local, multicast, and private-mesh destinations, including
+configured local or mesh subnets that use public addresses. Default-route
+admission never overrides these exclusions. Private roster access remains
+separate from paid Internet access.
 
 Usage is byte-metered at the FIPS/nvpn boundary. Buyer-to-exit IP packets are
 billable immediately. Exit-to-buyer UDP is billable only for a recent
@@ -153,6 +157,11 @@ for other exits. `encrypted` selects Cloudflare, Quad9, or a custom HTTPS
 resolver with literal bootstrap IPs. `through_exit` sends DNS wire messages to
 explicit IP resolvers over the selected exit. Resolver or path failure is
 fail-closed; secure DNS does not fall back to system or plaintext DNS.
+
+For custom DoH, bootstrap IPs must be addresses of the HTTPS DNS server named
+in the URL. They are connection destinations, not recursive DNS servers used
+to look up that hostname. Use the endpoint addresses supplied by that provider;
+the URL hostname is still used for TLS certificate validation.
 
 DoH hides DNS contents from the exit, but the resolver sees the query and the
 exit still sees destination IPs, timing, volume, and sometimes TLS hostnames.

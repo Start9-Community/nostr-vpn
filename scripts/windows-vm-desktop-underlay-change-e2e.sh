@@ -206,6 +206,13 @@ JS
     "$ARTIFACT_DIR/windows-probe-logging-harness.log" \
     || fail "Windows concurrent probe logging regression failed"
 
+  run_ps_primary \
+    "& $(ps_quote "$GUEST_REPO\\scripts\\test-desktop-windows-runtime-version.ps1")" \
+    >"$ARTIFACT_DIR/windows-runtime-provenance-harness.log"
+  grep -Fq 'WINDOWS_RUNTIME_PROVENANCE_PREDICATE_OK cases=8' \
+    "$ARTIFACT_DIR/windows-runtime-provenance-harness.log" \
+    || fail "Windows runtime provenance predicate regression failed"
+
   run_ps_primary "\$ErrorActionPreference = 'Stop'
 \$Bin = $(ps_quote "$GUEST_BINARY")
 \$ReceiptPath = $(ps_quote "$GUEST_INSTALLER_RECEIPT")
@@ -256,8 +263,6 @@ capture_version_receipts() {
   ssh "${DESKTOP_UNDERLAY_SSH_OPTIONS[@]}" "$HYPERVISOR_SSH" \
     "'$HYPERVISOR_BINARY' version --verbose" \
     >"$ARTIFACT_DIR/peer-version.txt"
-  grep -Fxq "$expected" "$ARTIFACT_DIR/target-version.txt" \
-    || fail "Windows target binary does not report exact FIPS version/revision $EXPECTED_FIPS_VERSION/$EXPECTED_FIPS_REV"
   grep -Fxq "$expected" "$ARTIFACT_DIR/peer-version.txt" \
     || fail "Windows peer binary does not report exact FIPS version/revision $EXPECTED_FIPS_VERSION/$EXPECTED_FIPS_REV"
   target_sha="$(
@@ -275,6 +280,12 @@ capture_version_receipts() {
   [[ "$target_sha" =~ ^[0-9a-f]{64}$ \
     && "$target_size" =~ ^[1-9][0-9]*$ ]] \
     || fail "Windows target binary has no exact byte receipt"
+  node "$ROOT/scripts/release-source-verification.mjs" windows-runtime-provenance \
+    "$HOST_SOURCE_FIPS_RECEIPT" "$HOST_INSTALLER_RECEIPT" \
+    "$ARTIFACT_APP_SHA" "$ARTIFACT_APP_TREE" "$LOCAL_FIPS_REPO" \
+    "$EXPECTED_FIPS_SHA" "$EXPECTED_FIPS_TREE" "$EXPECTED_FIPS_VERSION" \
+    "$ARTIFACT_DIR/target-version.txt" "$target_sha" "$target_size" \
+    >"$ARTIFACT_DIR/runtime-provenance-validation.json"
   python3 - \
     "$ARTIFACT_DIR/tested-artifact.json" \
     "$target_sha" \
@@ -485,6 +496,7 @@ start_windows_runner() {
 -ProbeUrl $(ps_quote "$PROBE_URL") \
 -ExpectedFipsVersion $(ps_quote "$EXPECTED_FIPS_VERSION") \
 -ExpectedFipsRevision $(ps_quote "$EXPECTED_FIPS_REV") \
+-VerifiedFipsRuntimeVersion $(ps_quote "$(jq -er '.runtimeFipsVersion | sub("^fips_core_version: "; "")' "$ARTIFACT_DIR/runtime-provenance-validation.json")") \
 -ListenPort $TARGET_LISTEN_PORT \
 -RecoveryDeadlineMilliseconds $RECOVERY_DEADLINE_MS"
   (

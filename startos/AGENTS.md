@@ -34,9 +34,11 @@ verified, tried, and decided belongs in the commit message and the PR body.
   `startos/` package too.** `master` tracks upstream, so updating means syncing
   from it — see `UPDATING.md`. Don't treat this as a normal single-package repo.
 
-- **Keep Start9 changes confined to `startos/`**, plus the packaging workflows and
-  the root `instructions.md`. Prefer sending an improvement upstream over growing
-  the fork delta.
+- **Keep Start9 changes in the packaging integration**, not upstream's Rust crates:
+  `startos/`, root packaging scaffolding/instructions and Start9 workflows.
+  Carried integration and compatibility exceptions are listed in `UPDATING.md`.
+  Preserve the final-runtime CA guard across upstream image-stage changes. Prefer
+  upstream releases and contributions over additional fork delta.
 
 - **The Start9 packaging workflows sit alongside upstream's, not in place of
   them.** `build.yml`, `pr-retarget.yml`, `tagAndRelease.yml` and `syncNext.yml`

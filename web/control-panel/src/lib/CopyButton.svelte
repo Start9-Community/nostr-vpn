@@ -12,7 +12,15 @@
   const dispatch = createEventDispatcher<{ copied: { label: string; value: string } }>();
 
   let copied = false;
+  let failed = false;
+  let copying = false;
+  let attempted = { label: '', value: '' };
   let copiedTimer: number | undefined;
+
+  $: if (attempted.value !== value || attempted.label !== label) {
+    copied = false;
+    failed = false;
+  }
 
   onDestroy(() => {
     if (copiedTimer) {
@@ -23,30 +31,47 @@
   async function writeClipboard(text: string) {
     try {
       await navigator.clipboard.writeText(text);
+      return true;
     } catch {
+      const focused = document.activeElement;
       const area = document.createElement('textarea');
       area.value = text;
       area.style.position = 'fixed';
       area.style.opacity = '0';
-      document.body.append(area);
-      area.select();
-      document.execCommand('copy');
-      area.remove();
+      try {
+        document.body.append(area);
+        area.select();
+        return document.execCommand('copy');
+      } catch {
+        return false;
+      } finally {
+        area.remove();
+        if (focused instanceof HTMLElement) focused.focus();
+      }
     }
   }
 
   async function copy() {
-    if (disabled || !value) {
+    if (disabled || !value || copying) {
       return;
     }
 
-    await writeClipboard(value);
-    copied = true;
-    dispatch('copied', { label, value });
-
+    const current = { label, value };
+    attempted = current;
+    copying = true;
+    copied = false;
+    failed = false;
     if (copiedTimer) {
       window.clearTimeout(copiedTimer);
     }
+    const success = await writeClipboard(current.value);
+    copying = false;
+    if (current.value !== value || current.label !== label) return;
+    copied = success;
+    failed = !success;
+    if (!success) return;
+    dispatch('copied', current);
+
     copiedTimer = window.setTimeout(() => {
       copied = false;
       copiedTimer = undefined;
@@ -57,11 +82,13 @@
 <button
   type="button"
   class="copy-button {variant}"
-  class:with-text={Boolean(text)}
+  class:with-text={Boolean(text) || failed}
   class:copied
   disabled={disabled || !value}
-  aria-label={copied ? `${label} copied` : `Copy ${label}`}
-  title={copied ? 'Copied' : `Copy ${label}`}
+  aria-disabled={disabled || !value || copying}
+  aria-busy={copying}
+  aria-label={failed ? `Copy ${label} failed. Try again` : copied ? `${label} copied` : `Copy ${label}`}
+  title={failed ? 'Copy failed. Try again' : copied ? 'Copied' : `Copy ${label}`}
   on:click={copy}
 >
   {#if copied}
@@ -74,7 +101,9 @@
       <path d="M3.5 5H10v8.5H3.5z" />
     </svg>
   {/if}
-  {#if text}
+  {#if failed}
+    <span role="status">Copy failed. Retry</span>
+  {:else if text}
     <span>{text}</span>
   {/if}
 </button>

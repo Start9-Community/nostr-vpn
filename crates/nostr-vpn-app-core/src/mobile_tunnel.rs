@@ -29,7 +29,7 @@ use nostr_vpn_core::config::{
     split_peer_transport_addr,
 };
 use nostr_vpn_core::control_pubsub_runtime::{
-    ControlPubsubClient, ControlPubsubFipsRuntime, ControlRelayStatus,
+    ControlPubsubClient, ControlPubsubEndpointConfig, ControlPubsubFipsRuntime, ControlRelayStatus,
 };
 use nostr_vpn_core::fips_control::{
     FipsControlFrame, JoinRosterControl, NetworkRoster, PeerCapabilities, PeerEndpointHint,
@@ -94,6 +94,7 @@ mod tests {
     include!("mobile_tunnel/tests_runtime_manual_join.rs");
     include!("mobile_tunnel/tests_runtime_desktop_mobile_join.rs");
     include!("mobile_tunnel/tests_runtime_future_presence.rs");
+    include!("mobile_tunnel/tests_runtime_path_refresh.rs");
     include!("mobile_tunnel/tests_paid_route.rs");
     include!("mobile_tunnel/tests_config.rs");
 }

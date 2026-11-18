@@ -552,6 +552,7 @@ release_join_prepare_ios_profiles() {
   : "${NVPN_IOS_CODE_SIGN_IDENTITY:?Ad Hoc signing identity missing}"
   : "${NVPN_IOS_PROVISIONING_PROFILE_UUID:?Ad Hoc app profile missing}"
   : "${NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID:?Ad Hoc tunnel profile missing}"
+  : "${NVPN_IOS_SHARE_FILES_PROVISIONING_PROFILE_UUID:?Ad Hoc file sharing profile missing}"
   [[ "$NVPN_IOS_CODE_SIGN_IDENTITY" == "$signing_identity" ]] || {
     echo "Release join profile selection changed the pinned company signer" >&2
     return 1
@@ -619,9 +620,8 @@ release_join_install_ios_release() {
     }
   fi
   if ! IOS_RELEASE_NETWORK_DEVICE="$udid" \
-      ios_release_network_installed_identity "$bundle" "$installed_json" >/dev/null \
-    || ! IOS_RELEASE_NETWORK_DEVICE="$udid" \
-      ios_release_network_installed_identity "$bundle.UITests.xctrunner" "$runner_inventory" >/dev/null
+      ios_release_network_installed_identity "$bundle" "$installed_json" \
+        "$bundle.UITests.xctrunner" "$runner_inventory" >/dev/null
   then
     echo "Installed iOS app/runner USB inventory failed" >&2
     return 1
@@ -893,6 +893,7 @@ release_join_prepare_ios_release() {
     NVPN_IOS_CODE_SIGN_IDENTITY="$NVPN_IOS_CODE_SIGN_IDENTITY" \
     NVPN_IOS_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PROVISIONING_PROFILE_UUID" \
     NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID="$NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID" \
+    NVPN_IOS_SHARE_FILES_PROVISIONING_PROFILE_UUID="$NVPN_IOS_SHARE_FILES_PROVISIONING_PROFILE_UUID" \
     NVPN_BUILD_GIT_SHA="$app_sha" \
     'OTHER_SWIFT_FLAGS=$(inherited) -DNVPN_RELEASE_JOIN_TESTING' \
     "$build_action"
