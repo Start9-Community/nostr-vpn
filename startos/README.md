@@ -76,14 +76,14 @@ but remove this flag and the tunnel cannot come up.
 One volume holds everything: the node's identity, its network membership,
 upstream's own config, and the package's state.
 
-| Path                            | Written by | Contents                                      |
-| ------------------------------- | ---------- | --------------------------------------------- |
-| `/data`                         | —          | the `main` volume's mount point               |
-| `/data/config/nvpn/config.toml` | `nvpn`     | networks, peers, roster — upstream's own file |
-| `/data/home`                    | `nvpn`     | the process `HOME`                            |
-| `/data/store.json`              | StartOS    | the package's own state                       |
-| `/data/config/nvpn/file-transfers/` | `nvpn` | transfer state and received files |
-| `/data/config/nvpn/file-transfer-outbox/` | `nvpn` | outgoing transfer files |
+| Path                                      | Written by | Contents                                      |
+| ----------------------------------------- | ---------- | --------------------------------------------- |
+| `/data`                                   | —          | the `main` volume's mount point               |
+| `/data/config/nvpn/config.toml`           | `nvpn`     | networks, peers, roster — upstream's own file |
+| `/data/home`                              | `nvpn`     | the process `HOME`                            |
+| `/data/store.json`                        | StartOS    | the package's own state                       |
+| `/data/config/nvpn/file-transfers/`       | `nvpn`     | transfer state and received files             |
+| `/data/config/nvpn/file-transfer-outbox/` | `nvpn`     | outgoing transfer files                       |
 
 `config.toml` is passed to both binaries with `--config` and is owned entirely by
 the service. StartOS neither seeds nor rewrites it, and it is not modelled here.
