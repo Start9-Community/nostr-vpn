@@ -65,6 +65,9 @@ the existing exceptions below.
 - `scripts/release-publication-bundle.test.mjs` derives the fixture version from
   the StartOS source, including its package revision, rather than assuming the
   workspace marketing version. Retire it when upstream reads that same owner.
+- `.github/workflows/ci.yml` checks `web/control-panel` with its declared pnpm
+  toolchain; root `package.json` belongs to SDK packaging. Retire the adaptation
+  when upstream CI targets that web workspace independently of the root manifest.
 - `scripts/startos-release.test.mjs` checks SDK delegation and package architectures
   instead of upstream's removed local helper recipe. Retire it when upstream's
   tests support this packaging integration.
