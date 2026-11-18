@@ -191,6 +191,12 @@ struct RootView: View {
                 manager.paidExitChooserRequested = false
             }
         }
+        .onChange(of: manager.fileTransfersRequested, initial: true) { _, requested in
+            if requested {
+                selectedSidebarItem = .devices
+                manager.fileTransfersRequested = false
+            }
+        }
         .onChange(of: manager.sellingSettingsRequested, initial: true) { _, requested in
             if requested {
                 selectedSidebarItem = .sharing
@@ -409,6 +415,7 @@ struct RootView: View {
             }
             .controlSize(.small)
             .disabled(!manager.updateInstallEnabled)
+            .help(manager.updateStatus)
         }
         .padding(.leading, 104)
         .padding(.trailing, 18)
@@ -420,6 +427,9 @@ struct RootView: View {
     }
 
     var updateStripeText: String {
+        if !manager.updateStatus.isEmpty {
+            return manager.updateStatus
+        }
         let current = state.appVersion.trimmingCharacters(in: .whitespacesAndNewlines)
         if current.isEmpty {
             return "Update available: \(manager.updateVersion)"

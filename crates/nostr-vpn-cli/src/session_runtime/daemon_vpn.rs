@@ -86,6 +86,8 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
     #[cfg(feature = "paid-exit")]
     let mut manual_paid_exit = PaidExitManualBuyer::default();
     #[cfg(feature = "paid-exit")]
+    let mut seller_admission_refresh_pending = false;
+    #[cfg(feature = "paid-exit")]
     let mut last_paid_exit_session_open_at =
         Instant::now() - Duration::from_secs(PAID_EXIT_SESSION_OPEN_RETRY_SECS);
     #[cfg(feature = "paid-exit")]
@@ -306,6 +308,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                                     underlay_interface_mtu: network_snapshot.default_interface_mtu,
                                     own_pubkey: own_pubkey.as_deref(),
                                     vpn_status: &mut vpn_status,
+                                    seller_admission_refresh_pending: &mut seller_admission_refresh_pending,
                                     spilman_receiver: paid_exit_spilman_receiver.as_ref(),
                                     spilman_receiver_error: paid_exit_spilman_receiver_error
                                         .as_deref(),
@@ -816,6 +819,10 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
                         "failed to persist daemon state after applying control request"
                     ));
                 }
+                match &control_result {
+                    Ok(()) => eprintln!("daemon: {} completed at {}", request.as_str(), unix_timestamp()),
+                    Err(error) => eprintln!("daemon: {} failed at {}: {error:#}", request.as_str(), unix_timestamp()),
+                }
                 let _ = write_daemon_control_result(&config_path, request, control_result);
             }
             if !state_background_ready {
@@ -862,6 +869,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
             }
     }};
 }
+    let mut fatal_runtime_failure = None;
     include!("daemon_vpn/run_loop.rs");
     #[cfg(feature = "paid-exit")]
     daemon_cashu_wallet_worker.stop();
@@ -876,6 +884,7 @@ pub(crate) async fn daemon_vpn(args: DaemonArgs) -> Result<()> {
         network_snapshot: &network_snapshot,
         network_changed_at,
         captive_portal,
+        failure: fatal_runtime_failure,
     })
     .await
 }

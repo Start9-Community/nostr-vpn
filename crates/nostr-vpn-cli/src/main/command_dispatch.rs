@@ -55,6 +55,7 @@ fn run_command_with_runtime(command: Command) -> Result<()> {
 
 async fn run_command(command: Command) -> Result<()> {
     match command {
+        Command::File(args) => run_file_command(args)?,
         #[cfg(target_os = "linux")]
         Command::EgressGuard { config } => crate::linux_exit_intent::restore_at_boot(&config)?,
         Command::Init {
@@ -103,6 +104,9 @@ async fn run_command(command: Command) -> Result<()> {
         }
         Command::JoinRequest(args) => {
             pairing_qr::run_join_request(args).await?;
+        }
+        Command::JoinRequests(args) => {
+            join_approval::run(args)?;
         }
         Command::JoinManual(args) => {
             let config_path = args.config.unwrap_or_else(default_config_path);
@@ -187,13 +191,13 @@ async fn run_command(command: Command) -> Result<()> {
                         peers,
                         state.expected_peer_count,
                         state.connected_peer_count,
-                        state.mesh_ready,
+                        Some(state.mesh_ready),
                         "daemon",
                     )
                 } else {
                     let peers = configured_fips_peer_announcements(&app, &network_id);
                     let expected = expected_peer_count(&app);
-                    (peers, expected, 0, false, "config")
+                    (peers, expected, 0, None, "config")
                 };
 
             if args.json {
@@ -277,6 +281,7 @@ async fn run_command(command: Command) -> Result<()> {
                 println!("device_id={}", app.nostr.public_key);
                 println!("magic_dns_suffix: {}", app.magic_dns_suffix);
                 println!("autoconnect: {}", app.autoconnect);
+                println!("internet_source: {}", app.internet_source.as_str());
                 println!("node: {}", app.node.id);
                 println!("tunnel_ip: {}", runtime_local_tunnel_ip(&app, &network_id));
                 println!("endpoint: {endpoint}");
@@ -290,7 +295,11 @@ async fn run_command(command: Command) -> Result<()> {
                 if app.exit_node.is_empty() {
                     println!("exit_node: none");
                 } else {
-                    println!("exit_node: {}", app.exit_node);
+                    let exit_node = PublicKey::parse(&app.exit_node)
+                        .ok()
+                        .and_then(|key| key.to_bech32().ok())
+                        .unwrap_or_else(|| app.exit_node.clone());
+                    println!("exit_node: {exit_node}");
                 }
                 println!(
                     "exit_node_leak_protection: {}",
@@ -371,9 +380,16 @@ async fn run_command(command: Command) -> Result<()> {
                     println!("daemon: stopped");
                 }
                 println!("status_source: {status_source}");
-                if expected_peers > 0 {
-                    println!("mesh_progress: {}/{}", peer_count, expected_peers);
-                    println!("mesh_ready: {mesh_ready}");
+                if let Some(mesh_ready) = mesh_ready {
+                    if expected_peers > 0 {
+                        println!("mesh_progress: {}/{}", peer_count, expected_peers);
+                        println!("mesh_ready: {mesh_ready}");
+                    }
+                } else {
+                    println!("mesh_ready: unknown");
+                    println!(
+                        "No live daemon state; foreground `nvpn connect` sessions are not reported here."
+                    );
                 }
                 if let Some(daemon_peers) = daemon_peers.as_ref() {
                     let reachable_count = daemon_peers.iter().filter(|p| p.reachable).count();
@@ -419,6 +435,7 @@ async fn run_command(command: Command) -> Result<()> {
                     if path.exists() {
                         update_paid_route_store(&path, |store| {
                             store.automatic_reselect_from.clear();
+                            store.automatic_reselect_session_id.clear();
                             Ok(())
                         })?;
                     }
@@ -491,6 +508,9 @@ async fn run_command(command: Command) -> Result<()> {
                 if let Some(value) = args.paid_exit_grace_units.as_deref() {
                     app.paid_exit.channel.grace_units =
                         paid_exit_parse_traffic_units_arg(value, "--paid-exit-grace-units")?;
+                }
+                if app.paid_exit.enabled && app.paid_exit != previous_app.paid_exit {
+                    app.paid_exit.channel.validate_seller_free_probe_budget()?;
                 }
             }
             if let Some(value) = args.wireguard_exit_enabled {

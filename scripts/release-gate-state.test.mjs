@@ -251,3 +251,23 @@ test('an initialization crash before the run record can be recovered', t => {
   const dir = initialize(root, process.pid)
   finish(dir, 0)
 })
+
+
+test('release gate Python imports leave the exact source checkout clean', t => {
+  const { root, git } = fixture(t)
+  git('config', 'core.excludesFile', '/dev/null')
+  mkdirSync(join(root, 'scripts'))
+  writeFileSync(join(root, 'scripts', 'appstore_draft_metadata.py'), readFileSync(resolve('scripts/appstore_draft_metadata.py')))
+  git('add', 'scripts/appstore_draft_metadata.py')
+  git('commit', '-qm', 'Python release metadata fixture')
+  const bootstrap = readFileSync(resolve('scripts/release-gate.sh'), 'utf8').split('\nROOT_DIR=')[0]
+  const environment = { ...process.env, PYTHONPATH: join(root, 'scripts') }
+  delete environment.PYTHONDONTWRITEBYTECODE
+  delete environment.PYTHONPYCACHEPREFIX
+  // Match Linux when Apple Python defaults to a cache outside the checkout.
+  const script = [bootstrap, "python3 -c 'import sys; sys.pycache_prefix = None; import appstore_draft_metadata'", "printf 'metadata-imported'"].join('\n')
+  const result = spawnSync('/bin/bash', ['-c', script], { cwd: root, env: environment, encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, 'metadata-imported')
+  assert.equal(git('status', '--porcelain', '--untracked-files=all').toString(), '')
+})

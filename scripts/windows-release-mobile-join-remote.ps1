@@ -33,7 +33,10 @@ param(
   [string]$AdminNpub = "",
   [string]$NetworkId = "",
   [string]$ParticipantNpub = "",
-  [string]$ParticipantAlias = "Release Pixel"
+  [string]$ParticipantAlias = "Release Pixel",
+  [Parameter(Mandatory = $true)][string]$VerifiedCliSha256,
+  [Parameter(Mandatory = $true)][long]$VerifiedCliSize,
+  [Parameter(Mandatory = $true)][string]$VerifiedFipsRuntimeVersion
 )
 
 $ErrorActionPreference = "Stop"
@@ -129,6 +132,17 @@ function Normalize-ComparableWindowsPath {
   return [IO.Path]::GetFullPath($Value).TrimEnd('\')
 }
 
+function Test-OwnedServiceConfig {
+  param([string]$CommandLine, [string]$ExpectedConfig)
+  $match = [regex]::Match($CommandLine, '^"[^"]+" daemon --service --config "(?<config>[^"]+)" --iface "[^"]+" --mesh-refresh-interval-secs [1-9][0-9]*\s*$')
+  if (!$match.Success) { return $false }
+  return [string]::Equals(
+    (Normalize-ComparableWindowsPath $match.Groups['config'].Value),
+    (Normalize-ComparableWindowsPath $ExpectedConfig),
+    [StringComparison]::OrdinalIgnoreCase
+  )
+}
+
 function Assert-SourceAndArtifacts {
   Assert-GitHash $ExpectedAppGitSha "ExpectedAppGitSha"
   Assert-GitHash $ExpectedAppGitTree "ExpectedAppGitTree"
@@ -174,8 +188,20 @@ function Assert-SourceAndArtifacts {
   if ($LASTEXITCODE -ne 0) {
     throw "Windows candidate nvpn version command failed"
   }
-  if ($VerboseVersion -notmatch [regex]::Escape("(rev $($ExpectedFipsGitSha.Substring(0, 10)))")) {
-    throw "Windows nvpn binary does not contain the expected FIPS revision"
+  # The host validates registry checksums/package VCS and the installer receipt
+  # before providing this binding. Recheck the actual artifact on every action.
+  $VersionLines = @($VerboseVersion -split "`r?`n" | Where-Object { $_.StartsWith('fips_core_version:') })
+  $PlainVersion = "fips_core_version: $ExpectedFipsVersion"
+  $RevisedVersion = "$PlainVersion (rev $($ExpectedFipsGitSha.Substring(0, 10)))"
+  if (
+    $VerifiedCliSha256 -notmatch '^[0-9a-f]{64}$' -or
+    (Get-Sha256 $CliExe) -ne $VerifiedCliSha256 -or
+    (Get-Item -LiteralPath $CliExe).Length -ne $VerifiedCliSize -or
+    $VersionLines.Count -ne 1 -or
+    $VersionLines[0] -cne $VerifiedFipsRuntimeVersion -or
+    $VerifiedFipsRuntimeVersion -cnotin @($PlainVersion, $RevisedVersion)
+  ) {
+    throw "Windows runtime differs from host-verified artifact/registry provenance"
   }
   $AppVersion = $ShortVersion -replace '^nvpn\s+', ''
   if ($AppVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$') {
@@ -337,18 +363,9 @@ switch ($Mode) {
         [string]$Service.PathName,
         '^"(?<binary>[^"]+)"(?<arguments> .*)$'
       )
-      $ConfigArgument = [regex]::Match(
-        $Command.Groups['arguments'].Value,
-        '^ daemon --service --config "(?<config>[^"]+)" --iface "(?<iface>[^"]+)" --mesh-refresh-interval-secs (?<refresh>[1-9][0-9]*)\s*$'
-      )
       if (
         !$Command.Success -or
-        !$ConfigArgument.Success -or
-        ![string]::Equals(
-          (Normalize-ComparableWindowsPath $ConfigArgument.Groups['config'].Value),
-          (Normalize-ComparableWindowsPath $Config),
-          [System.StringComparison]::OrdinalIgnoreCase
-        )
+        !(Test-OwnedServiceConfig ([string]$Service.PathName) $Config)
       ) {
         throw "refusing to remove a Windows service outside this candidate profile"
       }

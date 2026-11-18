@@ -32,11 +32,13 @@ thread_local! {
 }
 
 type AppRef = Rc<RefCell<AppModel>>;
+type LiveUpdate = Rc<dyn Fn(&NativeAppState)>;
 
 #[derive(Clone, Default)]
 struct AppRuntime {
     model: Rc<RefCell<Option<AppRef>>>,
     pending_urls: Rc<RefCell<Vec<String>>>,
+    pending_files: Rc<RefCell<Vec<PathBuf>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +179,7 @@ struct AppModel {
     header_status_dot: gtk::Box,
     header_vpn_switch: gtk::Switch,
     selected_device_pubkey: Option<String>,
+    focused_transfer_id: Option<String>,
     drafts: Drafts,
     notice: String,
     tray: tray::TrayRuntime,
@@ -191,6 +194,7 @@ struct AppModel {
     allow_close: bool,
     service_settling: bool,
     render_pending: bool,
+    live_updates: Vec<LiveUpdate>,
     manual_join_expanded: bool,
     diagnostics_expanded: bool,
 }
@@ -244,6 +248,7 @@ impl AppModel {
             header_status_dot,
             header_vpn_switch,
             selected_device_pubkey: None,
+            focused_transfer_id: None,
             drafts,
             notice: String::new(),
             tray,
@@ -258,6 +263,7 @@ impl AppModel {
             allow_close: false,
             service_settling: false,
             render_pending: false,
+            live_updates: Vec::new(),
             manual_join_expanded: false,
             diagnostics_expanded,
         }
@@ -269,6 +275,7 @@ include!("main/core_worker.rs");
 include!("main/runtime_events.rs");
 include!("main/shell.rs");
 include!("main/devices_page.rs");
+include!("main/file_transfers.rs");
 include!("main/share_page.rs");
 include!("main/exit_nodes_page.rs");
 include!("main/paid_routes_page.rs");

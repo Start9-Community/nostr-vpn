@@ -5,6 +5,8 @@
   import CopyButton from './lib/CopyButton.svelte';
   import Modal from './lib/Modal.svelte';
   import QRCode from './lib/QRCode.svelte';
+  import FileSend from './lib/FileSend.svelte';
+  import FileTransfers from './lib/FileTransfers.svelte';
   import { formatBytes, nonEmpty, shortMiddle } from './lib/format';
   import nostrVpnIcon from './lib/nostr-vpn-icon.svg';
   import type {
@@ -31,6 +33,9 @@
   let refreshing = false;
   let busyAction = '';
   let error = '';
+  let refreshError = '';
+  let stateRequest = 0;
+  let acceptedStateRequest = 0;
   let notice = '';
   let joinRequestQr = '';
   let joinerInput = '';
@@ -174,7 +179,7 @@
     shownNetworkId = preferredNetworkId(next, shownNetworkId);
     state = next;
     loading = false;
-    error = '';
+    refreshError = '';
     if (firstState || !settingsDirty) {
       syncSettings(next);
     }
@@ -266,20 +271,30 @@
     if (busyAction) {
       return;
     }
+    const request = ++stateRequest;
     refreshing = showSpinner;
     try {
-      applyState(await tick());
+      const next = await tick();
+      if (request < acceptedStateRequest) return;
+      acceptedStateRequest = request;
+      applyState(next);
     } catch (err) {
-      error = messageOf(err);
+      if (request < acceptedStateRequest) return;
+      acceptedStateRequest = request;
+      refreshError = messageOf(err);
       loading = false;
     } finally {
-      refreshing = false;
+      if (request === acceptedStateRequest) refreshing = false;
     }
   }
 
   async function runState(endpoint: string, payload?: unknown, label = 'Working'): Promise<UiState | null> {
+    // Invalidate earlier polls as soon as an action starts, including on failure.
+    acceptedStateRequest = ++stateRequest;
+    refreshing = false;
     busyAction = label;
     error = '';
+    refreshError = '';
     try {
       const next = await runAction(endpoint, payload);
       applyState(next);
@@ -775,6 +790,7 @@
   }
 
   async function saveSettings() {
+    const submittedDraft = { ...settingsDraft };
     const listenPort = Number(settingsDraft.listenPort);
     if (!Number.isInteger(listenPort) || listenPort <= 0 || listenPort > 65535) {
       error = 'Listen port must be between 1 and 65535';
@@ -822,7 +838,9 @@
       },
       'Saving settings',
     );
-    if (ok && state) {
+    if (ok && state && Object.entries(submittedDraft).every(
+      ([key, value]) => settingsDraft[key as keyof typeof settingsDraft] === value,
+    )) {
       settingsDirty = false;
       syncSettings(state);
     }
@@ -861,12 +879,13 @@
   }
 
   async function saveWireGuardExitConfig() {
+    const submittedConfig = wireguardExitConfigDraft;
     const ok = await run(
       '/api/update_settings',
-      { wireguardExitConfig: wireguardExitConfigDraft },
+      { wireguardExitConfig: submittedConfig },
       'Saving WireGuard',
     );
-    if (ok && state) {
+    if (ok && state && wireguardExitConfigDraft === submittedConfig) {
       wireguardDirty = false;
       syncWireGuard(state);
     }
@@ -878,8 +897,12 @@
     if (!file) {
       return;
     }
+    const draftBeforeRead = wireguardExitConfigDraft;
     try {
       const config = await file.text();
+      if (wireguardExitConfigDraft !== draftBeforeRead || input.files?.[0] !== file) {
+        return;
+      }
       if (!config.trim()) {
         error = 'Selected WireGuard config is empty.';
         return;
@@ -890,7 +913,7 @@
     } catch (err) {
       error = messageOf(err);
     } finally {
-      input.value = '';
+      if (input.files?.[0] === file) input.value = '';
     }
   }
 
@@ -993,12 +1016,12 @@
     {#if loading}
       <div class="center-state">Loading control panel</div>
     {:else if !state}
-      <div class="center-state error-state">{error || 'Control panel unavailable'}</div>
+      <div class="center-state error-state">{error || refreshError || 'Control panel unavailable'}</div>
     {:else}
-      {#if error || notice || busyAction || refreshing}
-        <div class="notice-row" class:error={Boolean(error)}>
-          {#if error}
-            {error}
+      {#if error || refreshError || notice || busyAction || refreshing}
+        <div class="notice-row" class:error={Boolean(error || refreshError)}>
+          {#if error || refreshError}
+            {error || refreshError}
           {:else if busyAction}
             {busyAction}
           {:else if notice}
@@ -1175,6 +1198,7 @@
       {/if}
 
       {#if tab === 'devices'}
+        <FileTransfers connected={state.vpnActive} transfers={state.fileTransfers ?? []} onChanged={() => refresh(false)} />
         <section
           class="devices-layout"
           class:showing-detail={devicePane === 'detail' && Boolean(selectedParticipant)}
@@ -1316,6 +1340,11 @@
                     <span>{deviceDetailStatusText(selectedParticipant)}</span>
                   </div>
                 </header>
+
+                {#if !isSelf(selectedParticipant)}
+                  {#if !state.vpnActive}<p class="muted-copy">Connect VPN to send files.</p>{/if}
+                  <FileSend npub={selectedParticipant.npub} disabled={!state.vpnActive || !shownNetwork.enabled || !selectedParticipant.reachable} onChanged={() => refresh(false)} />
+                {/if}
 
                 {#if shownNetwork.localIsAdmin}
                   <div class="detail-surface">

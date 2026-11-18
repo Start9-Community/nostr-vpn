@@ -100,6 +100,14 @@ impl SharedSpilmanClientStoreLock {
                 store_path,
                 _file: file,
             })),
+            #[cfg(windows)]
+            Err(error)
+                if nonblocking
+                    && error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+            {
+                Ok(None)
+            }
+            #[cfg(not(windows))]
             Err(error) if nonblocking && error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(format!(
                 "failed to lock Spilman client store {}: {error}",
@@ -579,6 +587,9 @@ fn write_cashu_spilman_sender_key(
 #[cfg(feature = "spilman-wallet")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamingRouteOpenCashuSpilmanChannelFromTokenRequest {
+    /// Immutable encoding agreed before funding; omitted legacy requests retain v1.
+    #[serde(default)]
+    pub output_version: cdk_spilman::ChannelOutputVersion,
     pub token: String,
     pub receiver_pubkey_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -696,14 +707,17 @@ where
     let receiver_pubkey_hex = normalize_spilman_receiver_pubkey_hex(&request.receiver_pubkey_hex);
     let unit = StreamingRouteCashuUnit::parse(&request.unit)?;
     let opened = bridge
-        .open_channel_from_token_async(
+        .open_channel_from_token_async_with_output_version(
             &request.token,
             &receiver_pubkey_hex,
             &sender_pubkey_hex,
             request.expiry_unix,
             &request.keyset_info_json,
             request.max_amount_per_output,
-            request.route_capacity_sat.map(|capacity| unit.capacity_from_sat(capacity)),
+            request
+                .route_capacity_sat
+                .map(|capacity| unit.capacity_from_sat(capacity)),
+            request.output_version,
             async_networking,
         )
         .await?;
@@ -752,6 +766,13 @@ fn funding_matches_open_request(
 ) -> Result<bool, String> {
     let params: serde_json::Value = serde_json::from_str(&funding.params_json)
         .map_err(|error| format!("failed to decode stored Spilman channel parameters: {error}"))?;
+    let output_version = match params.get("output_version") {
+        None => cdk_spilman::ChannelOutputVersion::Legacy,
+        Some(value) => {
+            serde_json::from_value::<cdk_spilman::ChannelOutputVersion>(value.clone())
+                .map_err(|error| format!("invalid stored channel output version: {error}"))?
+        }
+    };
     let unit = params
         .get("unit")
         .and_then(serde_json::Value::as_str)
@@ -775,7 +796,9 @@ fn funding_matches_open_request(
     let Some(route_capacity_sat) = request.route_capacity_sat else {
         return Ok(false);
     };
-    if normalized_spilman_mint_url(&funding.mint_url) != normalized_spilman_mint_url(route_mint_url)
+    if output_version != request.output_version
+        || normalized_spilman_mint_url(&funding.mint_url)
+            != normalized_spilman_mint_url(route_mint_url)
         || unit.as_str() != request.unit.trim().to_ascii_lowercase()
         || unit.capacity_to_sat(funding.capacity) != route_capacity_sat
         || normalize_spilman_receiver_pubkey_hex(receiver)

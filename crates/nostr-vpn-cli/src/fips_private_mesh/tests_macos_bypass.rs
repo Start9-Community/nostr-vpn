@@ -2,13 +2,26 @@
 fn macos_endpoint_bypass_keeps_connected_peers_on_link() {
     let mut lan = netdev::Interface::dummy();
     lan.name = "en0".to_string();
+    lan.flags = libc::IFF_UP as u32;
     lan.ipv4 = vec![
         "192.0.2.10/25".parse().unwrap(),
         "192.168.50.10/24".parse().unwrap(),
     ];
     let mut other = netdev::Interface::dummy();
     other.name = "en7".to_string();
+    other.flags = libc::IFF_UP as u32;
     other.ipv4 = vec!["198.51.100.10/24".parse().unwrap()];
+    let mut bridge = netdev::Interface::dummy();
+    bridge.name = "bridge100".to_string();
+    bridge.flags = libc::IFF_UP as u32;
+    bridge.ipv4 = vec!["203.0.113.1/25".parse().unwrap()];
+    let mut down = netdev::Interface::dummy();
+    down.name = "en8".to_string();
+    down.ipv4 = vec!["203.0.113.129/25".parse().unwrap()];
+    let mut tunnel = netdev::Interface::dummy();
+    tunnel.name = "utun4".to_string();
+    tunnel.flags = (libc::IFF_UP | libc::IFF_POINTOPOINT) as u32;
+    tunnel.ipv4 = vec!["0.0.0.0/0".parse().unwrap()];
     let underlay = crate::MacosRouteSpec {
         gateway: Some("192.0.2.1".to_string()),
         interface: lan.name.clone(),
@@ -21,13 +34,14 @@ fn macos_endpoint_bypass_keeps_connected_peers_on_link() {
         "192.0.2.1",
         "192.168.50.20",
         "198.51.100.8",
+        "203.0.113.5",
+        "203.0.113.200",
         "10.20.30.40",
     ]
     .map(|host| host.parse().unwrap());
     let desired = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(
         &hosts,
-        Some(&underlay),
-        &[lan, other],
+        &[lan, other, bridge, down, tunnel],
     );
     let mut routes = Vec::new();
     let mut cached_underlay = None;
@@ -49,9 +63,9 @@ fn macos_endpoint_bypass_keeps_connected_peers_on_link() {
         vec![
             ("10.20.30.40/32".to_string(), underlay.gateway.clone()),
             ("192.0.2.200/32".to_string(), underlay.gateway.clone()),
-            ("198.51.100.8/32".to_string(), underlay.gateway.clone()),
+            ("203.0.113.200/32".to_string(), underlay.gateway.clone()),
         ],
-        "loopback rendezvous and connected peers must retain their local paths"
+        "live LANs and bridges keep local paths; down and tunnel interfaces need bypasses"
     );
 }
 
@@ -67,11 +81,11 @@ fn macos_endpoint_bypass_handoff_uses_the_new_connected_prefixes_and_old_ownersh
     };
     let mut interface = netdev::Interface::dummy();
     interface.name = new_underlay.interface.clone();
+    interface.flags = libc::IFF_UP as u32;
     interface.ipv4 = vec!["198.51.100.10/24".parse().unwrap()];
     let hosts = ["192.0.2.20", "198.51.100.8", "10.20.30.40"].map(|host| host.parse().unwrap());
     let desired = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(
         &hosts,
-        Some(&new_underlay),
         &[interface],
     );
     let old_routes = vec![
@@ -120,17 +134,17 @@ fn macos_endpoint_bypass_withdraws_a_newly_connected_peer_without_repinning_it()
         gateway: Some("192.0.2.1".to_string()),
         interface: "en0".to_string(),
     };
-    // An address/prefix change can make a former off-link endpoint local
-    // without changing the selected interface or its default gateway.
+    // A new bridge can make a former off-link endpoint local without changing
+    // the selected internet interface or its default gateway.
     let mut interface = netdev::Interface::dummy();
-    interface.name = underlay.interface.clone();
+    interface.name = "bridge100".to_string();
+    interface.flags = libc::IFF_UP as u32;
     interface.ipv4 = vec![
         "192.0.2.10/24".parse().unwrap(),
         "198.51.100.10/24".parse().unwrap(),
     ];
     let desired = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(
         &["198.51.100.8".parse().unwrap()],
-        Some(&underlay),
         &[interface],
     );
     assert!(desired.is_empty());

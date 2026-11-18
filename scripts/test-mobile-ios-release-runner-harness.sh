@@ -94,13 +94,31 @@ assert "--list_bundle_id" in sys.argv and "--json" in sys.argv
 assert "--key=CFBundleIdentifier,CFBundleVersion,CFBundleShortVersionString,ApplicationType,ProfileValidated,SignerIdentity,NVPNBuildGitSha" in sys.argv
 with open(os.environ["NVPN_TEST_USB_INVENTORY_LOG"], "a") as log:
     log.write(" ".join(sys.argv[1:]) + "\n")
+failure = os.environ.get("NVPN_TEST_USB_INVENTORY_ERROR", "")
+if failure == "command-failure":
+    raise SystemExit(1)
+if failure == "invalid-json":
+    print("invalid inventory")
+    raise SystemExit(0)
 apps = {}
 for bundle, build, version in (
     ("fi.siriusbusiness.nvpn", "4001008", "4.1.5"),
     ("fi.siriusbusiness.nvpn.UITests.xctrunner", "1", os.environ.get("NVPN_TEST_USB_RUNNER_VERSION", "1.0")),
 ):
-    apps[bundle] = {"CFBundleIdentifier": bundle, "CFBundleVersion": build, "CFBundleShortVersionString": version}
-print(json.dumps({"Event": "ListBundleId", "Apps": apps}))
+    apps[bundle] = {
+        "CFBundleIdentifier": bundle, "CFBundleVersion": build,
+        "CFBundleShortVersionString": version, "ApplicationType": "User",
+        "ProfileValidated": True, "SignerIdentity": "Fixture Distribution",
+        "NVPNBuildGitSha": "a" * 40,
+    }
+runner = "fi.siriusbusiness.nvpn.UITests.xctrunner"
+if failure == "missing-runner":
+    del apps[runner]
+elif failure == "wrong-runner":
+    apps[runner]["CFBundleIdentifier"] = "another.runner"
+elif failure == "invalid-runner-version":
+    apps[runner]["CFBundleVersion"] = "1\tunexpected"
+print(json.dumps({"Event": "Unexpected" if failure == "invalid-event" else "ListBundleId", "Apps": apps}))
 USB_FIXTURE
 chmod +x "$TEMP_ROOT/bin/ios-deploy"
 export PATH="$TEMP_ROOT/bin:$PATH"
@@ -147,6 +165,7 @@ chmod +x "$TEMP_ROOT/bin/ideviceinfo"
   NVPN_IOS_CODE_SIGN_IDENTITY=fixture-signer
   NVPN_IOS_PROVISIONING_PROFILE_UUID=fixture-app-profile
   NVPN_IOS_PACKET_TUNNEL_PROVISIONING_PROFILE_UUID=fixture-tunnel-profile
+  NVPN_IOS_SHARE_FILES_PROVISIONING_PROFILE_UUID=fixture-share-profile
   NVPN_BUILD_GIT_SHA=fixture-source
   NVPN_BUILD_TIMESTAMP_UTC=fixture-time
   ios_release_network_xcode_command
@@ -257,6 +276,37 @@ run_installed_reuse_readback() (
 
 run_installed_reuse_readback 1.0 \
   || fail "exact installed iOS app and runner readback was rejected"
+[[ "$(wc -l <"$reuse_inventory_log" | tr -d '[:space:]')" -eq 1 ]] \
+  || fail "app and runner readback opened more than one USB inventory connection"
+python3 - "$TEMP_ROOT/reuse/installed-app.json" \
+  "$TEMP_ROOT/reuse/installed-runner.json" <<'PY'
+import hashlib, json, sys
+app, runner = [json.load(open(path)) for path in sys.argv[1:]]
+assert app["inventorySha256"] == runner["inventorySha256"]
+assert app["selectedPhysicalDeviceIdentifierSha256"] == runner["selectedPhysicalDeviceIdentifierSha256"]
+for item in (app, runner):
+    assert item["provider"] == "apple-installation-proxy-usb"
+    assert item["selectedPhysicalDeviceIdentifierSha256"] == hashlib.sha256(b"fixture-device").hexdigest()
+    assert item["signerIdentitySha256"] == hashlib.sha256(b"Fixture Distribution").hexdigest()
+    assert item["appGitSha"] == "a" * 40
+    assert item["profileValidated"] is True
+    assert item["applicationType"] == "User"
+PY
+for failure in command-failure invalid-json invalid-event missing-runner wrong-runner invalid-runner-version; do
+  printf 'stale app\n' >"$TEMP_ROOT/reuse/installed-app.json"
+  printf 'stale runner\n' >"$TEMP_ROOT/reuse/installed-runner.json"
+  inventory_calls="$(wc -l <"$reuse_inventory_log" | tr -d '[:space:]')"
+  if NVPN_TEST_USB_INVENTORY_ERROR="$failure" run_installed_reuse_readback 1.0 \
+      >"$TEMP_ROOT/reuse-$failure.log" 2>&1
+  then
+    fail "batch USB readback accepted $failure"
+  fi
+  [[ ! -e "$TEMP_ROOT/reuse/installed-app.json" \
+    && ! -e "$TEMP_ROOT/reuse/installed-runner.json" ]] \
+    || fail "failed batch USB readback retained partial or stale receipts"
+  [[ "$(wc -l <"$reuse_inventory_log" | tr -d '[:space:]')" -eq $((inventory_calls + 1)) ]] \
+    || fail "batch USB readback retried or reused stale inventory"
+done
 if run_installed_reuse_readback 2.0 \
     >"$TEMP_ROOT/reuse-mismatch.log" 2>&1
 then
@@ -338,6 +388,61 @@ fi
 grep -Fq 'requires exact artifact reuse' "$TEMP_ROOT/reuse-required.log" \
   || fail "disabled iOS install mode did not fail closed"
 unset NVPN_MOBILE_WG_EXIT_INSTALL_IOS NVPN_MOBILE_WG_EXIT_REUSE_IOS_BUILD
+
+metadata_fixture="$TEMP_ROOT/reuse-metadata"
+mkdir -p "$metadata_fixture/derived/Build/Products/Release-iphoneos/NostrVpnIosUITests-Runner.app" \
+  "$metadata_fixture/fips"
+printf '{}\n' >"$metadata_fixture/plan.xctestrun"
+printf '{"fips":"sealed"}\n' >"$metadata_fixture/linkage.json"
+python3 - "$metadata_fixture" <<'PY'
+import hashlib, json, pathlib, sys
+
+root = pathlib.Path(sys.argv[1])
+metadata = root / "linkage.json"
+receipt = {
+    "fipsCargoMetadataReceiptSha256": hashlib.sha256(metadata.read_bytes()).hexdigest(),
+    "fipsCargoMetadataReceiptPathSha256": hashlib.sha256(str(metadata.resolve()).encode()).hexdigest(),
+    "fipsCheckoutPathSha256": hashlib.sha256(str((root / "fips").resolve()).encode()).hexdigest(),
+}
+(root / "valid.json").write_text(json.dumps(receipt))
+receipt["fipsCargoMetadataReceiptSha256"] = "0" * 64
+(root / "changed.json").write_text(json.dumps(receipt))
+(root / "relocated.json").write_bytes(metadata.read_bytes())
+PY
+run_reuse_metadata_preflight() (
+  NVPN_MOBILE_IOS_RELEASE_APP_PATH="$reuse_app"
+  NVPN_MOBILE_IOS_RELEASE_DERIVED_DATA="$metadata_fixture/derived"
+  NVPN_MOBILE_IOS_RELEASE_XCTESTRUN="$metadata_fixture/plan.xctestrun"
+  NVPN_MOBILE_IOS_REUSE_RECEIPT="$1"
+  NVPN_MOBILE_IOS_RELEASE_RUNNER_RECEIPT="$reuse_runner_receipt"
+  NVPN_MOBILE_IOS_RELEASE_RUNNER_TREE_SHA256="$reuse_runner_tree"
+  NVPN_EXPECTED_APP_GIT_SHA="$(printf '%040d' 1)"
+  NVPN_EXPECTED_FIPS_GIT_SHA="$(printf '%040d' 2)"
+  NVPN_IOS_FIPS_METADATA_RECEIPT="$2"
+  NVPN_FIPS_REPO_PATH="$metadata_fixture/fips"
+  ios_release_network_reused_app_sha() { return 86; }
+  ios_release_network_resolve_device() { fail "metadata preflight contacted a phone"; }
+  ios_release_network_prepare_reuse fixture-device
+)
+metadata_status=0
+run_reuse_metadata_preflight "$metadata_fixture/valid.json" \
+  "$metadata_fixture/linkage.json" >"$metadata_fixture/valid.log" 2>&1 \
+  || metadata_status=$?
+[[ "$metadata_status" -eq 86 ]] || fail "valid sealed metadata did not reach source validation"
+for metadata_case in missing changed relocated; do
+  metadata_receipt="$metadata_fixture/valid.json"
+  metadata_path="$metadata_fixture/linkage.json"
+  case "$metadata_case" in
+    missing) metadata_path="$metadata_fixture/missing.json" ;;
+    changed) metadata_receipt="$metadata_fixture/changed.json" ;;
+    relocated) metadata_path="$metadata_fixture/relocated.json" ;;
+  esac
+  metadata_status=0
+  run_reuse_metadata_preflight "$metadata_receipt" "$metadata_path" \
+    >"$metadata_fixture/$metadata_case.log" 2>&1 || metadata_status=$?
+  [[ "$metadata_status" -eq 1 ]] \
+    || fail "$metadata_case FIPS metadata reached source/device preparation"
+done
 
 for stem in nvpn-installed-release nvpn-release-installed NostrVpnIos-case.xctestrun; do
   first="$(mktemp "$TEMP_ROOT/$stem.XXXXXX")"

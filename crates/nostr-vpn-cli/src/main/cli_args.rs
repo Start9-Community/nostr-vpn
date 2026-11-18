@@ -40,6 +40,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Command {
+    /// Send, receive, resume, and inspect files over the private mesh.
+    File(FileArgs),
     /// Initialize a local config file (keys are generated automatically).
     Init {
         #[arg(long)]
@@ -72,15 +74,20 @@ enum Command {
     Pause(ControlArgs),
     /// Resume VPN networking on a running daemon.
     Resume(ControlArgs),
-    /// Run a FIPS private mesh session from config.
+    /// Run a foreground FIPS private mesh session from config.
+    ///
+    /// `nvpn status` cannot observe this session. For status and health checks,
+    /// use `nvpn start --daemon --connect` instead.
     Connect(ConnectArgs),
     /// Connect for device approval and show this device's join-request link and QR.
     #[command(name = "join-request")]
     JoinRequest(JoinRequestArgs),
+    /// Inspect and explicitly approve device join requests as a network admin.
+    JoinRequests(join_approval::JoinRequestsArgs),
     /// Join with an admin Device ID and Network ID exchanged out of band.
     #[command(name = "join-manual", alias = "manual-join")]
     JoinManual(ManualJoinArgs),
-    /// Show local and discovered peer status.
+    /// Show daemon status, or configured peers when no live daemon state is available.
     Status(StatusArgs),
     /// Update persisted node/network settings.
     Set(SetArgs),
@@ -137,6 +144,9 @@ struct JoinRequestArgs {
     /// nvpn configuration containing the device identity and approval state.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Print the link and reachability as JSON, without waiting for approval.
+    #[arg(long)]
+    json: bool,
     /// Print the request and reachability without connecting or waiting for approval.
     #[arg(long)]
     no_wait: bool,

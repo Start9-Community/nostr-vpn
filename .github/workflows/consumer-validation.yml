@@ -1,0 +1,128 @@
+name: Consumer validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/*-consumer']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: consumer-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  peer-control:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: consumer-peer-control
+          cache-bin: false
+      - name: Verify CLI routing and peer control
+        shell: bash
+        run: |
+          mkdir -p validation
+          cargo test --locked -p nvpn platform_routing 2>&1 | tee validation/platform-routing.log
+          cargo test --locked -p nvpn install_cli_ 2>&1 | tee validation/cli-install.log
+          cargo test --locked -p nostr-vpn-core --lib --features control-pubsub,updater \
+            -- --test-threads=1 fips_control_tcp::tests control_pubsub_runtime \
+            2>&1 | tee validation/peer-control.log
+          cargo test --locked -p nostr-vpn-core --test fips_public_transit \
+            local_mixed_transit_prefers_udp_and_recovers_from_websocket_fallback \
+            2>&1 | tee validation/local-transit.log
+          grep -E 'test .*platform_routing.* \.\.\. ok$' validation/platform-routing.log
+          grep -F 'test result: ok. 2 passed; 0 failed;' validation/cli-install.log
+          grep -E 'test .*fips_control_tcp::tests.* \.\.\. ok$' validation/peer-control.log
+          grep -E 'test .*control_pubsub_runtime.* \.\.\. ok$' validation/peer-control.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' validation/local-transit.log
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: peer-control-${{ github.sha }}
+          path: validation
+          retention-days: 7
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: aarch64-linux-android
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14.3
+      - name: Install Android Rust build tools
+        run: |
+          cargo install cargo-ndk --version 4.1.2 --locked
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;28.2.13676358'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: consumer-android
+          cache-bin: false
+      - name: Build Android debug app
+        shell: bash
+        run: |
+          mkdir -p validation
+          tools/run-android build --no-daemon --max-workers=2 2>&1 | tee validation/android.log
+          git diff --exit-code -- Cargo.toml Cargo.lock linux/Cargo.lock
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: android-${{ github.sha }}
+          path: validation
+          retention-days: 7
+
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - name: Prepare iOS build tools
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcrun simctl list devices available --json | python3 -c \
+            'import json,sys; print("NVPN_IOS_SIMULATOR_NAME=" + next(d["name"] for devices in json.load(sys.stdin)["devices"].values() for d in devices if d["name"].startswith("iPhone")))' >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: consumer-ios
+          cache-bin: false
+      - name: Build iOS device and simulator app
+        shell: bash
+        run: |
+          mkdir -p validation
+          tools/run-ios build 2>&1 | tee validation/ios.log
+          git diff --exit-code -- Cargo.toml Cargo.lock linux/Cargo.lock
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ios-${{ github.sha }}
+          path: validation
+          retention-days: 7

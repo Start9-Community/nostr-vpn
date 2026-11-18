@@ -1,5 +1,6 @@
 fn build_devices_page(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
     build_network_hero(app, page, state);
+    build_file_transfers(app, page, state);
 
     if !state.error.trim().is_empty() {
         let card = card();
@@ -379,6 +380,27 @@ fn device_detail_card(
     detail.append(&header);
 
     let participant_is_self = is_self(&participant, state);
+    if !participant_is_self {
+        let send = icon_text_button("Send files", "document-send-symbolic");
+        send.set_sensitive(state.vpn_active && network.enabled && participant.reachable);
+        send.set_tooltip_text(Some(if state.vpn_active { "Send files to this device" } else { "Connect VPN to send files" }));
+        let app = app.clone();
+        let npub = participant.npub.clone();
+        let send_app = app.clone();
+        send.connect_clicked(move |button| choose_transfer_files(&send_app, button, npub.clone()));
+        detail.append(&send);
+        if state.vpn_active && network.enabled && participant.reachable {
+            let drop = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY);
+            let app = app.clone();
+            let npub = participant.npub.clone();
+            drop.connect_drop(move |_, value, _, _| {
+                let Ok(files) = value.get::<gtk::gdk::FileList>() else { return false; };
+                let paths: Option<Vec<_>> = files.files().iter().map(|file| file.path()).collect();
+                if let Some(paths) = paths { stage_transfer_files(&app, npub.clone(), paths); true } else { false }
+            });
+            detail.add_controller(drop);
+        }
+    }
     if network.local_is_admin {
         let manage = gtk::Box::new(gtk::Orientation::Vertical, 10);
         section_header(&manage, "Manage Device", "changes-allow-symbolic");
@@ -532,6 +554,24 @@ fn device_detail_card(
         ("Received", format_bytes(participant.rx_bytes)),
     ] {
         let item = metric(title, &value);
+        let network_id = network.id.clone();
+        let key = participant_key(&participant);
+        let label = item.last_child().unwrap().downcast::<gtk::Label>().unwrap();
+        bind_live_label(app, &label, move |state| {
+            let participant = state.networks.iter()
+                .find(|network| network.id == network_id)
+                .and_then(|network| network.participants.iter().find(|peer| participant_key(peer) == key));
+            participant.map(|participant| match title {
+                "Role" => device_role_text(participant, state),
+                "State" => device_status_text(participant),
+                "FIPS path" => fips_path_text(participant),
+                "Address hints" => non_empty_or(&participant.fips_endpoint_hints.join(", "), "-"),
+                "Last seen" => non_empty_or(&participant.last_seen_text, "-"),
+                "Sent" => format_bytes(participant.tx_bytes),
+                "Received" => format_bytes(participant.rx_bytes),
+                _ => unreachable!(),
+            }).unwrap_or_default()
+        });
         metrics.insert(&item, -1);
     }
     connectivity.append(&metrics);
@@ -549,7 +589,7 @@ fn device_detail_card(
     detail
 }
 
-fn build_network_hero(_app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
+fn build_network_hero(app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
     let hero = card();
     hero.add_css_class("nvpn-hero");
 
@@ -588,6 +628,7 @@ fn build_network_hero(_app: &AppRef, page: &gtk::Box, state: &NativeAppState) {
     text.append(&title_row);
 
     let subtitle = gtk::Label::new(Some(&hero_subtitle(state)));
+    bind_live_label(app, &subtitle, hero_subtitle);
     subtitle.add_css_class("dim-label");
     subtitle.set_xalign(0.0);
     subtitle.set_wrap(true);

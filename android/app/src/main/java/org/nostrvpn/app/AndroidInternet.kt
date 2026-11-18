@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -159,21 +158,6 @@ internal fun androidx.compose.foundation.lazy.LazyListScope.internetPage(
         }
     } else if (state.internetSource == "paid_manual" || manualExitChooserOpen) {
         item { PaidRouteMarketCard(state, dispatch, PaidRouteCardMode.Market) }
-    }
-    item {
-        AppCard {
-            Text("Share Internet", style = MaterialTheme.typography.titleMedium)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(
-                    checked = state.advertiseExitNode,
-                    onCheckedChange = { enabled ->
-                        dispatch(NativeActions.updateSettings("advertiseExitNode" to enabled))
-                    },
-                )
-                val name = network?.name?.ifBlank { null } ?: "this network"
-                Text("Share internet with $name")
-            }
-        }
     }
     if (state.internetSource == "wireguard") {
         item { WireGuardSettingsCard(state, dispatch, importWireGuardConfigFile) }

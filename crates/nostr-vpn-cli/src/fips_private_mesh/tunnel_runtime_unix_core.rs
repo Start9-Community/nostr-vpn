@@ -55,9 +55,9 @@ impl FipsPrivateTunnelRuntime {
         ensure_linux_tun_permissions(&config.iface)?;
         #[cfg(feature = "paid-exit")]
         mesh.set_paid_route_accounting_peers(config.paid_route_accounting_peers.clone())?;
-        let control_pubsub = crate::control_pubsub_runtime::ControlPubsubFipsRuntime::start_for_peers_with_advert_app(
+        let control_pubsub = crate::control_pubsub_runtime::ControlPubsubFipsRuntime::start_for_peers_with_endpoint_config(
             Arc::clone(mesh.endpoint()),
-            &mesh.nostr_advert_app,
+            &mesh.pubsub_endpoint_config,
             config.nostr_pubsub.clone(),
             config.nostr_relays.clone(),
             Some(config.control_pubsub_store_path.clone()),
@@ -69,6 +69,10 @@ impl FipsPrivateTunnelRuntime {
         )
         .await?;
         let state_control = FipsControlTcpRuntime::start(Arc::clone(mesh.endpoint())).await?;
+        let file_transfers = nostr_vpn_core::file_transfers::FileTransferService::start(
+            Arc::clone(mesh.endpoint()),
+            cleanup_journal_config_path.to_path_buf(),
+        );
         let tun = Arc::new(
             SystemTun::new(&config.iface)
                 .with_context(|| fips_tun_create_context(&config.iface))?
@@ -90,6 +94,7 @@ impl FipsPrivateTunnelRuntime {
             mesh,
             control_pubsub,
             state_control,
+            file_transfers,
             secure_dns: None,
             pending_paid_exit_dns: None,
             manages_secure_dns: true,
@@ -356,6 +361,7 @@ impl FipsPrivateTunnelRuntime {
         if let Some(control_pubsub) = runtime.control_pubsub.take() {
             control_pubsub.stop().await;
         }
+        drop(runtime.file_transfers);
         runtime.state_control.stop().await;
         runtime.event_rx.close();
         if let Some(worker) = runtime.tun_send_worker.take() {
@@ -594,7 +600,6 @@ impl FipsPrivateTunnelRuntime {
         let interfaces = netdev::get_interfaces();
         let routes = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(
             &hosts,
-            self.endpoint_bypass_underlay.as_ref(),
             &interfaces,
         );
         let force_underlay_refresh = self.macos_underlay_refresh_pending
@@ -647,7 +652,6 @@ impl FipsPrivateTunnelRuntime {
         };
         let routes = crate::macos_network::macos_endpoint_bypass_targets_for_hosts(
             &hosts,
-            underlay.as_ref(),
             &interfaces,
         );
         self.reconcile_macos_endpoint_bypass_routes(

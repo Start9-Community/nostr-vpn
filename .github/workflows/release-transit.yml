@@ -1,95 +1,214 @@
-name: Release transit regressions
+name: NVPN 4.1.19 hosted release checks
 
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/nvpn-dns-packet-evidence]
-    paths: [.github/workflows/release-transit.yml]
+    inputs:
+      lane:
+        description: Hosted app checks, package preflight, FIPS checks, or both
+        type: choice
+        default: both
+        options: [both, hosted, fips, ingress, package]
+      app_commit:
+        description: Exact application commit
+        type: string
+        default: 5c1b2f0606f18387ace32f5712dde9b63a274620
+      app_tree:
+        description: Exact application tree
+        type: string
+        default: bc66adf87c8f0a8fe8cb1df4ccc3b4462e369335
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-transit-${{ github.ref }}
+  group: nvpn-hosted-release-${{ inputs.app_commit }}-${{ inputs.lane }}
   cancel-in-progress: false
 
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_TERM_COLOR: never
+  RUSTUP_TOOLCHAIN: 1.95.0
+
 jobs:
-  transit:
+  hosted:
+    if: inputs.lane == 'both' || inputs.lane == 'hosted' || inputs.lane == 'package'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 100
     env:
-      CARGO_BUILD_JOBS: 2
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: never
-      RUSTUP_TOOLCHAIN: 1.95.0
+      EXPECTED_APP_COMMIT: ${{ inputs.app_commit }}
+      EXPECTED_APP_TREE: ${{ inputs.app_tree }}
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/checkout@v6
         with:
-          repository: mmalmi/fips
-          ref: 12a7b154fa2fe8e86483c51ac10708501e50cdfe
-          path: .release-fips
+          ref: ${{ inputs.app_commit }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
-      - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+      - uses: docker/setup-buildx-action@v3
+      - name: Install native test dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config ripgrep
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: true
+          cache-on-failure: true
+      - name: Bind frozen source and toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/hosted-4119
+          [[ "$EXPECTED_APP_COMMIT" =~ ^[0-9a-f]{40}$ && "$EXPECTED_APP_TREE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_APP_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_APP_TREE"
+          test -z "$(git status --porcelain)"
+          { git rev-parse HEAD 'HEAD^{tree}'; rustc -Vv; cargo -V; node --version; docker version; df -h .; } > artifacts/hosted-4119/inputs.txt
+      - name: Prepare browser checks before expensive compilation
+        if: inputs.lane != 'package'
+        run: |
+          pnpm --dir web/control-panel install --frozen-lockfile
+          pnpm --dir web/control-panel exec playwright install --with-deps chromium
+      - name: Record reviewed binding-generator maintenance advisory
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "$CARGO_HOME/audit.toml"
+          # RUSTSEC-2026-0374 is informational=unmaintained, with no vulnerability
+          # in the advisory. basic-toml 0.1.10 is reached through Askama's derive
+          # macro in UniFFI 0.29.5 and parses build-time askama.toml configuration.
+          # It is not the VPN runtime TOML parser. Retire this exact exception
+          # when upgrading UniFFI/Askama removes basic-toml from the lockfiles.
+          # https://rustsec.org/advisories/RUSTSEC-2026-0374.html
+          cat > "$CARGO_HOME/audit.toml" <<'POLICY'
+          [advisories]
+          ignore = ["RUSTSEC-2026-0374"]
+          POLICY
+          cp "$CARGO_HOME/audit.toml" artifacts/hosted-4119/reviewed-audit-policy.toml
+          sha256sum "$CARGO_HOME/audit.toml" >> artifacts/hosted-4119/inputs.txt
+      - name: Run canonical hosted release gate
+        if: inputs.lane != 'package'
+        shell: bash
+        env:
+          NVPN_RELEASE_GATE_LOG_DIR: ${{ github.workspace }}/artifacts/hosted-4119/gate
+        run: |
+          set -euo pipefail
+          ./scripts/release-gate.sh --hosted 2>&1 | tee artifacts/hosted-4119/hosted.log
+      - name: Verify packages before native release builds
+        if: inputs.lane == 'package'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/publish.sh --dry-run 2>&1 | tee artifacts/hosted-4119/package.log
+          sha256sum target/package/*.crate > artifacts/hosted-4119/package-sha256.txt
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: nvpn-4119-hosted-${{ inputs.app_commit }}
+          path: |
+            artifacts/hosted-4119
+            artifacts/release-gate-state
+            artifacts/web-startos-manual-join
+            artifacts/umbrel-web
+            artifacts/umbrel-auth-join
+            target/package/*.crate
+          retention-days: 14
+          if-no-files-found: error
+
+  fips:
+    if: inputs.lane == 'both' || inputs.lane == 'fips'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: mmalmi/fips
+          ref: a8b12740c0391646bbff258b58b4597c2a9df2b0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
           cache-on-failure: true
-      - name: Record exact source and compiler
+      - name: Install native FIPS dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - name: Bind exact FIPS source
         shell: bash
         run: |
-          mkdir -p work/release-transit
-          {
-            printf 'nvpn_commit=%s\n' "$(git rev-parse HEAD)"
-            printf 'nvpn_tree=%s\n' "$(git rev-parse 'HEAD^{tree}')"
-            printf 'fips_commit=%s\n' "$(git -C .release-fips rev-parse HEAD)"
-            printf 'fips_tree=%s\n' "$(git -C .release-fips rev-parse 'HEAD^{tree}')"
-            rustc -Vv
-            cargo -V
-          } > work/release-transit/inputs.txt
-          python3 - <<'PY'
-          import pathlib, tomllib
-          lock = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
-          packages = {p['name']: p for p in lock['package']}
-          for name, crate in (
-              ('nvpn-fips-core', 'fips-core'),
-              ('nvpn-fips-endpoint', 'fips-endpoint'),
-              ('nvpn-fips-identity', 'fips-identity'),
-          ):
-              manifest = pathlib.Path('.release-fips/crates') / crate / 'Cargo.toml'
-              version = tomllib.loads(manifest.read_text())['package']['version']
-              assert packages[name]['version'] == version, name
-          PY
-      - name: Exercise nvpn TCP transit under client churn
+          set -euo pipefail
+          mkdir -p artifacts/hosted-4119
+          test "$(git rev-parse HEAD)" = a8b12740c0391646bbff258b58b4597c2a9df2b0
+          test "$(git rev-parse 'HEAD^{tree}')" = 5652f155da308ddf6701eedec986b0ebb332b6a5
+          { git rev-parse HEAD 'HEAD^{tree}'; rustc -Vv; cargo -V; } > artifacts/hosted-4119/inputs.txt
+      - name: Run release FIPS regressions and client compatibility
         shell: bash
         run: |
-          set -o pipefail
-          cargo test --locked -p nostr-vpn-core --test fips_public_transit \
-            local_two_seed_fips_tcp_transit_survives_client_churn \
-            -- --ignored --exact --test-threads=1 --nocapture \
-            2>&1 | tee work/release-transit/nvpn.log
-          grep -F 'test local_two_seed_fips_tcp_transit_survives_client_churn ...' work/release-transit/nvpn.log
-          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' work/release-transit/nvpn.log
-      - name: Exercise FIPS persistent WebSocket transit under client churn
-        if: ${{ !cancelled() }}
+          set -euo pipefail
+          for filter in overlay_adverts update_peers test_reply_learned_moves_configured_static_direct_peer_when_session_degraded traversal_path_liveness_keeps_mobile_safe_floor poll_nostr_discovery_configured_only_drops_nonconfigured_handoff fresh_control_with_unreturned_endpoint_data_keeps_direct_without_fallback_peer outbound_fmp_send_does_not_refresh_direct_path_liveness initiate_reply_learned_keeps_configured_transit_inside_fanout_budget forward_reply_learned_keeps_configured_transit_inside_fanout_budget client_only_negotiation_retains_router_behavior_for_legacy_neighbors; do
+            cargo test --locked -p nvpn-fips-core "$filter" -- --test-threads=1 --nocapture 2>&1 | tee "artifacts/hosted-4119/$filter.log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "artifacts/hosted-4119/$filter.log"
+          done
+      - name: Verify persistent WebSocket transit under churn
         shell: bash
         run: |
-          set -o pipefail
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
-            cargo test --locked --manifest-path .release-fips/Cargo.toml \
-            -p nvpn-fips-core --test public_websocket_transit \
-            persistent_two_seed_websocket_transit_survives_client_churn \
-            -- --exact --nocapture \
-            2>&1 | tee work/release-transit/fips.log
-          grep -F 'test persistent_two_seed_websocket_transit_survives_client_churn ...' work/release-transit/fips.log
-          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' work/release-transit/fips.log
+          set -euo pipefail
+          cargo test --locked -p nvpn-fips-core --test public_websocket_transit persistent_two_seed_websocket_transit_survives_client_churn -- --exact --nocapture 2>&1 | tee artifacts/hosted-4119/transit.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/hosted-4119/transit.log
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: release-transit-${{ github.sha }}
-          path: work/release-transit
-          retention-days: 7
+          name: fips-110-release-regressions-a8b1274
+          path: artifacts/hosted-4119
+          retention-days: 14
+          if-no-files-found: error
+
+  ingress:
+    if: inputs.lane == 'ingress'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXPECTED_APP_COMMIT: ${{ inputs.app_commit }}
+      EXPECTED_APP_TREE: ${{ inputs.app_tree }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.app_commit }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hosted
+          cache-bin: true
+          cache-on-failure: true
+      - name: Install native test dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - name: Verify bounded relay ingress over real WebSockets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/relay-ingress
+          [[ "$EXPECTED_APP_COMMIT" =~ ^[0-9a-f]{40}$ && "$EXPECTED_APP_TREE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_APP_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_APP_TREE"
+          test -z "$(git status --porcelain)"
+          { git rev-parse HEAD 'HEAD^{tree}'; rustc -Vv; cargo -V; } > artifacts/relay-ingress/inputs.txt
+          cargo test --locked -p nostr-vpn-core --features updater,control-pubsub --lib relay_ingress -- --nocapture --test-threads=1 2>&1 | tee artifacts/relay-ingress/tests.log
+          grep -F 'test result: ok. 2 passed; 0 failed;' artifacts/relay-ingress/tests.log
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: relay-ingress-${{ inputs.app_commit }}
+          path: artifacts/relay-ingress
+          retention-days: 14
           if-no-files-found: error

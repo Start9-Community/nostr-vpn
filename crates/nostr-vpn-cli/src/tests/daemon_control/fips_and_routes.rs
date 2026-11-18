@@ -128,7 +128,7 @@ fn fips_runtime_state_counts_direct_roster_and_other_peers() {
         },
     ];
 
-    let state = crate::build_daemon_runtime_state(crate::DaemonRuntimeStateInput {
+    let input = crate::DaemonRuntimeStateInput {
         app: &config,
         vpn_enabled: true,
         vpn_active: true,
@@ -141,7 +141,15 @@ fn fips_runtime_state_counts_direct_roster_and_other_peers() {
         vpn_status: "VPN on",
         network: &nostr_vpn_core::diagnostics::NetworkSummary::default(),
         port_mapping: &nostr_vpn_core::diagnostics::PortMappingStatus::default(),
-    });
+    };
+    let state = crate::build_daemon_runtime_state(input);
+    assert_eq!(state.vpn_status, "Waiting for paid exit route");
+    assert!(!state.health.iter().any(|issue| issue.code.starts_with("exit_node.")));
+    let mut routed = tunnel_runtime.clone();
+    routed.tunnel_exit_peer = Some(other_peer.clone());
+    let active = crate::build_daemon_runtime_state(crate::DaemonRuntimeStateInput { tunnel_runtime: &routed, ..input });
+    assert_eq!(active.vpn_status, "Paid exit route installed");
+    assert!(!active.health.iter().any(|issue| issue.code.starts_with("exit_node.")));
 
     assert_eq!(state.connected_peer_count, 2);
     assert_eq!(state.fips_direct_roster_peer_count, 1);
@@ -331,7 +339,7 @@ fn macos_paid_exit_endpoint_bypass_targets_are_deterministic_host_routes() {
     ];
 
     assert_eq!(
-        crate::macos_network::macos_endpoint_bypass_targets_for_hosts(&hosts, None, &[]),
+        crate::macos_network::macos_endpoint_bypass_targets_for_hosts(&hosts, &[]),
         vec!["203.0.113.7/32", "65.109.48.91/32"]
     );
 }

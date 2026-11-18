@@ -317,7 +317,7 @@ fn daemon_log_compaction_leaves_small_log_untouched() {
 }
 
 #[test]
-fn daemon_log_compaction_keeps_line_aligned_tail() {
+fn daemon_log_compaction_archives_history_without_replaying_old_events() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock is after epoch")
@@ -334,8 +334,9 @@ fn daemon_log_compaction_keeps_line_aligned_tail() {
     let compacted = fs::read_to_string(&log_path).expect("read compacted daemon log");
     assert!(compacted.starts_with("[nvpn] daemon log compacted at "));
     assert!(!compacted.contains("old-0"));
-    assert!(!compacted.contains("keep-1"));
-    assert!(compacted.ends_with("keep-2\n"));
+    assert!(!compacted.contains("keep-"));
+    let archived = fs::read_to_string(dir.join("daemon.log.1")).unwrap();
+    assert_eq!(archived, "keep-2\n");
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -494,6 +495,9 @@ fn corrupt_network_cleanup_ownership_remains_fail_closed() {
     fs::create_dir_all(cleanup_path.parent().expect("cleanup parent"))
         .expect("create cleanup parent");
     fs::write(&cleanup_path, b"{not-valid-json").expect("write corrupt cleanup ownership");
+    #[cfg(target_os = "linux")]
+    fs::set_permissions(&cleanup_path, fs::Permissions::from_mode(0o600))
+        .expect("make the corrupt snapshot privately owned");
 
     let error = read_daemon_network_cleanup_state(&cleanup_path)
         .expect_err("unreadable cleanup ownership must block repair/startup");

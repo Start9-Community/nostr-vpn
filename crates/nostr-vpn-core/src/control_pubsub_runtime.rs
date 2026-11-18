@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(not(target_os = "macos"))]
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::{NostrPubsubConfig, NostrPubsubMode};
@@ -17,21 +17,20 @@ use crate::paid_routes::{PAID_ROUTE_OFFER_TTL_SECS, SignedPaidRouteOffer};
 use crate::updater::{UpdateEventCache, configured_update_ref};
 use anyhow::{Context, Result, anyhow};
 use fips_core::FipsEndpoint;
-#[cfg(feature = "updater")]
 use nostr_pubsub::MatchEventOptions;
 use nostr_pubsub::{
-    EventBus, EventSource, MeshPeerPolicy, NostrEventSubscriber, NostrEventSubscription,
-    NostrPubsubRouter, PolicyDecision, QueryEvent, RouterPublishSource, SourceRoute, VerifiedEvent,
+    EventBus, EventSource, MeshPeerPolicy, NostrEventSubscription, NostrPubsubRouter,
+    PolicyDecision, QueryEvent, RouterPublishSource, SourceRoute, VerifiedEvent,
 };
 use nostr_pubsub_fips::{
-    FipsPubsubClient, FipsPubsubClientOptions, FipsPubsubPolicy, FipsPubsubPolicyOptions,
-    FipsPubsubSubscription,
+    FipsPubsubClient, FipsPubsubClientOptions, FipsPubsubClientPolicies, FipsPubsubPolicy,
+    FipsPubsubPolicyOptions, FipsPubsubSubscription,
 };
 use nostr_pubsub_relay::RelayEventBus;
 use nostr_pubsub_social_graph::{PEER_RATING_MAX_AGE, PEER_RATING_MAX_FUTURE_SKEW};
 #[cfg(test)]
 use nostr_sdk::prelude::Keys;
-use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey};
+use nostr_sdk::prelude::{Client, Event, EventId, Filter, Kind, PublicKey};
 use nostr_social_memory::rating_from_event;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -107,6 +106,7 @@ impl ControlPubsubFipsRuntime {
             #[cfg(feature = "updater")]
             None,
             relay_advert_filters(None, target_peer_npubs),
+            MAX_PUBSUB_PEERS,
         )
         .await
     }
@@ -130,6 +130,31 @@ impl ControlPubsubFipsRuntime {
             #[cfg(feature = "updater")]
             None,
             relay_advert_filters(Some(nostr_advert_app), target_peer_npubs),
+            MAX_PUBSUB_PEERS,
+        )
+        .await
+    }
+
+    /// Use the endpoint's configured peer bound, including public bootstrap
+    /// listeners, instead of silently selecting only 64 of its admitted peers.
+    pub async fn start_for_peers_with_endpoint_config(
+        endpoint: Arc<FipsEndpoint>,
+        endpoint_config: &ControlPubsubEndpointConfig,
+        config: NostrPubsubConfig,
+        relays: Vec<String>,
+        store_path: Option<PathBuf>,
+        target_peer_npubs: &[String],
+    ) -> Result<Option<Self>> {
+        Self::start_inner(
+            endpoint,
+            config,
+            relays,
+            store_path,
+            None,
+            #[cfg(feature = "updater")]
+            None,
+            relay_advert_filters(Some(&endpoint_config.advert_app), target_peer_npubs),
+            endpoint_config.max_connected_peers,
         )
         .await
     }
@@ -150,6 +175,7 @@ impl ControlPubsubFipsRuntime {
             #[cfg(feature = "updater")]
             None,
             relay_advert_filters(None, &[]),
+            MAX_PUBSUB_PEERS,
         )
         .await
     }
@@ -172,10 +198,13 @@ impl ControlPubsubFipsRuntime {
             #[cfg(feature = "updater")]
             None,
             relay_advert_filters(Some(nostr_advert_app), &[]),
+            MAX_PUBSUB_PEERS,
         )
         .await
     }
 
+    // The optional updater cache adds the eighth input to this private startup path.
+    #[allow(clippy::too_many_arguments)]
     async fn start_inner(
         endpoint: Arc<FipsEndpoint>,
         config: NostrPubsubConfig,
@@ -184,6 +213,7 @@ impl ControlPubsubFipsRuntime {
         peer_policy: Option<Arc<dyn MeshPeerPolicy>>,
         #[cfg(feature = "updater")] update_events_override: Option<UpdateEventCache>,
         advert_filters: Vec<Filter>,
+        max_connected_peers: usize,
     ) -> Result<Option<Self>> {
         if config.mode == NostrPubsubMode::Off {
             return Ok(None);
@@ -219,12 +249,15 @@ impl ControlPubsubFipsRuntime {
         let peer_policy = peer_policy.unwrap_or_else(|| pubsub_policy.peer_policy());
         let pubsub_policy = Arc::new(Mutex::new(pubsub_policy));
 
-        let max_event_bytes = config.max_event_bytes.min(CONTROL_PUBSUB_MAX_EVENT_BYTES);
         let fips_pubsub = Arc::new(
-            FipsPubsubClient::start_with_policy(
+            FipsPubsubClient::start_with_policies(
                 Arc::clone(&endpoint),
-                fips_pubsub_options(max_event_bytes, config.max_hops),
-                Arc::clone(&event_policy),
+                fips_pubsub_options(&config, max_connected_peers),
+                FipsPubsubClientPolicies {
+                    peers: Some(Arc::clone(&peer_policy)),
+                    events: Some(Arc::clone(&event_policy)),
+                    ..FipsPubsubClientPolicies::default()
+                },
             )
             .await
             .context("failed to bind standard FIPS Nostr pubsub service")?,
@@ -256,6 +289,10 @@ impl ControlPubsubFipsRuntime {
         }
 
         let events = Arc::new(Mutex::new(event_store));
+        fips_pubsub.set_replay_source(Some(Arc::new(ControlEventReplay {
+            events: Arc::clone(&events),
+            policy: Arc::clone(&pubsub_policy),
+        })))?;
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task_events = Arc::clone(&events);
@@ -299,25 +336,6 @@ impl ControlPubsubFipsRuntime {
             client.shutdown().await;
         }
     }
-}
-
-fn fips_pubsub_options(max_event_bytes: usize, max_hops: u8) -> FipsPubsubClientOptions {
-    FipsPubsubClientOptions {
-        max_frame_bytes: max_event_bytes
-            .saturating_add(4 * 1_024)
-            .min(CONTROL_PUBSUB_MAX_WIRE_BYTES),
-        max_connected_peers: MAX_PUBSUB_PEERS,
-        max_replay_events: FIPS_REPLAY_LIMIT,
-        receive_batch_size: 64,
-        max_hops,
-        ..FipsPubsubClientOptions::default()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ControlRelayStatus {
-    pub url: String,
-    pub status: String,
 }
 
 impl ControlPubsubClient {
@@ -580,6 +598,8 @@ async fn run(
             }
         }
     }
+    // Join provider tasks and drop their service receiver before stop() returns.
+    fips_pubsub.shutdown_shared().await;
     if let Err(error) = flush_control_events(&events).await {
         tracing::warn!(%error, "failed to flush control pubsub cache on shutdown");
     }
@@ -880,17 +900,8 @@ fn should_create_fips_subscription(subscription_exists: bool, connected_peer_cou
 
 include!("control_pubsub_runtime/subscriptions.rs");
 
-fn bounded_fips_replay(mut events: Vec<Event>, peer_ratings: &Filter) -> Vec<Event> {
-    // Old caches can contain ratings collected by the former unscoped request.
-    // Filter those before the replay cap so they neither consume bandwidth nor
-    // displace the owner's useful records after an upgrade.
-    let rating_filters = rating_subscription_filters(peer_ratings, FIPS_REPLAY_LIMIT);
-    events.retain(|event| {
-        event.kind != Kind::Custom(RATING_FACT_KIND)
-            || rating_filters
-                .iter()
-                .any(|filter| filter.match_event(event, nostr_pubsub::MatchEventOptions::new()))
-    });
+fn bounded_fips_replay(events: Vec<Event>, peer_ratings: &Filter) -> Vec<Event> {
+    let mut events = scoped_fips_replay(events, peer_ratings);
     let drop_count = events.len().saturating_sub(FIPS_REPLAY_LIMIT);
     events.drain(..drop_count);
     events
@@ -962,10 +973,17 @@ async fn relay_notification(relay: &mut Option<RelayProvider>) -> Option<QueryEv
     let Some(relay) = relay.as_mut() else {
         return std::future::pending().await;
     };
-    relay.notifications.recv().await
+    let delivery = relay.notifications.recv().await?;
+    relay
+        .queued_events
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&(delivery.event.as_event().id, delivery.source.clone()));
+    Some(delivery)
 }
 
 include!("control_pubsub_runtime/outbox.rs");
+include!("control_pubsub_runtime/transport.rs");
 include!("control_pubsub_runtime/exit_ratings.rs");
 #[cfg(feature = "paid-exit")]
 include!("control_pubsub_runtime/provider_profiles.rs");
