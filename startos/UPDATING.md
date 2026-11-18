@@ -70,5 +70,8 @@ the existing exceptions below.
   tests support this packaging integration.
 - `crates/nostr-vpn-cli/src/config_bootstrap.rs` carries a Linux cfg-tail lint
   correction required by CI's pinned Clippy. Retire it when upstream includes it.
+- `crates/nostr-vpn-core/tests/paid_provider_purchase.rs` makes the mint-trust
+  purchase fixture require payment before routing. Retire it when upstream
+  distinguishes that fixture from free-trial coverage.
 
 Prefer upstream releases or upstream contributions over additional fork delta.
