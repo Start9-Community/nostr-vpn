@@ -201,12 +201,12 @@ behavior rather than an edge case.
 Two displayed readiness checks. Both are real readiness probes rather than
 process-presence checks.
 
-| Check                    | Displayed       | Method                                         |
-| ------------------------ | --------------- | ---------------------------------------------- |
-| `daemon`                 | "Mesh daemon"   | `nvpn status` exit code                        |
-| `control-panel`          | undisplayed     | `nvpn-web` is listening on its loopback port   |
-| `control-panel-listener` | "Control Panel" | the eth0 listener on port 38080 is accepting   |
-| `mesh-status`            | undisplayed     | always green; it is a writer loop              |
+| Check                    | Displayed       | Method                                       |
+| ------------------------ | --------------- | -------------------------------------------- |
+| `daemon`                 | "Mesh daemon"   | `nvpn status` exit code                      |
+| `control-panel`          | undisplayed     | `nvpn-web` is listening on its loopback port |
+| `control-panel-listener` | "Control Panel" | the eth0 listener on port 38080 is accepting |
+| `mesh-status`            | undisplayed     | always green; it is a writer loop            |
 
 A failing **Mesh daemon** check means the daemon is not answering its control
 socket — the process is gone, or it never got far enough to open the socket.
