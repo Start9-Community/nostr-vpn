@@ -64,6 +64,11 @@ verified, tried, and decided belongs in the commit message and the PR body.
   address dies silently. `SO_BINDTODEVICE` plus the interface-index supervisor
   in `main.ts` is what survives that — don't simplify either away.
 
+- **Never bind `nvpn-web` to eth0's address.** The panel stays on loopback
+  behind the `SO_BINDTODEVICE=eth0` listener in `main.ts`: `utun100` shares the
+  network namespace, so an address bind still accepts a packet a mesh peer
+  routes to that address, past the proxy's auth.
+
 - **Both share actions must call `syncExportedUrls` after writing.** Init's
   reactive read of `exposures.json` / `mesh-status.json` does not re-fire the
   url-v0 export when those files change, so without the explicit call a share

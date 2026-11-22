@@ -3,6 +3,9 @@ import { sdk } from './sdk'
 
 export const controlPanelPort = 38080
 
+/** Loopback port `nvpn-web` listens on, behind the eth0-only listener on `controlPanelPort`. */
+export const controlPanelBackendPort = 38081
+
 export const controlPanelUsername = 'admin'
 
 export const meshStatusPath = '/data/mesh-status.json'
