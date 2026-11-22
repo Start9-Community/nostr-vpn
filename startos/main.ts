@@ -6,9 +6,9 @@ import { sdk } from './sdk'
 import {
   bridgeHost,
   configPath,
-  controlPanelBackendPort,
   controlPanelPort,
   dataMount,
+  findControlPanelBackendPort,
   hostFor,
   meshStatusPath,
 } from './utils'
@@ -25,6 +25,9 @@ export const main = sdk.setupMain(async ({ effects }) => {
   // Reactive: sharing or unsharing a service rewrites this list, which re-runs
   // main and rebuilds the forwarder set.
   const shared = (await exposures.read((e) => e.exposures).const(effects)) ?? []
+  const controlPanelBackendPort = findControlPanelBackendPort(
+    shared.map((e) => e.meshPort),
+  )
 
   const daemonSub = sdk.SubContainer.of(
     effects,

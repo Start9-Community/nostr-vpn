@@ -127,9 +127,11 @@ password from `store.json`, so an unauthenticated request is rejected before it
 reaches the container. Until that password is set the auth gate is `null` — which
 is why the package refuses to start without one.
 
-**`nvpn-web` listens on loopback only, at `127.0.0.1:38081`.** The proxy reaches it
-through a `socat` listener on port 38080 that is bound with `SO_BINDTODEVICE` to
-`eth0`, so it accepts only connections arriving over the LXC bridge. The daemon's
+**`nvpn-web` listens on loopback only.** Its internal port is selected from the
+highest TCP port downward, excluding port 38080 and every configured mesh share.
+The selection re-runs whenever shares change; existing share ports are preserved.
+The proxy reaches it through a `socat` listener on port 38080 bound with
+`SO_BINDTODEVICE` to `eth0`, so it accepts only connections arriving over the LXC bridge. The daemon's
 `utun100` shares the container's network namespace, so a socket bound to eth0's
 address alone would still accept a packet a mesh peer routes to that address —
 for example through a node acting as an exit. `nvpn-web` runs with
@@ -202,7 +204,7 @@ process-presence checks.
 | Check                    | Displayed       | Method                                         |
 | ------------------------ | --------------- | ---------------------------------------------- |
 | `daemon`                 | "Mesh daemon"   | `nvpn status` exit code                        |
-| `control-panel`          | undisplayed     | `nvpn-web` is listening on loopback port 38081 |
+| `control-panel`          | undisplayed     | `nvpn-web` is listening on its loopback port   |
 | `control-panel-listener` | "Control Panel" | the eth0 listener on port 38080 is accepting   |
 | `mesh-status`            | undisplayed     | always green; it is a writer loop              |
 
