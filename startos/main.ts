@@ -8,6 +8,7 @@ import {
   configPath,
   controlPanelPort,
   dataMount,
+  findControlPanelBackendPort,
   hostFor,
   meshStatusPath,
 } from './utils'
@@ -24,6 +25,9 @@ export const main = sdk.setupMain(async ({ effects }) => {
   // Reactive: sharing or unsharing a service rewrites this list, which re-runs
   // main and rebuilds the forwarder set.
   const shared = (await exposures.read((e) => e.exposures).const(effects)) ?? []
+  const controlPanelBackendPort = findControlPanelBackendPort(
+    shared.map((e) => e.meshPort),
+  )
 
   const daemonSub = sdk.SubContainer.of(
     effects,
@@ -70,18 +74,21 @@ export const main = sdk.setupMain(async ({ effects }) => {
     requires: ['prepare-data'],
   })
 
+  // The panel itself listens on loopback only. The daemon's utun100 shares this
+  // network namespace, so a socket bound to eth0's address would still accept a
+  // packet a mesh peer routes to that address. The listener in front is bound to
+  // eth0 with SO_BINDTODEVICE, so only connections arriving on eth0 (the StartOS
+  // proxy) reach it.
   daemons = daemons.addDaemon('control-panel' as never, {
     subcontainer: controlPanelSub,
     exec: {
       command: [
-        'sh',
-        '-ec',
-        [
-          // A wildcard bind would publish the panel over the daemon's utun100 to every mesh peer.
-          'bind_ip="$(ip -4 -o addr show dev eth0 scope global | awk \'{ split($4, a, "/"); print a[1]; exit }\')"',
-          'test -n "$bind_ip"',
-          `exec /usr/local/bin/nvpn-web --listen "$bind_ip:${controlPanelPort}" --behind-trusted-proxy --config ${configPath}`,
-        ].join('\n'),
+        '/usr/local/bin/nvpn-web',
+        '--listen',
+        `127.0.0.1:${controlPanelBackendPort}`,
+        '--behind-trusted-proxy',
+        '--config',
+        configPath,
       ],
       env: {
         ...commonEnv,
@@ -91,6 +98,26 @@ export const main = sdk.setupMain(async ({ effects }) => {
       },
     },
     ready: {
+      display: null,
+      fn: () =>
+        sdk.healthCheck.checkPortListening(effects, controlPanelBackendPort, {
+          successMessage: i18n('The control panel is ready'),
+          errorMessage: i18n('The control panel is not ready'),
+        }),
+    },
+    requires: ['daemon'],
+  })
+
+  daemons = daemons.addDaemon('control-panel-listener' as never, {
+    subcontainer: controlPanelSub,
+    exec: {
+      command: [
+        'socat',
+        `TCP4-LISTEN:${controlPanelPort},so-bindtodevice=eth0,fork,reuseaddr`,
+        `TCP4:127.0.0.1:${controlPanelBackendPort}`,
+      ],
+    },
+    ready: {
       display: i18n('Control Panel'),
       fn: () =>
         sdk.healthCheck.checkPortListening(effects, controlPanelPort, {
@@ -98,7 +125,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
           errorMessage: i18n('The control panel is not ready'),
         }),
     },
-    requires: ['daemon'],
+    requires: ['control-panel'],
   })
 
   // The url-v0 exports need this node's mesh address, which only the daemon

@@ -3,6 +3,15 @@ import { sdk } from './sdk'
 
 export const controlPanelPort = 38080
 
+// Loopback sockets conflict with wildcard mesh listeners even when those bind utun100.
+export const findControlPanelBackendPort = (meshPorts: number[]) => {
+  const unavailable = new Set([controlPanelPort, ...meshPorts])
+  for (let port = 65535; port > 0; port--) {
+    if (!unavailable.has(port)) return port
+  }
+  throw new Error('No TCP port is available for the control panel.')
+}
+
 export const controlPanelUsername = 'admin'
 
 export const meshStatusPath = '/data/mesh-status.json'

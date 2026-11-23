@@ -55,7 +55,7 @@ control panel as two separate daemons rather than one process.
 | Subcontainer              | Purpose                                            |
 | ------------------------- | -------------------------------------------------- |
 | `nostr-vpn-daemon`        | the `daemon` mesh process — the one to `attach` to |
-| `nostr-vpn-control-panel` | the `control-panel` web process                    |
+| `nostr-vpn-control-panel` | the `control-panel` web process and its listener   |
 
 Both subcontainers mount the same `main` volume, which is how the panel reads the
 daemon's state. A `prepare-data` oneshot runs as root before either daemon and
@@ -127,6 +127,16 @@ password from `store.json`, so an unauthenticated request is rejected before it
 reaches the container. Until that password is set the auth gate is `null` — which
 is why the package refuses to start without one.
 
+**`nvpn-web` listens on loopback only.** Its internal port is selected from the
+highest TCP port downward, excluding port 38080 and every configured mesh share.
+The selection re-runs whenever shares change; existing share ports are preserved.
+The proxy reaches it through a `socat` listener on port 38080 bound with
+`SO_BINDTODEVICE` to `eth0`, so it accepts only connections arriving over the LXC bridge. The daemon's
+`utun100` shares the container's network namespace, so a socket bound to eth0's
+address alone would still accept a packet a mesh peer routes to that address —
+for example through a node acting as an exit. `nvpn-web` runs with
+`--behind-trusted-proxy` because it must accept the proxy's `Host` header.
+
 ## Installation and First-Run Flow
 
 Install raises a critical task and the service will not start until it is
@@ -188,22 +198,25 @@ behavior rather than an edge case.
 
 ## Health Checks
 
-Two readiness checks, one per daemon. Both are real readiness probes rather than
+Two displayed readiness checks. Both are real readiness probes rather than
 process-presence checks.
 
-| Check           | Displayed       | Method                              |
-| --------------- | --------------- | ----------------------------------- |
-| `daemon`        | "Mesh daemon"   | `nvpn status` exit code             |
-| `control-panel` | "Control Panel" | port 38080 is accepting connections |
-| `mesh-status`   | undisplayed     | always green; it is a writer loop   |
+| Check                    | Displayed       | Method                                       |
+| ------------------------ | --------------- | -------------------------------------------- |
+| `daemon`                 | "Mesh daemon"   | `nvpn status` exit code                      |
+| `control-panel`          | undisplayed     | `nvpn-web` is listening on its loopback port |
+| `control-panel-listener` | "Control Panel" | the eth0 listener on port 38080 is accepting |
+| `mesh-status`            | undisplayed     | always green; it is a writer loop            |
 
 A failing **Mesh daemon** check means the daemon is not answering its control
 socket — the process is gone, or it never got far enough to open the socket.
 Deliberately, it does not require peers, so it stays green on a node whose mesh
 has no other devices on it yet.
 
-A failing **Control Panel** check means the web process is not listening. Because
-it is ordered behind the daemon, it will also be down whenever the daemon is.
+A failing **Control Panel** check means the eth0 listener is not up, which also
+happens whenever `nvpn-web` is not listening, since the listener is ordered behind
+it. Both are ordered behind the daemon, so the check is also down whenever the
+daemon is.
 
 ## Backups and Restore
 

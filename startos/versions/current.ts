@@ -1,18 +1,18 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '4.1.18:0',
+  version: '4.1.18:1',
   releaseNotes: {
     en_US:
-      'Updated Nostr VPN to 4.1.18, which improves peer discovery, network joining and paid Internet connections.',
+      'The control panel is now reachable only through the addresses StartOS gives it, never directly from devices on the mesh.',
     es_ES:
-      'Nostr VPN se actualizó a 4.1.18, que mejora el descubrimiento de pares, la incorporación a redes y las conexiones a Internet de pago.',
+      'El panel de control ahora solo es accesible a través de las direcciones que le asigna StartOS, nunca directamente desde los dispositivos de la malla.',
     de_DE:
-      'Nostr VPN wurde auf 4.1.18 aktualisiert, das die Peer-Erkennung, den Netzwerkbeitritt und kostenpflichtige Internetverbindungen verbessert.',
+      'Die Steuerungskonsole ist jetzt nur noch über die Adressen erreichbar, die StartOS ihr zuweist, nie direkt von Geräten im Mesh.',
     pl_PL:
-      'Zaktualizowano Nostr VPN do wersji 4.1.18, która usprawnia wykrywanie węzłów, dołączanie do sieci i płatne połączenia z Internetem.',
+      'Panel sterowania jest teraz dostępny wyłącznie pod adresami nadanymi mu przez StartOS, nigdy bezpośrednio z urządzeń w sieci mesh.',
     fr_FR:
-      "Nostr VPN est mis à jour vers 4.1.18, qui améliore la découverte des pairs, l'adhésion aux réseaux et les connexions Internet payantes.",
+      "Le panneau de configuration n'est désormais accessible que par les adresses que StartOS lui attribue, jamais directement depuis les appareils du maillage.",
   },
   migrations: {
     up: async () => {},
